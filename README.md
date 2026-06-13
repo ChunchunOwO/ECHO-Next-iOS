@@ -6,6 +6,8 @@ This project determined to provide a iPhone-side ECHO Link client. It is intenti
 
 **Here is ECHO Project >> "github/Moekotori/ECHO"**
 
+#This project is just to prove the feasibility of IPA development.#
+
 ## What Works First
 
 - Paste a desktop pairing URI such as `echo://pair?host=192.168.1.12&port=26789&token=...`.
