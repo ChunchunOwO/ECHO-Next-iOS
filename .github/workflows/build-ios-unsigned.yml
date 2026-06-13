@@ -1,0 +1,36 @@
+name: Build iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "app.ios/**"
+      - ".github/workflows/build-ios-unsigned.yml"
+
+jobs:
+  build:
+    name: Build unsigned IPA for sideloading
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: app.ios/package-lock.json
+
+      - name: Build unsigned IPA
+        working-directory: app.ios
+        run: bash scripts/build-unsigned-ipa-for-sideloadly.sh
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ECHO-iPhone-unsigned-ipa
+          path: app.ios/build/ios-unsigned/ECHO-iPhone-unsigned.ipa
+          if-no-files-found: error
