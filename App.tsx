@@ -2,7 +2,6 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState, type Erro
 import {
   Alert,
   GestureResponderEvent,
-  Image,
   KeyboardAvoidingView,
   LayoutChangeEvent,
   Platform,
@@ -16,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { Image as ExpoImage } from 'expo-image';
 import {
   createEchoLinkClient,
   EchoLinkHttpError,
@@ -221,6 +221,8 @@ function EchoLinkApp(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [playlistOpen, setPlaylistOpen] = useState(false);
+  const [repeatOneEnabled, setRepeatOneEnabled] = useState(false);
+  const [lyricsVisible, setLyricsVisible] = useState(false);
   const [playbackOutputMode, setPlaybackOutputMode] = useState<PlaybackOutputMode>('pc');
   const [phoneTrack, setPhoneTrack] = useState<EchoLinkTrackPreview | null>(null);
   const [phoneAudioBusy, setPhoneAudioBusy] = useState(false);
@@ -229,16 +231,37 @@ function EchoLinkApp(): ReactElement {
   const [phoneSeekPreviewMs, setPhoneSeekPreviewMs] = useState<number | null>(null);
   const [progressTrackWidth, setProgressTrackWidth] = useState(0);
   const [volumeTrackWidth, setVolumeTrackWidth] = useState(0);
+  const [failedArtworkUrls, setFailedArtworkUrls] = useState<Set<string>>(() => new Set());
   const statusPollInFlight = useRef(false);
   const sliderInteractionInFlight = useRef(false);
   const latestStatusRef = useRef<EchoLinkStatusResponse | null>(null);
   const pendingPcSeekRef = useRef<PendingPcSeek | null>(null);
+  const pcRepeatArmedRef = useRef(true);
+  const phoneRepeatArmedRef = useRef(true);
 
   const client = useMemo(() => (
     connection.host.trim() && connection.token.trim()
       ? createEchoLinkClient(connection)
       : null
   ), [connection]);
+
+  const markArtworkUrlFailed = useCallback((url: string | null | undefined) => {
+    if (!url) {
+      return;
+    }
+    setFailedArtworkUrls((current) => {
+      if (current.has(url)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(url);
+      return next;
+    });
+  }, []);
+
+  const artworkUrlIsVisible = useCallback((url: string | null | undefined): url is string => (
+    Boolean(url && !failedArtworkUrls.has(url))
+  ), [failedArtworkUrls]);
 
   const applyStatus = useCallback((nextStatus: EchoLinkStatusResponse, options: { force?: boolean } = {}) => {
     const pendingSeek = pendingPcSeekRef.current;
@@ -595,6 +618,71 @@ function EchoLinkApp(): ReactElement {
     void sendCommand({ command: 'next' });
   }, [isPhoneOutput, playRelativePhoneQueueTrack, sendCommand]);
 
+  useEffect(() => {
+    if (!repeatOneEnabled || !isPhoneOutput || !phoneTrack) {
+      phoneRepeatArmedRef.current = true;
+      return;
+    }
+
+    const durationSeconds = Number(phonePlayerStatus.duration) || 0;
+    const currentSeconds = Number(phonePlayerStatus.currentTime) || 0;
+    if (phonePlayerStatus.playing && (!durationSeconds || currentSeconds < Math.max(0, durationSeconds - 1))) {
+      phoneRepeatArmedRef.current = true;
+    }
+
+    if (!phonePlayerStatus.didJustFinish || !phoneRepeatArmedRef.current) {
+      return;
+    }
+
+    phoneRepeatArmedRef.current = false;
+    void phonePlayer.seekTo(0)
+      .catch(() => undefined)
+      .finally(() => {
+        phonePlayer.play();
+      });
+  }, [
+    isPhoneOutput,
+    phonePlayer,
+    phonePlayerStatus.currentTime,
+    phonePlayerStatus.didJustFinish,
+    phonePlayerStatus.duration,
+    phonePlayerStatus.playing,
+    phoneTrack,
+    repeatOneEnabled,
+  ]);
+
+  useEffect(() => {
+    if (!repeatOneEnabled || isPhoneOutput || !client || !status?.playback.track) {
+      pcRepeatArmedRef.current = true;
+      return;
+    }
+
+    const { durationMs, positionMs, state, track } = status.playback;
+    const hasDuration = durationMs > 0;
+    const nearEnd = hasDuration && positionMs >= Math.max(0, durationMs - 1500);
+    if (state === 'playing' || state === 'loading' || (hasDuration && positionMs < Math.max(0, durationMs - 2500))) {
+      pcRepeatArmedRef.current = true;
+    }
+
+    if (state !== 'stopped' || !nearEnd || !pcRepeatArmedRef.current) {
+      return;
+    }
+
+    pcRepeatArmedRef.current = false;
+    void client.sendPlaybackCommand({ command: 'playTrack', trackId: track.id, output: 'pc' })
+      .then(applyStatus)
+      .catch((repeatError) => setError(formatRequestError(repeatError)));
+  }, [
+    applyStatus,
+    client,
+    isPhoneOutput,
+    repeatOneEnabled,
+    status?.playback.durationMs,
+    status?.playback.positionMs,
+    status?.playback.state,
+    status?.playback.track,
+  ]);
+
   const updateSeekFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
     if ((!status && !isPhoneOutput) || !playbackDurationMs || progressTrackWidth <= 0) {
       return;
@@ -803,8 +891,14 @@ function EchoLinkApp(): ReactElement {
                       onPress={() => playTrackOnPc(item)}
                     >
                       <View style={styles.libraryArtwork}>
-                        {item.artworkUrl ? (
-                          <Image source={{ uri: item.artworkUrl }} style={styles.libraryArtworkImage} />
+                        {artworkUrlIsVisible(item.artworkUrl) ? (
+                          <ExpoImage
+                            cachePolicy="memory-disk"
+                            contentFit="cover"
+                            onError={() => markArtworkUrlFailed(item.artworkUrl)}
+                            source={{ uri: item.artworkUrl }}
+                            style={styles.libraryArtworkImage}
+                          />
                         ) : (
                           <Text style={styles.libraryArtworkText}>E</Text>
                         )}
@@ -829,8 +923,15 @@ function EchoLinkApp(): ReactElement {
               <>
                 <View style={styles.playerCard}>
                   <View style={styles.artworkShell}>
-                    {displayTrack?.artworkUrl ? (
-                      <Image source={{ uri: displayTrack.artworkUrl }} style={styles.artworkImage} />
+                    {artworkUrlIsVisible(displayTrack?.artworkUrl) ? (
+                      <ExpoImage
+                        cachePolicy="memory-disk"
+                        contentFit="cover"
+                        onError={() => markArtworkUrlFailed(displayTrack?.artworkUrl)}
+                        source={{ uri: displayTrack.artworkUrl }}
+                        style={styles.artworkImage}
+                        transition={180}
+                      />
                     ) : (
                       <View style={styles.artworkFallback}>
                         <Text style={styles.artworkFallbackText}>ECHO</Text>
@@ -883,52 +984,73 @@ function EchoLinkApp(): ReactElement {
                     <View style={styles.progressTrack}>
                       <View style={[styles.progressFill, { width: `${progressRatio * 100}%` }]} />
                     </View>
-                    <View pointerEvents="none" style={[styles.sliderThumb, { left: `${progressRatio * 100}%` }]} />
                   </View>
                   <View style={styles.timeRow}>
                     <Text style={styles.progressText}>{displayTrack ? formatTime(playbackPositionMs) : '0:00'}</Text>
                     <Text style={styles.progressText}>{displayTrack ? formatTime(playbackDurationMs) : '0:00'}</Text>
                   </View>
                   <View style={styles.transportRow}>
-                    <Pressable
-                      accessibilityLabel="上一首"
-                      accessibilityRole="button"
-                      style={styles.roundButton}
-                      onPress={playPrevious}
-                      disabled={!client && !isPhoneOutput}
-                    >
-                      <Text style={styles.roundButtonText}>‹</Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityLabel={isPlaybackActive ? '暂停播放' : '开始播放'}
-                      accessibilityRole="button"
-                      style={styles.playButton}
-                      onPress={togglePlayPause}
-                      disabled={!client && !isPhoneOutput}
-                    >
-                      <Text style={styles.playButtonText}>{isPlaybackActive ? 'Ⅱ' : '▶'}</Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityLabel="下一首"
-                      accessibilityRole="button"
-                      style={styles.roundButton}
-                      onPress={playNext}
-                      disabled={!client && !isPhoneOutput}
-                    >
-                      <Text style={styles.roundButtonText}>›</Text>
-                    </Pressable>
-                  </View>
-
-                  <View style={styles.playlistActionRow}>
-                    <Pressable
-                      accessibilityLabel={playlistOpen ? '关闭播放列表预览' : '打开播放列表预览'}
-                      accessibilityRole="button"
-                      onPress={() => setPlaylistOpen((current) => !current)}
-                      style={[styles.playlistMiniButton, playlistOpen ? styles.playlistMiniButtonActive : null]}
-                    >
-                      <Text style={styles.playlistMiniIcon}>☰</Text>
-                      <Text style={styles.playlistMiniCount}>{playlistItems.length}</Text>
-                    </Pressable>
+                    <View style={styles.transportSideColumn}>
+                      <Pressable
+                        accessibilityLabel="上一首"
+                        accessibilityRole="button"
+                        style={styles.roundButton}
+                        onPress={playPrevious}
+                        disabled={!client && !isPhoneOutput}
+                      >
+                        <Text style={styles.roundButtonText}>‹</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityLabel={repeatOneEnabled ? '关闭单曲循环' : '开启单曲循环'}
+                        accessibilityRole="button"
+                        onPress={() => setRepeatOneEnabled((current) => !current)}
+                        style={[styles.repeatButton, repeatOneEnabled ? styles.repeatButtonActive : null]}
+                      >
+                        <Text style={[styles.repeatButtonIcon, repeatOneEnabled ? styles.repeatButtonIconActive : null]}>↻</Text>
+                        {repeatOneEnabled ? (
+                          <Text style={styles.repeatButtonBadge}>1</Text>
+                        ) : null}
+                      </Pressable>
+                    </View>
+                    <View style={styles.transportCenterColumn}>
+                      <Pressable
+                        accessibilityLabel={isPlaybackActive ? '暂停播放' : '开始播放'}
+                        accessibilityRole="button"
+                        style={styles.playButton}
+                        onPress={togglePlayPause}
+                        disabled={!client && !isPhoneOutput}
+                      >
+                        <Text style={[styles.playButtonText, isPlaybackActive ? null : styles.playButtonTextPlay]}>{isPlaybackActive ? 'Ⅱ' : '▶'}</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityLabel={lyricsVisible ? '关闭歌词显示' : '打开歌词显示'}
+                        accessibilityRole="button"
+                        onPress={() => setLyricsVisible((current) => !current)}
+                        style={[styles.lyricsButton, lyricsVisible ? styles.lyricsButtonActive : null]}
+                      >
+                        <Text style={[styles.lyricsButtonText, lyricsVisible ? styles.lyricsButtonTextActive : null]}>词</Text>
+                      </Pressable>
+                    </View>
+                    <View style={styles.transportSideColumn}>
+                      <Pressable
+                        accessibilityLabel="下一首"
+                        accessibilityRole="button"
+                        style={styles.roundButton}
+                        onPress={playNext}
+                        disabled={!client && !isPhoneOutput}
+                      >
+                        <Text style={styles.roundButtonText}>›</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityLabel={playlistOpen ? '关闭播放列表预览' : '打开播放列表预览'}
+                        accessibilityRole="button"
+                        onPress={() => setPlaylistOpen((current) => !current)}
+                        style={[styles.playlistMiniButton, playlistOpen ? styles.playlistMiniButtonActive : null]}
+                      >
+                        <Text style={styles.playlistMiniIcon}>☰</Text>
+                        <Text style={styles.playlistMiniCount}>{playlistItems.length}</Text>
+                      </Pressable>
+                    </View>
                   </View>
 
                   <View style={styles.playerDivider} />
@@ -950,7 +1072,6 @@ function EchoLinkApp(): ReactElement {
                       <View style={styles.volumeTrack}>
                         <View style={[styles.volumeFill, { width: `${volumePercent}%` }]} />
                       </View>
-                      <View pointerEvents="none" style={[styles.sliderThumb, { left: `${volumePercent}%` }]} />
                     </View>
                   </View>
                 </View>
@@ -1251,9 +1372,10 @@ const styles = StyleSheet.create({
   },
   artworkShell: {
     alignItems: 'center',
+    alignSelf: 'center',
     backgroundColor: '#eeeeee',
     borderColor: 'rgba(39, 39, 42, 0.08)',
-    borderRadius: 22,
+    borderRadius: 24,
     borderWidth: 1,
     height: 272,
     justifyContent: 'center',
@@ -1262,7 +1384,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 18 },
     shadowOpacity: 0.12,
     shadowRadius: 30,
-    width: '100%',
+    width: 272,
   },
   artworkImage: {
     height: '100%',
@@ -1363,22 +1485,6 @@ const styles = StyleSheet.create({
     position: 'relative',
     width: '100%',
   },
-  sliderThumb: {
-    backgroundColor: '#ffffff',
-    borderColor: '#18181b',
-    borderRadius: 999,
-    borderWidth: 3,
-    height: 22,
-    marginLeft: -11,
-    marginTop: -11,
-    position: 'absolute',
-    shadowColor: '#18181b',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    top: '50%',
-    width: 22,
-  },
   progressFill: {
     backgroundColor: '#18181b',
     borderRadius: 999,
@@ -1394,11 +1500,22 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   transportRow: {
-    alignItems: 'center',
+    alignItems: 'flex-start',
     flexDirection: 'row',
-    gap: 12,
-    justifyContent: 'space-between',
+    gap: 18,
+    justifyContent: 'center',
     width: '100%',
+  },
+  transportSideColumn: {
+    alignItems: 'center',
+    gap: 9,
+    paddingTop: 8,
+    width: 58,
+  },
+  transportCenterColumn: {
+    alignItems: 'center',
+    gap: 9,
+    width: 72,
   },
   roundButton: {
     alignItems: 'center',
@@ -1406,34 +1523,97 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(39, 39, 42, 0.1)',
     borderRadius: 999,
     borderWidth: 1,
-    flex: 1,
-    minHeight: 42,
-    paddingVertical: 8,
+    height: 48,
+    justifyContent: 'center',
+    width: 48,
   },
   roundButtonText: {
     color: '#27272a',
-    fontSize: 26,
+    fontSize: 28,
     fontWeight: '900',
+    lineHeight: 48,
+    textAlign: 'center',
   },
   playButton: {
     alignItems: 'center',
     backgroundColor: '#18181b',
     borderRadius: 999,
-    flex: 1,
-    minHeight: 44,
-    paddingVertical: 8,
+    height: 64,
+    justifyContent: 'center',
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    width: 64,
   },
   playButtonText: {
     color: '#ffffff',
+    fontSize: 24,
+    fontWeight: '900',
+    lineHeight: 64,
+    textAlign: 'center',
+  },
+  playButtonTextPlay: {
+    paddingLeft: 3,
+  },
+  repeatButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.6)',
+    borderColor: 'rgba(39, 39, 42, 0.1)',
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 34,
+    justifyContent: 'center',
+    position: 'relative',
+    width: 34,
+  },
+  repeatButtonActive: {
+    backgroundColor: '#18181b',
+    borderColor: '#18181b',
+  },
+  repeatButtonIcon: {
+    color: '#27272a',
     fontSize: 18,
     fontWeight: '900',
+    lineHeight: 34,
+    textAlign: 'center',
   },
-  playlistActionRow: {
+  repeatButtonIconActive: {
+    color: '#ffffff',
+  },
+  repeatButtonBadge: {
+    color: '#ffffff',
+    fontSize: 9,
+    fontWeight: '900',
+    lineHeight: 10,
+    position: 'absolute',
+    right: 7,
+    textAlign: 'center',
+    top: 8,
+  },
+  lyricsButton: {
     alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: -4,
-    width: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.6)',
+    borderColor: 'rgba(39, 39, 42, 0.1)',
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  lyricsButtonActive: {
+    backgroundColor: '#18181b',
+    borderColor: '#18181b',
+  },
+  lyricsButtonText: {
+    color: '#27272a',
+    fontSize: 15,
+    fontWeight: '900',
+    lineHeight: 34,
+    textAlign: 'center',
+  },
+  lyricsButtonTextActive: {
+    color: '#ffffff',
   },
   playlistMiniButton: {
     alignItems: 'center',
@@ -1442,9 +1622,11 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     flexDirection: 'row',
-    gap: 7,
-    minHeight: 34,
-    paddingHorizontal: 12,
+    gap: 4,
+    height: 34,
+    justifyContent: 'center',
+    minWidth: 44,
+    paddingHorizontal: 9,
     shadowColor: '#18181b',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.06,
