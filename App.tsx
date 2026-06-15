@@ -1,9 +1,14 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactElement, type ReactNode } from 'react';
 import {
   Alert,
+  Animated,
+  Easing,
   GestureResponderEvent,
+  Image as RNImage,
   KeyboardAvoidingView,
   LayoutChangeEvent,
+  LayoutAnimation,
+  PanResponder,
   Platform,
   Pressable,
   RefreshControl,
@@ -15,7 +20,7 @@ import {
   View,
 } from 'react-native';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
-import { Image as ExpoImage } from 'expo-image';
+import { BlurView } from 'expo-blur';
 import {
   createEchoLinkClient,
   EchoLinkHttpError,
@@ -36,11 +41,51 @@ type PendingPcSeek = {
   trackId: string | null;
 };
 
+const appPages: AppPage[] = ['control', 'library', 'connect'];
+
+type LyricLine = {
+  id: string;
+  text: string;
+  timeMs: number | null;
+};
+
 const formatTime = (milliseconds: number): string => {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
+};
+
+const parseLyrics = (lyrics: string): LyricLine[] => {
+  const lines = lyrics
+    .split(/\r?\n/u)
+    .map((line, index) => {
+      const matches = [...line.matchAll(/\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/gu)];
+      const text = line.replace(/\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/gu, '').trim();
+      if (!text) {
+        return [];
+      }
+      if (matches.length === 0) {
+        return [{ id: `plain-${index}`, text, timeMs: null }];
+      }
+      return matches.map((match, matchIndex) => {
+        const minutes = Number(match[1]);
+        const seconds = Number(match[2]);
+        const fraction = match[3] ?? '0';
+        const fractionMs = Number(fraction.padEnd(3, '0').slice(0, 3));
+        return {
+          id: `${minutes}-${seconds}-${fraction}-${index}-${matchIndex}`,
+          text,
+          timeMs: (minutes * 60 + seconds) * 1000 + fractionMs,
+        };
+      });
+    })
+    .flat()
+    .sort((a, b) => (a.timeMs ?? Number.MAX_SAFE_INTEGER) - (b.timeMs ?? Number.MAX_SAFE_INTEGER));
+
+  return lines.length > 0
+    ? lines
+    : [{ id: 'empty', text: '暂无歌词', timeMs: null }];
 };
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
@@ -210,6 +255,7 @@ function EchoLinkApp(): ReactElement {
   });
   const phonePlayerStatus = useAudioPlayerStatus(phonePlayer);
   const [page, setPage] = useState<AppPage>('control');
+  const [pageSlideDirection, setPageSlideDirection] = useState(1);
   const [connection, setConnection] = useState<EchoLinkConnection>(initialConnection);
   const [pairingText, setPairingText] = useState('');
   const [status, setStatus] = useState<EchoLinkStatusResponse | null>(null);
@@ -223,6 +269,11 @@ function EchoLinkApp(): ReactElement {
   const [playlistOpen, setPlaylistOpen] = useState(false);
   const [repeatOneEnabled, setRepeatOneEnabled] = useState(false);
   const [lyricsVisible, setLyricsVisible] = useState(false);
+  const [lyricsText, setLyricsText] = useState('');
+  const [lyricsTrackId, setLyricsTrackId] = useState<string | null>(null);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [lyricsError, setLyricsError] = useState<string | null>(null);
+  const [volumeExpanded, setVolumeExpanded] = useState(false);
   const [playbackOutputMode, setPlaybackOutputMode] = useState<PlaybackOutputMode>('pc');
   const [phoneTrack, setPhoneTrack] = useState<EchoLinkTrackPreview | null>(null);
   const [phoneAudioBusy, setPhoneAudioBusy] = useState(false);
@@ -232,6 +283,11 @@ function EchoLinkApp(): ReactElement {
   const [progressTrackWidth, setProgressTrackWidth] = useState(0);
   const [volumeTrackWidth, setVolumeTrackWidth] = useState(0);
   const [failedArtworkUrls, setFailedArtworkUrls] = useState<Set<string>>(() => new Set());
+  const [loadedArtworkUrls, setLoadedArtworkUrls] = useState<Set<string>>(() => new Set());
+  const pageTransition = useRef(new Animated.Value(1)).current;
+  const lyricsTransition = useRef(new Animated.Value(0)).current;
+  const volumeTransition = useRef(new Animated.Value(0)).current;
+  const lastAlertKeyRef = useRef<string | null>(null);
   const statusPollInFlight = useRef(false);
   const sliderInteractionInFlight = useRef(false);
   const latestStatusRef = useRef<EchoLinkStatusResponse | null>(null);
@@ -259,9 +315,79 @@ function EchoLinkApp(): ReactElement {
     });
   }, []);
 
+  const markArtworkUrlLoaded = useCallback((url: string | null | undefined) => {
+    if (!url) {
+      return;
+    }
+    setLoadedArtworkUrls((current) => {
+      if (current.has(url)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(url);
+      return next;
+    });
+  }, []);
+
   const artworkUrlIsVisible = useCallback((url: string | null | undefined): url is string => (
     Boolean(url && !failedArtworkUrls.has(url))
   ), [failedArtworkUrls]);
+
+  const artworkUrlHasLoaded = useCallback((url: string | null | undefined): boolean => (
+    Boolean(url && loadedArtworkUrls.has(url))
+  ), [loadedArtworkUrls]);
+
+  const resolveArtworkUrl = useCallback((url: string | null | undefined): string | null => {
+    const value = url?.trim();
+    if (!value) {
+      return null;
+    }
+    try {
+      return new URL(value, client?.baseUrl).toString();
+    } catch {
+      return value;
+    }
+  }, [client?.baseUrl]);
+
+  const showErrorAlert = useCallback((title: string, message: string) => {
+    const key = `${title}:${message}`;
+    if (lastAlertKeyRef.current === key) {
+      return;
+    }
+    lastAlertKeyRef.current = key;
+    Alert.alert(title, message);
+  }, []);
+
+  const switchPage = useCallback((nextPage: AppPage) => {
+    if (nextPage === page) {
+      return;
+    }
+    const currentIndex = appPages.indexOf(page);
+    const nextIndex = appPages.indexOf(nextPage);
+    setPageSlideDirection(nextIndex >= currentIndex ? 1 : -1);
+    setPlaylistOpen(false);
+    setPage(nextPage);
+  }, [page]);
+
+  const pagePanResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gestureState) => (
+      Math.abs(gestureState.dx) > 46
+      && Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.65
+    ),
+    onPanResponderRelease: (_, gestureState) => {
+      if (Math.abs(gestureState.dx) < 70) {
+        return;
+      }
+      const currentIndex = appPages.indexOf(page);
+      const nextIndex = gestureState.dx < 0
+        ? Math.min(appPages.length - 1, currentIndex + 1)
+        : Math.max(0, currentIndex - 1);
+      const nextPage = appPages[nextIndex];
+      if (nextPage) {
+        switchPage(nextPage);
+      }
+    },
+  }), [page, switchPage]);
 
   const applyStatus = useCallback((nextStatus: EchoLinkStatusResponse, options: { force?: boolean } = {}) => {
     const pendingSeek = pendingPcSeekRef.current;
@@ -349,6 +475,64 @@ function EchoLinkApp(): ReactElement {
   }, [client, refresh]);
 
   useEffect(() => {
+    pageTransition.setValue(0);
+    Animated.timing(pageTransition, {
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      toValue: 1,
+      useNativeDriver: true,
+    }).start();
+  }, [page, pageTransition]);
+
+  useEffect(() => {
+    Animated.timing(lyricsTransition, {
+      duration: 360,
+      easing: Easing.out(Easing.cubic),
+      toValue: lyricsVisible ? 1 : 0,
+      useNativeDriver: true,
+    }).start();
+    LayoutAnimation.configureNext({
+      duration: 360,
+      update: {
+        type: LayoutAnimation.Types.easeInEaseOut,
+      },
+    });
+  }, [lyricsTransition, lyricsVisible]);
+
+  useEffect(() => {
+    Animated.timing(volumeTransition, {
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      toValue: volumeExpanded ? 1 : 0,
+      useNativeDriver: true,
+    }).start();
+    LayoutAnimation.configureNext({
+      duration: 260,
+      update: {
+        type: LayoutAnimation.Types.easeInEaseOut,
+      },
+    });
+  }, [volumeExpanded, volumeTransition]);
+
+  useEffect(() => {
+    if (error) {
+      showErrorAlert('连接异常', error);
+    }
+  }, [error, showErrorAlert]);
+
+  useEffect(() => {
+    if (libraryError) {
+      showErrorAlert('曲库加载异常', libraryError);
+    }
+  }, [libraryError, showErrorAlert]);
+
+  useEffect(() => {
+    if (phoneAudioError) {
+      showErrorAlert('播放异常', phoneAudioError);
+    }
+  }, [phoneAudioError, showErrorAlert]);
+
+  useEffect(() => {
     const interval = setInterval(() => {
       setClockMs(Date.now());
     }, 500);
@@ -384,7 +568,7 @@ function EchoLinkApp(): ReactElement {
           setError(null);
         }
       } catch (pollError) {
-        if (!cancelled && !latestStatusRef.current) {
+        if (!cancelled) {
           setError(formatRequestError(pollError));
         }
       } finally {
@@ -411,11 +595,11 @@ function EchoLinkApp(): ReactElement {
       await saveConnection(parsed);
       setPairingText('');
       setError(null);
-      setPage('control');
+      switchPage('control');
     } catch (pairingError) {
       Alert.alert('配对失败', pairingError instanceof Error ? pairingError.message : String(pairingError));
     }
-  }, [pairingText]);
+  }, [pairingText, switchPage]);
 
   const saveManualConnection = useCallback(async () => {
     const nextConnection = {
@@ -427,9 +611,9 @@ function EchoLinkApp(): ReactElement {
     };
     setConnection(nextConnection);
     await saveConnection(nextConnection);
-    setPage('control');
+    switchPage('control');
     void refresh();
-  }, [connection, refresh]);
+  }, [connection, refresh, switchPage]);
 
   const sendCommand = useCallback(async (command: Parameters<NonNullable<typeof client>['sendPlaybackCommand']>[0]) => {
     if (!client) {
@@ -457,7 +641,17 @@ function EchoLinkApp(): ReactElement {
   const hiddenPlaylistItemCount = Math.max(0, playlistItems.length - visiblePlaylistItems.length);
   const isPhoneOutput = playbackOutputMode === 'phone';
   const displayTrack = isPhoneOutput ? phoneTrack ?? nowPlaying : nowPlaying;
-  const connectedLabel = status ? `已连接 ${status.device.name}` : '尚未连接';
+  const displayArtworkUrl = resolveArtworkUrl(displayTrack?.artworkUrl);
+  const echoConnectionBroken = Boolean(error);
+  const echoConnectionOnline = Boolean(status && !echoConnectionBroken);
+  const connectedLabel = echoConnectionBroken
+    ? '连接已断开'
+    : status
+      ? `已连接 ${status.device.name}`
+      : client
+        ? '正在连接'
+        : '尚未连接';
+  const playerConnectionDetail = status?.device.name ?? 'ECHO Link';
   const pcPlaybackPositionMs = status
     ? Math.max(0, Math.min(
       status.playback.durationMs || Number.MAX_SAFE_INTEGER,
@@ -480,6 +674,118 @@ function EchoLinkApp(): ReactElement {
   const playbackTags = tagsForTrack(displayTrack, {
     outputMode: isPhoneOutput ? '串流' : status?.playback.outputMode,
   });
+  const lyricLines = useMemo(() => {
+    if (lyricsLoading) {
+      return [{ id: 'loading', text: '正在载入歌词...', timeMs: null }];
+    }
+    if (lyricsError) {
+      return [{ id: 'error', text: '暂无可用歌词', timeMs: null }];
+    }
+    return parseLyrics(lyricsText);
+  }, [lyricsError, lyricsLoading, lyricsText]);
+  const activeLyricIndex = useMemo(() => {
+    let activeIndex = 0;
+    lyricLines.forEach((line, index) => {
+      if (line.timeMs !== null && line.timeMs <= playbackPositionMs + 250) {
+        activeIndex = index;
+      }
+    });
+    return activeIndex;
+  }, [lyricLines, playbackPositionMs]);
+  const defaultPlayerAnimatedStyle = {
+    opacity: lyricsTransition.interpolate({
+      inputRange: [0, 1],
+      outputRange: [1, 0.22],
+    }),
+    transform: [
+      {
+        scale: lyricsTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [1, 0.96],
+        }),
+      },
+      {
+        translateY: lyricsTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0, -8],
+        }),
+      },
+    ],
+  };
+  const lyricsPanelAnimatedStyle = {
+    opacity: lyricsTransition,
+    transform: [
+      {
+        translateY: lyricsTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [16, 0],
+        }),
+      },
+      {
+        scale: lyricsTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.985, 1],
+        }),
+      },
+    ],
+  };
+  const volumeExpandedAnimatedStyle = {
+    opacity: volumeTransition,
+    transform: [
+      {
+        scaleX: volumeTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.74, 1],
+        }),
+      },
+    ],
+  };
+  const renderButtonBlur = (intensity = 22) => (
+    <BlurView
+      intensity={intensity}
+      pointerEvents="none"
+      style={styles.glassButtonBlur}
+      tint="light"
+    />
+  );
+
+  useEffect(() => {
+    if (!lyricsVisible || !client || !displayTrack?.id) {
+      return;
+    }
+    if (lyricsTrackId === displayTrack.id && (lyricsText || lyricsError)) {
+      return;
+    }
+
+    let cancelled = false;
+    setLyricsLoading(true);
+    setLyricsError(null);
+    void client.getLyrics(displayTrack.id)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setLyricsText(response.lyrics || '暂无歌词');
+        setLyricsTrackId(displayTrack.id);
+      })
+      .catch((lyricsLoadError) => {
+        if (cancelled) {
+          return;
+        }
+        setLyricsText('');
+        setLyricsTrackId(displayTrack.id);
+        setLyricsError(formatRequestError(lyricsLoadError));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLyricsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, displayTrack?.id, lyricsError, lyricsText, lyricsTrackId, lyricsVisible]);
 
   const playTrackOnPhone = useCallback(async (
     track: EchoLinkTrackPreview,
@@ -710,6 +1016,23 @@ function EchoLinkApp(): ReactElement {
     }
   }, [isPhoneOutput, patchPlayback, phonePlayer, playbackDurationMs, progressTrackWidth, sendCommand, status]);
 
+  const seekToLyric = useCallback((line: LyricLine) => {
+    if (line.timeMs === null || (!status && !isPhoneOutput)) {
+      return;
+    }
+    if (isPhoneOutput) {
+      void phonePlayer.seekTo(line.timeMs / 1000);
+      return;
+    }
+    pendingPcSeekRef.current = {
+      positionMs: line.timeMs,
+      requestedAtMs: Date.now(),
+      trackId: status?.playback.track?.id ?? null,
+    };
+    patchPlayback({ positionMs: line.timeMs });
+    void sendCommand({ command: 'seekTo', positionMs: line.timeMs });
+  }, [isPhoneOutput, patchPlayback, phonePlayer, sendCommand, status]);
+
   const updateVolumeFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
     if ((!status && !isPhoneOutput) || volumeTrackWidth <= 0) {
       return;
@@ -745,31 +1068,244 @@ function EchoLinkApp(): ReactElement {
     : page === 'library'
       ? '浏览电脑端本地曲库，把歌曲从 PC 端自然接到手机端体验里。'
       : '同步 PC 端当前播放、曲库与音量，让手机和电脑保持同一段聆听进度。';
+  const pageAnimatedStyle = {
+    opacity: pageTransition,
+    transform: [
+      {
+        translateX: pageTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [24 * pageSlideDirection, 0],
+        }),
+      },
+      {
+        translateY: pageTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [10, 0],
+        }),
+      },
+      {
+        scale: pageTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.985, 1],
+        }),
+      },
+    ],
+  };
+  const renderArtwork = (variant: 'default' | 'lyrics') => (
+    <View style={[styles.artworkShell, variant === 'lyrics' ? styles.artworkShellLyrics : null]}>
+      <View style={styles.artworkFallback}>
+        <Text style={[styles.artworkFallbackText, variant === 'lyrics' ? styles.artworkFallbackTextLyrics : null]}>
+          ECHO
+        </Text>
+      </View>
+      {artworkUrlIsVisible(displayArtworkUrl) ? (
+        <RNImage
+          fadeDuration={0}
+          onError={() => markArtworkUrlFailed(displayArtworkUrl)}
+          onLoad={() => markArtworkUrlLoaded(displayArtworkUrl)}
+          resizeMode="cover"
+          source={{ uri: displayArtworkUrl }}
+          style={[
+            styles.artworkImage,
+            artworkUrlHasLoaded(displayArtworkUrl) ? null : styles.artworkImageHidden,
+          ]}
+        />
+      ) : null}
+    </View>
+  );
+  const renderConnectionChip = (variant: 'floating' | 'inline') => (
+    <View style={[
+      styles.playerConnectionChip,
+      variant === 'inline' ? styles.playerConnectionChipInline : null,
+      echoConnectionBroken ? styles.playerConnectionChipError : null,
+    ]}>
+      <Text style={[
+        styles.playerConnectionKicker,
+        echoConnectionBroken ? styles.playerConnectionKickerError : null,
+      ]}>ECHO</Text>
+      <View style={styles.playerConnectionStatusRow}>
+        <View style={[
+          styles.statusDot,
+          echoConnectionOnline ? styles.statusDotOnline : null,
+          echoConnectionBroken ? styles.statusDotError : null,
+        ]} />
+        <Text style={[
+          styles.playerConnectionText,
+          echoConnectionBroken ? styles.playerConnectionTextError : null,
+        ]}>{connectedLabel}</Text>
+      </View>
+      <Text style={[
+        styles.playerConnectionDetail,
+        echoConnectionBroken ? styles.playerConnectionDetailError : null,
+      ]} numberOfLines={1}>{playerConnectionDetail}</Text>
+    </View>
+  );
+  const renderProgressScrubber = (compact = false) => (
+    <View style={compact ? styles.compactProgressShell : null}>
+      <View
+        style={[styles.sliderTouchArea, compact ? styles.compactSliderTouchArea : null]}
+        onLayout={handleProgressLayout}
+        onStartShouldSetResponder={() => Boolean((client || isPhoneOutput) && playbackDurationMs)}
+        onMoveShouldSetResponder={() => Boolean((client || isPhoneOutput) && playbackDurationMs)}
+        onResponderGrant={(event) => updateSeekFromGesture(event, false)}
+        onResponderMove={(event) => updateSeekFromGesture(event, false)}
+        onResponderRelease={(event) => updateSeekFromGesture(event, true)}
+        onResponderTerminate={(event) => updateSeekFromGesture(event, true)}
+      >
+        <View style={[styles.progressTrack, compact ? styles.compactProgressTrack : null]}>
+          <View style={[styles.progressFill, { width: `${progressRatio * 100}%` }]} />
+        </View>
+      </View>
+      <View style={compact ? styles.compactTimeRow : styles.timeRow}>
+        <Text style={styles.progressText}>{displayTrack ? formatTime(playbackPositionMs) : '0:00'}</Text>
+        <Text style={styles.progressText}>{displayTrack ? formatTime(playbackDurationMs) : '0:00'}</Text>
+      </View>
+    </View>
+  );
+  const renderVolumeSlider = (compact = false) => (
+    <View
+      style={[styles.sliderTouchArea, compact ? styles.compactSliderTouchArea : null]}
+      onLayout={handleVolumeLayout}
+      onStartShouldSetResponder={() => Boolean(client || isPhoneOutput)}
+      onMoveShouldSetResponder={() => Boolean(client || isPhoneOutput)}
+      onResponderGrant={(event) => updateVolumeFromGesture(event, false)}
+      onResponderMove={(event) => updateVolumeFromGesture(event, false)}
+      onResponderRelease={(event) => updateVolumeFromGesture(event, true)}
+      onResponderTerminate={(event) => updateVolumeFromGesture(event, true)}
+    >
+      <View style={[styles.volumeTrack, compact ? styles.compactVolumeTrack : null]}>
+        <View style={[styles.volumeFill, { width: `${volumePercent}%` }]} />
+      </View>
+    </View>
+  );
+  const renderExpandableVolume = () => (
+    <View style={styles.compactVolumeShell}>
+      <Pressable
+        accessibilityLabel={volumeExpanded ? '收起音量调节' : '展开音量调节'}
+        accessibilityRole="button"
+        onPress={() => setVolumeExpanded((current) => !current)}
+        style={[styles.volumeMiniButton, volumeExpanded ? styles.volumeMiniButtonActive : null]}
+      >
+        {renderButtonBlur(20)}
+        <Text style={styles.volumeMiniIcon}>VOL</Text>
+        <Text style={styles.volumeMiniValue}>{volumePercent}%</Text>
+      </Pressable>
+      {volumeExpanded ? (
+        <Animated.View style={[styles.volumeExpandedPanel, volumeExpandedAnimatedStyle]}>
+          {renderVolumeSlider(true)}
+        </Animated.View>
+      ) : null}
+    </View>
+  );
+  const renderTransportControls = (lyricsMode = false) => (
+    <View style={[styles.transportRow, lyricsMode ? styles.lyricsTransportRow : null]}>
+      <Pressable
+        accessibilityLabel="上一首"
+        accessibilityRole="button"
+        style={[styles.roundButton, lyricsMode ? styles.roundButtonLyrics : null]}
+        onPress={playPrevious}
+        disabled={!client && !isPhoneOutput}
+      >
+        {renderButtonBlur(24)}
+        <Text style={[styles.roundButtonText, lyricsMode ? styles.roundButtonTextLyrics : null]}>‹</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel={isPlaybackActive ? '暂停播放' : '开始播放'}
+        accessibilityRole="button"
+        style={[styles.playButton, lyricsMode ? styles.playButtonLyrics : null]}
+        onPress={togglePlayPause}
+        disabled={!client && !isPhoneOutput}
+      >
+        {renderButtonBlur(14)}
+        <Text style={[
+          styles.playButtonText,
+          lyricsMode ? styles.playButtonTextLyrics : null,
+          isPlaybackActive ? null : styles.playButtonTextPlay,
+        ]}>{isPlaybackActive ? 'Ⅱ' : '▶'}</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="下一首"
+        accessibilityRole="button"
+        style={[styles.roundButton, lyricsMode ? styles.roundButtonLyrics : null]}
+        onPress={playNext}
+        disabled={!client && !isPhoneOutput}
+      >
+        {renderButtonBlur(24)}
+        <Text style={[styles.roundButtonText, lyricsMode ? styles.roundButtonTextLyrics : null]}>›</Text>
+      </Pressable>
+    </View>
+  );
+  const renderSecondaryControls = (compact = false) => (
+    <View style={[styles.secondaryControlsRow, compact ? styles.secondaryControlsRowCompact : null]}>
+      <Pressable
+        accessibilityLabel={repeatOneEnabled ? '关闭单曲循环' : '开启单曲循环'}
+        accessibilityRole="button"
+        onPress={() => setRepeatOneEnabled((current) => !current)}
+      style={[styles.repeatButton, compact ? styles.repeatButtonCompact : null, repeatOneEnabled ? styles.repeatButtonActive : null]}
+      >
+        {renderButtonBlur(repeatOneEnabled ? 10 : 22)}
+        <Text style={[styles.repeatButtonIcon, repeatOneEnabled ? styles.repeatButtonIconActive : null]}>↻</Text>
+        {repeatOneEnabled ? (
+          <Text style={styles.repeatButtonBadge}>1</Text>
+        ) : null}
+      </Pressable>
+      <Pressable
+        accessibilityLabel={lyricsVisible ? '关闭歌词显示' : '打开歌词显示'}
+        accessibilityRole="button"
+        onPress={() => setLyricsVisible((current) => !current)}
+      style={[styles.lyricsButton, compact ? styles.lyricsButtonCompact : null, lyricsVisible ? styles.lyricsButtonActive : null]}
+      >
+        {renderButtonBlur(lyricsVisible ? 10 : 22)}
+        <Text style={[styles.lyricsButtonText, lyricsVisible ? styles.lyricsButtonTextActive : null]}>词</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel={playlistOpen ? '关闭播放列表预览' : '打开播放列表预览'}
+        accessibilityRole="button"
+        onPress={() => setPlaylistOpen((current) => !current)}
+      style={[styles.playlistMiniButton, compact ? styles.playlistMiniButtonCompact : null, playlistOpen ? styles.playlistMiniButtonActive : null]}
+      >
+        {renderButtonBlur(22)}
+        <Text style={styles.playlistMiniIcon}>☰</Text>
+        <Text style={styles.playlistMiniCount}>{playlistItems.length}</Text>
+      </Pressable>
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.root}>
-        <View style={styles.pageShell}>
+        <View style={styles.pageShell} {...pagePanResponder.panHandlers}>
           <ScrollView
-            contentContainerStyle={[styles.content, page === 'control' ? styles.playerContent : null]}
+            contentContainerStyle={[
+              styles.content,
+              page === 'control' ? styles.playerContent : null,
+              page === 'control' && lyricsVisible ? styles.playerContentLyrics : null,
+            ]}
             refreshControl={<RefreshControl refreshing={busy} onRefresh={() => void refresh()} tintColor="#18181b" />}
             scrollEnabled={page !== 'control'}
           >
+            <Animated.View style={[styles.pageTransition, pageAnimatedStyle]}>
             {page !== 'control' ? (
               <View style={styles.header}>
                 <Text style={styles.kicker}>ECHO iPhone</Text>
                 <Text style={styles.title}>{pageTitle}</Text>
                 <Text style={styles.description}>{pageDescription}</Text>
-                <View style={[styles.statusPill, status ? styles.statusPillOnline : null]}>
-                  <Text style={[styles.statusPillText, status ? styles.statusPillTextOnline : null]}>{connectedLabel}</Text>
+                <View style={[
+                  styles.statusPill,
+                  echoConnectionOnline ? styles.statusPillOnline : null,
+                  echoConnectionBroken ? styles.statusPillError : null,
+                ]}>
+                  <View style={[
+                    styles.statusDot,
+                    echoConnectionOnline ? styles.statusDotOnline : null,
+                    echoConnectionBroken ? styles.statusDotError : null,
+                  ]} />
+                  <Text style={[
+                    styles.statusPillText,
+                    echoConnectionOnline ? styles.statusPillTextOnline : null,
+                    echoConnectionBroken ? styles.statusPillTextError : null,
+                  ]}>{connectedLabel}</Text>
                 </View>
-              </View>
-            ) : null}
-
-            {error ? (
-              <View style={styles.errorBox}>
-                <Text style={styles.errorTitle}>连接异常</Text>
-                <Text style={styles.errorText}>{error}</Text>
               </View>
             ) : null}
 
@@ -797,6 +1333,8 @@ function EchoLinkApp(): ReactElement {
                     style={styles.primaryButton}
                     onPress={() => void applyPairingText()}
                   >
+                    {renderButtonBlur(12)}
+                    <Text style={styles.primaryButtonIcon}>↗</Text>
                     <Text style={styles.primaryButtonText}>使用配对链接</Text>
                   </Pressable>
                 </View>
@@ -838,6 +1376,8 @@ function EchoLinkApp(): ReactElement {
                       style={styles.secondaryButton}
                       onPress={() => void saveManualConnection()}
                     >
+                      {renderButtonBlur(24)}
+                      <Text style={styles.secondaryButtonIcon}>✓</Text>
                       <Text style={styles.secondaryButtonText}>保存连接</Text>
                     </Pressable>
                     <Pressable
@@ -847,6 +1387,8 @@ function EchoLinkApp(): ReactElement {
                       onPress={() => void refresh()}
                       disabled={!client || busy}
                     >
+                      {renderButtonBlur(24)}
+                      <Text style={styles.secondaryButtonIcon}>↻</Text>
                       <Text style={styles.secondaryButtonText}>{busy ? '刷新中...' : '测试连接'}</Text>
                     </Pressable>
                   </View>
@@ -870,213 +1412,211 @@ function EchoLinkApp(): ReactElement {
                     onPress={() => void refresh()}
                     style={styles.libraryRefreshButton}
                   >
+                    {renderButtonBlur(24)}
+                    <Text style={styles.libraryRefreshIcon}>↻</Text>
                     <Text style={styles.libraryRefreshText}>{busy ? '同步中' : '刷新'}</Text>
                   </Pressable>
                 </View>
 
-                {libraryError ? (
-                  <View style={styles.warningBox}>
-                    <Text style={styles.warningTitle}>曲库加载异常</Text>
-                    <Text style={styles.warningText}>{libraryError}</Text>
-                  </View>
-                ) : null}
-
                 <View style={styles.libraryList}>
-                  {tracks.length > 0 ? tracks.map((item) => (
-                    <Pressable
-                      accessibilityLabel={`在电脑端播放 ${item.title}`}
-                      accessibilityRole="button"
-                      key={item.id}
-                      style={styles.trackRow}
-                      onPress={() => playTrackOnPc(item)}
-                    >
-                      <View style={styles.libraryArtwork}>
-                        {artworkUrlIsVisible(item.artworkUrl) ? (
-                          <ExpoImage
-                            cachePolicy="memory-disk"
-                            contentFit="cover"
-                            onError={() => markArtworkUrlFailed(item.artworkUrl)}
-                            source={{ uri: item.artworkUrl }}
-                            style={styles.libraryArtworkImage}
-                          />
-                        ) : (
-                          <Text style={styles.libraryArtworkText}>E</Text>
-                        )}
-                      </View>
-                      <View style={styles.trackText}>
-                        <Text style={styles.listTitle} numberOfLines={1}>{item.title}</Text>
-                        <Text style={styles.listMeta} numberOfLines={1}>{item.artist}</Text>
-                        <View style={styles.libraryTagRow}>
-                          {tagsForTrack(item, { includeDuration: true }).map((tag) => (
-                            <Text key={`${item.id}-${tag}`} style={styles.libraryTag}>{tag}</Text>
-                          ))}
+                  {tracks.length > 0 ? tracks.map((item) => {
+                    const itemArtworkUrl = resolveArtworkUrl(item.artworkUrl);
+                    const itemArtworkVisible = artworkUrlIsVisible(itemArtworkUrl);
+                    return (
+                      <Pressable
+                        accessibilityLabel={`在电脑端播放 ${item.title}`}
+                        accessibilityRole="button"
+                        key={item.id}
+                        style={styles.trackRow}
+                        onPress={() => playTrackOnPc(item)}
+                      >
+                        <View style={styles.libraryArtwork}>
+                          <View style={styles.libraryArtworkFallback}>
+                            <Text style={styles.libraryArtworkText}>E</Text>
+                          </View>
+                          {itemArtworkVisible ? (
+                            <RNImage
+                              fadeDuration={0}
+                              onError={() => markArtworkUrlFailed(itemArtworkUrl)}
+                              onLoad={() => markArtworkUrlLoaded(itemArtworkUrl)}
+                              resizeMode="cover"
+                              source={{ uri: itemArtworkUrl }}
+                              style={[
+                                styles.libraryArtworkImage,
+                                artworkUrlHasLoaded(itemArtworkUrl) ? null : styles.artworkImageHidden,
+                              ]}
+                            />
+                          ) : null}
                         </View>
-                      </View>
-                      <Text style={styles.playInline}>▶</Text>
-                    </Pressable>
-                  )) : (
+                        <View style={styles.trackText}>
+                          <Text style={styles.listTitle} numberOfLines={1}>{item.title}</Text>
+                          <Text style={styles.listMeta} numberOfLines={1}>{item.artist}</Text>
+                          <View style={styles.libraryTagRow}>
+                            {tagsForTrack(item, { includeDuration: true }).map((tag) => (
+                              <Text key={`${item.id}-${tag}`} style={styles.libraryTag}>{tag}</Text>
+                            ))}
+                          </View>
+                        </View>
+                        <Text style={styles.playInline}>▷</Text>
+                      </Pressable>
+                    );
+                  }) : (
                     <Text style={styles.hint}>{client ? '暂无曲库结果' : '连接后会显示电脑端曲库'}</Text>
                   )}
                 </View>
               </View>
             ) : (
               <>
-                <View style={styles.playerCard}>
-                  <View style={styles.artworkShell}>
-                    {artworkUrlIsVisible(displayTrack?.artworkUrl) ? (
-                      <ExpoImage
-                        cachePolicy="memory-disk"
-                        contentFit="cover"
-                        onError={() => markArtworkUrlFailed(displayTrack?.artworkUrl)}
-                        source={{ uri: displayTrack.artworkUrl }}
-                        style={styles.artworkImage}
-                        transition={180}
-                      />
-                    ) : (
-                      <View style={styles.artworkFallback}>
-                        <Text style={styles.artworkFallbackText}>ECHO</Text>
+                <View style={[styles.playerCard, lyricsVisible ? styles.playerCardLyrics : null]}>
+                  {lyricsVisible ? (
+                    <Animated.View style={[styles.lyricsMode, lyricsPanelAnimatedStyle]}>
+                      <View style={styles.lyricsHero}>
+                        <View style={styles.lyricsHeroLeft}>
+                          {renderArtwork('lyrics')}
+                          {renderConnectionChip('inline')}
+                        </View>
+                        <View style={styles.lyricsHeroText}>
+                          <Text style={styles.trackTitleLyrics} numberOfLines={3}>
+                            {displayTrack?.title ?? '没有正在播放的歌曲'}
+                          </Text>
+                          <View style={[styles.playbackTagRow, styles.playbackTagRowLyrics]}>
+                            {playbackTags.map((tag) => (
+                              <Text key={tag} style={styles.playbackTag}>{tag}</Text>
+                            ))}
+                          </View>
+                          <View style={[styles.outputSwitch, styles.outputSwitchLyrics]}>
+                            <Pressable
+                              accessibilityLabel="控制电脑播放"
+                              accessibilityRole="button"
+                              disabled={!client || phoneAudioBusy}
+                              onPress={switchToPcPlayback}
+                              style={[styles.outputSwitchButton, !isPhoneOutput ? styles.outputSwitchButtonActive : null]}
+                            >
+                              {renderButtonBlur(!isPhoneOutput ? 12 : 18)}
+                              <Text style={[styles.outputSwitchText, !isPhoneOutput ? styles.outputSwitchTextActive : null]}>
+                                控制
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              accessibilityLabel="串流到手机播放"
+                              accessibilityRole="button"
+                              disabled={!client || phoneAudioBusy}
+                              onPress={switchToPhonePlayback}
+                              style={[styles.outputSwitchButton, isPhoneOutput ? styles.outputSwitchButtonActive : null]}
+                            >
+                              {renderButtonBlur(isPhoneOutput ? 12 : 18)}
+                              <Text style={[styles.outputSwitchText, isPhoneOutput ? styles.outputSwitchTextActive : null]}>
+                                {phoneAudioBusy ? '...' : '串流'}
+                              </Text>
+                            </Pressable>
+                          </View>
+                          {renderSecondaryControls(true)}
+                        </View>
                       </View>
-                    )}
-                  </View>
-                  <Text style={styles.trackTitle} numberOfLines={2}>{displayTrack?.title ?? '没有正在播放的歌曲'}</Text>
-                  <View style={styles.playbackTagRow}>
-                    {playbackTags.map((tag) => (
-                      <Text key={tag} style={styles.playbackTag}>{tag}</Text>
-                    ))}
-                  </View>
-                  <View style={styles.outputSwitch}>
-                    <Pressable
-                      accessibilityLabel="控制电脑播放"
-                      accessibilityRole="button"
-                      disabled={!client || phoneAudioBusy}
-                      onPress={switchToPcPlayback}
-                      style={[styles.outputSwitchButton, !isPhoneOutput ? styles.outputSwitchButtonActive : null]}
-                    >
-                      <Text style={[styles.outputSwitchText, !isPhoneOutput ? styles.outputSwitchTextActive : null]}>
-                        控制
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityLabel="串流到手机播放"
-                      accessibilityRole="button"
-                      disabled={!client || phoneAudioBusy}
-                      onPress={switchToPhonePlayback}
-                      style={[styles.outputSwitchButton, isPhoneOutput ? styles.outputSwitchButtonActive : null]}
-                    >
-                      <Text style={[styles.outputSwitchText, isPhoneOutput ? styles.outputSwitchTextActive : null]}>
-                        {phoneAudioBusy ? '...' : '串流'}
-                      </Text>
-                    </Pressable>
-                  </View>
-                  {phoneAudioError ? (
-                    <Text style={styles.phoneAudioError}>{phoneAudioError}</Text>
-                  ) : null}
-                  <View
-                    style={styles.sliderTouchArea}
-                    onLayout={handleProgressLayout}
-                    onStartShouldSetResponder={() => Boolean((client || isPhoneOutput) && playbackDurationMs)}
-                    onMoveShouldSetResponder={() => Boolean((client || isPhoneOutput) && playbackDurationMs)}
-                    onResponderGrant={(event) => updateSeekFromGesture(event, false)}
-                    onResponderMove={(event) => updateSeekFromGesture(event, false)}
-                    onResponderRelease={(event) => updateSeekFromGesture(event, true)}
-                    onResponderTerminate={(event) => updateSeekFromGesture(event, true)}
-                  >
-                    <View style={styles.progressTrack}>
-                      <View style={[styles.progressFill, { width: `${progressRatio * 100}%` }]} />
-                    </View>
-                  </View>
-                  <View style={styles.timeRow}>
-                    <Text style={styles.progressText}>{displayTrack ? formatTime(playbackPositionMs) : '0:00'}</Text>
-                    <Text style={styles.progressText}>{displayTrack ? formatTime(playbackDurationMs) : '0:00'}</Text>
-                  </View>
-                  <View style={styles.transportRow}>
-                    <View style={styles.transportSideColumn}>
-                      <Pressable
-                        accessibilityLabel="上一首"
-                        accessibilityRole="button"
-                        style={styles.roundButton}
-                        onPress={playPrevious}
-                        disabled={!client && !isPhoneOutput}
-                      >
-                        <Text style={styles.roundButtonText}>‹</Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityLabel={repeatOneEnabled ? '关闭单曲循环' : '开启单曲循环'}
-                        accessibilityRole="button"
-                        onPress={() => setRepeatOneEnabled((current) => !current)}
-                        style={[styles.repeatButton, repeatOneEnabled ? styles.repeatButtonActive : null]}
-                      >
-                        <Text style={[styles.repeatButtonIcon, repeatOneEnabled ? styles.repeatButtonIconActive : null]}>↻</Text>
-                        {repeatOneEnabled ? (
-                          <Text style={styles.repeatButtonBadge}>1</Text>
-                        ) : null}
-                      </Pressable>
-                    </View>
-                    <View style={styles.transportCenterColumn}>
-                      <Pressable
-                        accessibilityLabel={isPlaybackActive ? '暂停播放' : '开始播放'}
-                        accessibilityRole="button"
-                        style={styles.playButton}
-                        onPress={togglePlayPause}
-                        disabled={!client && !isPhoneOutput}
-                      >
-                        <Text style={[styles.playButtonText, isPlaybackActive ? null : styles.playButtonTextPlay]}>{isPlaybackActive ? 'Ⅱ' : '▶'}</Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityLabel={lyricsVisible ? '关闭歌词显示' : '打开歌词显示'}
-                        accessibilityRole="button"
-                        onPress={() => setLyricsVisible((current) => !current)}
-                        style={[styles.lyricsButton, lyricsVisible ? styles.lyricsButtonActive : null]}
-                      >
-                        <Text style={[styles.lyricsButtonText, lyricsVisible ? styles.lyricsButtonTextActive : null]}>词</Text>
-                      </Pressable>
-                    </View>
-                    <View style={styles.transportSideColumn}>
-                      <Pressable
-                        accessibilityLabel="下一首"
-                        accessibilityRole="button"
-                        style={styles.roundButton}
-                        onPress={playNext}
-                        disabled={!client && !isPhoneOutput}
-                      >
-                        <Text style={styles.roundButtonText}>›</Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityLabel={playlistOpen ? '关闭播放列表预览' : '打开播放列表预览'}
-                        accessibilityRole="button"
-                        onPress={() => setPlaylistOpen((current) => !current)}
-                        style={[styles.playlistMiniButton, playlistOpen ? styles.playlistMiniButtonActive : null]}
-                      >
-                        <Text style={styles.playlistMiniIcon}>☰</Text>
-                        <Text style={styles.playlistMiniCount}>{playlistItems.length}</Text>
-                      </Pressable>
-                    </View>
-                  </View>
 
-                  <View style={styles.playerDivider} />
-                  <View style={styles.volumePanel}>
-                    <View style={styles.volumeHeader}>
-                      <Text style={styles.cardEyebrow}>VOL</Text>
-                      <Text style={styles.volumeValue}>{volumePercent}%</Text>
-                    </View>
-                    <View
-                      style={styles.sliderTouchArea}
-                      onLayout={handleVolumeLayout}
-                      onStartShouldSetResponder={() => Boolean(client || isPhoneOutput)}
-                      onMoveShouldSetResponder={() => Boolean(client || isPhoneOutput)}
-                      onResponderGrant={(event) => updateVolumeFromGesture(event, false)}
-                      onResponderMove={(event) => updateVolumeFromGesture(event, false)}
-                      onResponderRelease={(event) => updateVolumeFromGesture(event, true)}
-                      onResponderTerminate={(event) => updateVolumeFromGesture(event, true)}
-                    >
-                      <View style={styles.volumeTrack}>
-                        <View style={[styles.volumeFill, { width: `${volumePercent}%` }]} />
+                      <View style={styles.lyricsViewport}>
+                        <ScrollView
+                          contentContainerStyle={styles.lyricsScrollContent}
+                          showsVerticalScrollIndicator={false}
+                        >
+                          {lyricLines.map((line, index) => {
+                            const isActive = index === activeLyricIndex;
+                            const distance = Math.abs(index - activeLyricIndex);
+                            return (
+                              <Pressable
+                                accessibilityLabel={line.timeMs === null ? line.text : `跳转到 ${formatTime(line.timeMs)}：${line.text}`}
+                                accessibilityRole={line.timeMs === null ? undefined : 'button'}
+                                disabled={line.timeMs === null}
+                                key={line.id}
+                                onPress={() => seekToLyric(line)}
+                                style={styles.lyricLineButton}
+                              >
+                                <Text
+                                  numberOfLines={2}
+                                  style={[
+                                    styles.lyricLineText,
+                                    distance === 1 ? styles.lyricLineTextNear : null,
+                                    distance > 1 ? styles.lyricLineTextFar : null,
+                                    isActive ? styles.lyricLineTextActive : null,
+                                  ]}
+                                >
+                                  {line.text}
+                                </Text>
+                                {line.timeMs !== null && !isActive ? (
+                                  <Text style={styles.lyricTimestamp}>{formatTime(line.timeMs)}</Text>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })}
+                        </ScrollView>
                       </View>
-                    </View>
-                  </View>
+
+                      <View style={styles.lyricsControlPanel}>
+                        <View style={styles.compactControlRow}>
+                          {renderProgressScrubber(true)}
+                          {renderExpandableVolume()}
+                        </View>
+                        {renderTransportControls(true)}
+                      </View>
+                    </Animated.View>
+                  ) : (
+                    <Animated.View style={[styles.defaultPlayerMode, defaultPlayerAnimatedStyle]}>
+                      <View style={styles.artworkStage}>
+                        {renderArtwork('default')}
+                        {renderConnectionChip('floating')}
+                      </View>
+                      <Text style={styles.trackTitle} numberOfLines={2}>{displayTrack?.title ?? '没有正在播放的歌曲'}</Text>
+                      <View style={styles.playbackTagRow}>
+                        {playbackTags.map((tag) => (
+                          <Text key={tag} style={styles.playbackTag}>{tag}</Text>
+                        ))}
+                      </View>
+                      <View style={styles.outputSwitch}>
+                        <Pressable
+                          accessibilityLabel="控制电脑播放"
+                          accessibilityRole="button"
+                          disabled={!client || phoneAudioBusy}
+                          onPress={switchToPcPlayback}
+                          style={[styles.outputSwitchButton, !isPhoneOutput ? styles.outputSwitchButtonActive : null]}
+                        >
+                          {renderButtonBlur(!isPhoneOutput ? 12 : 18)}
+                          <Text style={[styles.outputSwitchText, !isPhoneOutput ? styles.outputSwitchTextActive : null]}>
+                            控制
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          accessibilityLabel="串流到手机播放"
+                          accessibilityRole="button"
+                          disabled={!client || phoneAudioBusy}
+                          onPress={switchToPhonePlayback}
+                          style={[styles.outputSwitchButton, isPhoneOutput ? styles.outputSwitchButtonActive : null]}
+                        >
+                          {renderButtonBlur(isPhoneOutput ? 12 : 18)}
+                          <Text style={[styles.outputSwitchText, isPhoneOutput ? styles.outputSwitchTextActive : null]}>
+                            {phoneAudioBusy ? '...' : '串流'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                      {renderProgressScrubber()}
+                      <View style={styles.playerControls}>
+                        {renderTransportControls()}
+                        {renderSecondaryControls()}
+                      </View>
+
+                      <View style={styles.playerDivider} />
+                      <View style={styles.volumePanel}>
+                        <View style={styles.volumeHeader}>
+                          <Text style={styles.cardEyebrow}>VOL</Text>
+                          <Text style={styles.volumeValue}>{volumePercent}%</Text>
+                        </View>
+                        {renderVolumeSlider()}
+                      </View>
+                    </Animated.View>
+                  )}
                 </View>
               </>
             )}
+            </Animated.View>
           </ScrollView>
 
           {page === 'control' && playlistOpen ? (
@@ -1145,30 +1685,34 @@ function EchoLinkApp(): ReactElement {
           ) : null}
 
           <View style={styles.dock}>
+            <BlurView intensity={34} pointerEvents="none" style={styles.dockBlur} tint="light" />
             <Pressable
               accessibilityLabel="播放页面"
               accessibilityRole="button"
               style={[styles.dockItem, page === 'control' ? styles.dockItemActive : null]}
-              onPress={() => setPage('control')}
+              onPress={() => switchPage('control')}
             >
-              <Text style={[styles.dockIcon, page === 'control' ? styles.dockIconActive : null]}>▶</Text>
+              {page === 'control' ? renderButtonBlur(16) : null}
+              <Text style={[styles.dockIcon, page === 'control' ? styles.dockIconActive : null]}>▷</Text>
               <Text style={[styles.dockLabel, page === 'control' ? styles.dockLabelActive : null]}>播放</Text>
             </Pressable>
             <Pressable
               accessibilityLabel="曲库页面"
               accessibilityRole="button"
               style={[styles.dockItem, page === 'library' ? styles.dockItemActive : null]}
-              onPress={() => setPage('library')}
+              onPress={() => switchPage('library')}
             >
-              <Text style={[styles.dockIcon, page === 'library' ? styles.dockIconActive : null]}>♬</Text>
+              {page === 'library' ? renderButtonBlur(16) : null}
+              <Text style={[styles.dockIcon, page === 'library' ? styles.dockIconActive : null]}>≋</Text>
               <Text style={[styles.dockLabel, page === 'library' ? styles.dockLabelActive : null]}>曲库</Text>
             </Pressable>
             <Pressable
               accessibilityLabel="连接页面"
               accessibilityRole="button"
               style={[styles.dockItem, page === 'connect' ? styles.dockItemActive : null]}
-              onPress={() => setPage('connect')}
+              onPress={() => switchPage('connect')}
             >
+              {page === 'connect' ? renderButtonBlur(16) : null}
               <Text style={[styles.dockIcon, page === 'connect' ? styles.dockIconActive : null]}>⌁</Text>
               <Text style={[styles.dockLabel, page === 'connect' ? styles.dockLabelActive : null]}>连接</Text>
             </Pressable>
@@ -1190,7 +1734,7 @@ export default function App(): ReactElement {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#f6f6f3',
   },
   root: {
     flex: 1,
@@ -1199,49 +1743,90 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   content: {
+    gap: 18,
     padding: 18,
-    paddingBottom: 124,
-    gap: 16,
+    paddingBottom: 126,
+  },
+  pageTransition: {
+    gap: 18,
+    width: '100%',
+  },
+  glassButtonBlur: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
   },
   playerContent: {
     flexGrow: 1,
     justifyContent: 'center',
-    paddingBottom: 106,
+    paddingBottom: 104,
+    paddingTop: 8,
+  },
+  playerContentLyrics: {
+    justifyContent: 'flex-start',
     paddingTop: 10,
   },
   header: {
-    gap: 10,
-    paddingTop: 14,
+    gap: 9,
+    paddingHorizontal: 2,
+    paddingTop: 18,
   },
   kicker: {
-    color: '#8a8178',
+    color: '#8b8b86',
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 1.4,
+    letterSpacing: 1.7,
     textTransform: 'uppercase',
   },
   title: {
     color: '#18181b',
-    fontSize: 34,
-    fontWeight: '800',
+    fontSize: 36,
+    fontWeight: '900',
+    letterSpacing: -0.9,
   },
   description: {
-    color: '#706b66',
+    color: '#666662',
     fontSize: 15,
     lineHeight: 23,
+    maxWidth: 330,
   },
   statusPill: {
+    alignItems: 'center',
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255, 255, 255, 0.58)',
-    borderColor: 'rgba(39, 39, 42, 0.08)',
+    backgroundColor: 'rgba(255, 255, 255, 0.62)',
+    borderColor: 'rgba(255, 255, 255, 0.78)',
     borderRadius: 999,
     borderWidth: 1,
-    paddingHorizontal: 12,
+    flexDirection: 'row',
+    gap: 7,
+    paddingHorizontal: 13,
     paddingVertical: 7,
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.06,
+    shadowRadius: 18,
   },
   statusPillOnline: {
-    backgroundColor: 'rgba(255, 255, 255, 0.82)',
-    borderColor: 'rgba(24, 24, 27, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.86)',
+    borderColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  statusPillError: {
+    backgroundColor: 'rgba(254, 242, 242, 0.86)',
+    borderColor: 'rgba(248, 113, 113, 0.34)',
+  },
+  statusDot: {
+    backgroundColor: '#a1a1aa',
+    borderRadius: 999,
+    height: 7,
+    width: 7,
+  },
+  statusDotOnline: {
+    backgroundColor: '#27272a',
+  },
+  statusDotError: {
+    backgroundColor: '#dc2626',
   },
   statusPillText: {
     color: '#706b66',
@@ -1250,6 +1835,9 @@ const styles = StyleSheet.create({
   },
   statusPillTextOnline: {
     color: '#27272a',
+  },
+  statusPillTextError: {
+    color: '#dc2626',
   },
   card: {
     backgroundColor: 'rgba(255, 255, 255, 0.72)',
@@ -1264,11 +1852,16 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
   },
   section: {
-    borderBottomColor: 'rgba(39, 39, 42, 0.08)',
-    borderBottomWidth: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.48)',
+    borderColor: 'rgba(255, 255, 255, 0.76)',
+    borderRadius: 26,
+    borderWidth: 1,
     gap: 12,
-    paddingBottom: 20,
-    paddingTop: 4,
+    padding: 16,
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 16 },
+    shadowOpacity: 0.055,
+    shadowRadius: 28,
   },
   cardEyebrow: {
     color: '#8a8178',
@@ -1288,14 +1881,18 @@ const styles = StyleSheet.create({
     lineHeight: 19,
   },
   input: {
-    backgroundColor: 'rgba(255, 255, 255, 0.64)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
-    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.62)',
+    borderColor: 'rgba(39, 39, 42, 0.08)',
+    borderRadius: 18,
     borderWidth: 1,
     color: '#18181b',
     fontSize: 15,
     paddingHorizontal: 14,
     paddingVertical: 12,
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.035,
+    shadowRadius: 14,
   },
   pairingInput: {
     minHeight: 84,
@@ -1304,8 +1901,26 @@ const styles = StyleSheet.create({
   primaryButton: {
     alignItems: 'center',
     backgroundColor: '#18181b',
-    borderRadius: 16,
+    borderRadius: 18,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 48,
+    overflow: 'hidden',
+    paddingHorizontal: 16,
     paddingVertical: 13,
+    position: 'relative',
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.16,
+    shadowRadius: 22,
+  },
+  primaryButtonIcon: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '900',
+    includeFontPadding: false,
+    lineHeight: 18,
   },
   primaryButtonText: {
     color: '#ffffff',
@@ -1314,12 +1929,26 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.5)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
-    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.54)',
+    borderColor: 'rgba(255, 255, 255, 0.76)',
+    borderRadius: 18,
     borderWidth: 1,
     flex: 1,
+    flexDirection: 'row',
+    gap: 7,
+    justifyContent: 'center',
+    minHeight: 46,
+    overflow: 'hidden',
+    paddingHorizontal: 12,
     paddingVertical: 12,
+    position: 'relative',
+  },
+  secondaryButtonIcon: {
+    color: '#27272a',
+    fontSize: 15,
+    fontWeight: '900',
+    includeFontPadding: false,
+    lineHeight: 16,
   },
   secondaryButtonText: {
     color: '#27272a',
@@ -1366,36 +1995,93 @@ const styles = StyleSheet.create({
   },
   playerCard: {
     alignItems: 'center',
-    gap: 9,
+    gap: 10,
     paddingHorizontal: 2,
     paddingTop: 0,
+  },
+  playerCardLyrics: {
+    alignItems: 'stretch',
+    gap: 12,
+  },
+  defaultPlayerMode: {
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+  },
+  lyricsMode: {
+    alignSelf: 'stretch',
+    gap: 12,
+  },
+  lyricsHero: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: 14,
+    width: '100%',
+  },
+  lyricsHeroLeft: {
+    alignItems: 'center',
+    gap: 8,
+    width: 132,
+  },
+  lyricsHeroText: {
+    flex: 1,
+    gap: 8,
+    minHeight: 174,
+    paddingTop: 2,
+  },
+  artworkStage: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    justifyContent: 'center',
+    minHeight: 252,
+    position: 'relative',
   },
   artworkShell: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#eeeeee',
-    borderColor: 'rgba(39, 39, 42, 0.08)',
-    borderRadius: 24,
+    backgroundColor: '#eeeeec',
+    borderColor: 'rgba(24, 24, 27, 0.1)',
+    borderRadius: 28,
     borderWidth: 1,
-    height: 272,
+    height: 252,
     justifyContent: 'center',
     overflow: 'hidden',
     shadowColor: '#18181b',
-    shadowOffset: { width: 0, height: 18 },
+    shadowOffset: { width: 0, height: 20 },
+    shadowOpacity: 0.13,
+    shadowRadius: 34,
+    width: 252,
+  },
+  artworkShellLyrics: {
+    alignSelf: 'flex-start',
+    borderRadius: 22,
+    height: 132,
+    shadowOffset: { width: 0, height: 14 },
     shadowOpacity: 0.12,
-    shadowRadius: 30,
-    width: 272,
+    shadowRadius: 24,
+    width: 132,
   },
   artworkImage: {
+    bottom: 0,
     height: '100%',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
     width: '100%',
+  },
+  artworkImageHidden: {
+    opacity: 0,
   },
   artworkFallback: {
     alignItems: 'center',
     backgroundColor: '#e5e5e5',
-    height: '100%',
+    bottom: 0,
     justifyContent: 'center',
-    width: '100%',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
   },
   artworkFallbackText: {
     color: '#71717a',
@@ -1403,11 +2089,82 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 4,
   },
+  artworkFallbackTextLyrics: {
+    fontSize: 22,
+    letterSpacing: 2,
+  },
+  playerConnectionChip: {
+    backgroundColor: 'rgba(255, 255, 255, 0.74)',
+    borderColor: 'rgba(255, 255, 255, 0.86)',
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 4,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    position: 'absolute',
+    right: 0,
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.08,
+    shadowRadius: 20,
+    top: 12,
+    width: 112,
+  },
+  playerConnectionChipInline: {
+    alignSelf: 'stretch',
+    position: 'relative',
+    right: undefined,
+    top: undefined,
+    width: '100%',
+  },
+  playerConnectionChipError: {
+    backgroundColor: 'rgba(254, 242, 242, 0.9)',
+    borderColor: 'rgba(248, 113, 113, 0.32)',
+  },
+  playerConnectionKicker: {
+    color: '#8b8b86',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.1,
+  },
+  playerConnectionKickerError: {
+    color: '#ef4444',
+  },
+  playerConnectionStatusRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  playerConnectionText: {
+    color: '#27272a',
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  playerConnectionTextError: {
+    color: '#dc2626',
+  },
+  playerConnectionDetail: {
+    color: '#706b66',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  playerConnectionDetailError: {
+    color: '#b91c1c',
+  },
   trackTitle: {
+    color: '#18181b',
+    fontSize: 23,
+    fontWeight: '900',
+    letterSpacing: -0.3,
+    textAlign: 'center',
+  },
+  trackTitleLyrics: {
     color: '#18181b',
     fontSize: 22,
     fontWeight: '900',
-    textAlign: 'center',
+    letterSpacing: -0.35,
+    lineHeight: 27,
   },
   trackMeta: {
     color: '#706b66',
@@ -1420,6 +2177,10 @@ const styles = StyleSheet.create({
     gap: 6,
     justifyContent: 'center',
     minHeight: 24,
+  },
+  playbackTagRowLyrics: {
+    justifyContent: 'flex-start',
+    minHeight: 0,
   },
   playbackTag: {
     borderColor: 'rgba(24, 24, 27, 0.12)',
@@ -1442,13 +2203,18 @@ const styles = StyleSheet.create({
     gap: 4,
     padding: 4,
   },
+  outputSwitchLyrics: {
+    alignSelf: 'stretch',
+  },
   outputSwitchButton: {
     alignItems: 'center',
     borderRadius: 999,
     flex: 1,
     minHeight: 32,
     justifyContent: 'center',
+    overflow: 'hidden',
     paddingHorizontal: 10,
+    position: 'relative',
   },
   outputSwitchButtonActive: {
     backgroundColor: '#ffffff',
@@ -1473,17 +2239,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   progressTrack: {
-    backgroundColor: '#e5e5e5',
+    backgroundColor: '#dededc',
     borderRadius: 999,
-    height: 8,
+    height: 7,
     overflow: 'hidden',
     width: '100%',
   },
+  compactProgressTrack: {
+    height: 6,
+  },
   sliderTouchArea: {
     justifyContent: 'center',
-    minHeight: 34,
+    minHeight: 30,
     position: 'relative',
     width: '100%',
+  },
+  compactSliderTouchArea: {
+    minHeight: 24,
   },
   progressFill: {
     backgroundColor: '#18181b',
@@ -1495,77 +2267,188 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     width: '100%',
   },
+  compactProgressShell: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  compactTimeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
   progressText: {
     color: '#706b66',
+    fontSize: 12,
     fontVariant: ['tabular-nums'],
   },
-  transportRow: {
-    alignItems: 'flex-start',
+  playerControls: {
+    alignItems: 'center',
+    gap: 16,
+    paddingTop: 4,
+    width: '100%',
+  },
+  lyricsControlPanel: {
+    alignSelf: 'stretch',
+    gap: 14,
+    paddingTop: 2,
+  },
+  compactControlRow: {
+    alignItems: 'center',
     flexDirection: 'row',
-    gap: 18,
+    gap: 12,
+    minHeight: 48,
+  },
+  lyricsViewport: {
+    backgroundColor: 'rgba(24, 24, 27, 0.86)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    borderRadius: 24,
+    borderWidth: 1,
+    height: 210,
+    overflow: 'hidden',
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 18 },
+    shadowOpacity: 0.18,
+    shadowRadius: 30,
+  },
+  lyricsScrollContent: {
+    gap: 4,
+    paddingHorizontal: 18,
+    paddingVertical: 24,
+  },
+  lyricLineButton: {
+    borderRadius: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
+  lyricLineText: {
+    color: 'rgba(212, 212, 216, 0.48)',
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: -0.1,
+    lineHeight: 21,
+  },
+  lyricLineTextNear: {
+    color: 'rgba(212, 212, 216, 0.68)',
+  },
+  lyricLineTextFar: {
+    color: 'rgba(161, 161, 170, 0.42)',
+  },
+  lyricLineTextActive: {
+    color: '#ffffff',
+    fontSize: 18,
+    lineHeight: 25,
+    textShadowColor: 'rgba(255, 255, 255, 0.48)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
+  },
+  lyricTimestamp: {
+    color: 'rgba(161, 161, 170, 0.6)',
+    fontSize: 10,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  transportRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 26,
     justifyContent: 'center',
     width: '100%',
   },
-  transportSideColumn: {
-    alignItems: 'center',
-    gap: 9,
-    paddingTop: 8,
-    width: 58,
+  lyricsTransportRow: {
+    gap: 26,
+    paddingTop: 0,
   },
-  transportCenterColumn: {
+  secondaryControlsRow: {
     alignItems: 'center',
-    gap: 9,
-    width: 72,
+    flexDirection: 'row',
+    gap: 20,
+    justifyContent: 'center',
+    width: '100%',
+  },
+  secondaryControlsRowCompact: {
+    gap: 8,
+    justifyContent: 'flex-start',
   },
   roundButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.52)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    borderColor: 'rgba(255, 255, 255, 0.84)',
     borderRadius: 999,
     borderWidth: 1,
-    height: 48,
+    height: 58,
     justifyContent: 'center',
-    width: 48,
+    overflow: 'hidden',
+    position: 'relative',
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    width: 58,
+  },
+  roundButtonLyrics: {
+    height: 60,
+    width: 60,
   },
   roundButtonText: {
     color: '#27272a',
-    fontSize: 28,
+    fontSize: 36,
     fontWeight: '900',
-    lineHeight: 48,
+    includeFontPadding: false,
+    lineHeight: 38,
     textAlign: 'center',
+  },
+  roundButtonTextLyrics: {
+    fontSize: 37,
   },
   playButton: {
     alignItems: 'center',
     backgroundColor: '#18181b',
     borderRadius: 999,
-    height: 64,
+    height: 78,
     justifyContent: 'center',
+    overflow: 'hidden',
+    position: 'relative',
     shadowColor: '#18181b',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.18,
-    shadowRadius: 18,
-    width: 64,
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    width: 78,
+  },
+  playButtonLyrics: {
+    height: 82,
+    width: 82,
   },
   playButtonText: {
     color: '#ffffff',
-    fontSize: 24,
+    fontSize: 29,
     fontWeight: '900',
-    lineHeight: 64,
+    includeFontPadding: false,
+    lineHeight: 31,
     textAlign: 'center',
+  },
+  playButtonTextLyrics: {
+    fontSize: 30,
   },
   playButtonTextPlay: {
     paddingLeft: 3,
   },
   repeatButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.6)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.66)',
+    borderColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 999,
     borderWidth: 1,
-    height: 34,
+    height: 46,
     justifyContent: 'center',
+    overflow: 'hidden',
     position: 'relative',
-    width: 34,
+    width: 46,
+  },
+  repeatButtonCompact: {
+    height: 38,
+    width: 38,
   },
   repeatButtonActive: {
     backgroundColor: '#18181b',
@@ -1573,9 +2456,10 @@ const styles = StyleSheet.create({
   },
   repeatButtonIcon: {
     color: '#27272a',
-    fontSize: 18,
+    fontSize: 21,
     fontWeight: '900',
-    lineHeight: 34,
+    includeFontPadding: false,
+    lineHeight: 23,
     textAlign: 'center',
   },
   repeatButtonIconActive: {
@@ -1585,21 +2469,28 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 9,
     fontWeight: '900',
+    includeFontPadding: false,
     lineHeight: 10,
     position: 'absolute',
-    right: 7,
+    right: 10,
     textAlign: 'center',
-    top: 8,
+    top: 11,
   },
   lyricsButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.6)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.66)',
+    borderColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 999,
     borderWidth: 1,
-    height: 34,
+    height: 46,
     justifyContent: 'center',
-    width: 34,
+    overflow: 'hidden',
+    position: 'relative',
+    width: 46,
+  },
+  lyricsButtonCompact: {
+    height: 38,
+    width: 38,
   },
   lyricsButtonActive: {
     backgroundColor: '#18181b',
@@ -1607,9 +2498,10 @@ const styles = StyleSheet.create({
   },
   lyricsButtonText: {
     color: '#27272a',
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: '900',
-    lineHeight: 34,
+    includeFontPadding: false,
+    lineHeight: 20,
     textAlign: 'center',
   },
   lyricsButtonTextActive: {
@@ -1617,20 +2509,27 @@ const styles = StyleSheet.create({
   },
   playlistMiniButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.66)',
+    borderColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 999,
     borderWidth: 1,
     flexDirection: 'row',
-    gap: 4,
-    height: 34,
+    gap: 5,
+    height: 46,
     justifyContent: 'center',
-    minWidth: 44,
-    paddingHorizontal: 9,
+    overflow: 'hidden',
+    minWidth: 58,
+    paddingHorizontal: 13,
+    position: 'relative',
     shadowColor: '#18181b',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.06,
     shadowRadius: 16,
+  },
+  playlistMiniButtonCompact: {
+    height: 38,
+    minWidth: 50,
+    paddingHorizontal: 11,
   },
   playlistMiniButtonActive: {
     backgroundColor: '#ffffff',
@@ -1638,12 +2537,14 @@ const styles = StyleSheet.create({
   },
   playlistMiniIcon: {
     color: '#18181b',
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: '900',
+    includeFontPadding: false,
+    lineHeight: 19,
   },
   playlistMiniCount: {
     color: '#706b66',
-    fontSize: 12,
+    fontSize: 13,
     fontVariant: ['tabular-nums'],
     fontWeight: '900',
   },
@@ -1795,34 +2696,109 @@ const styles = StyleSheet.create({
     height: 12,
     overflow: 'hidden',
   },
+  compactVolumeTrack: {
+    backgroundColor: 'rgba(228, 228, 231, 0.92)',
+    height: 7,
+  },
   volumeFill: {
     backgroundColor: '#18181b',
     borderRadius: 999,
     height: '100%',
   },
+  compactVolumeShell: {
+    alignItems: 'flex-end',
+    gap: 7,
+    minWidth: 92,
+  },
+  volumeMiniButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.74)',
+    borderColor: 'rgba(255, 255, 255, 0.86)',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    height: 40,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    paddingHorizontal: 12,
+    position: 'relative',
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.07,
+    shadowRadius: 16,
+  },
+  volumeMiniButtonActive: {
+    backgroundColor: '#ffffff',
+    borderColor: 'rgba(24, 24, 27, 0.1)',
+  },
+  volumeMiniIcon: {
+    color: '#71717a',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+  },
+  volumeMiniValue: {
+    color: '#18181b',
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '900',
+  },
+  volumeExpandedPanel: {
+    backgroundColor: 'rgba(255, 255, 255, 0.78)',
+    borderColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    width: 112,
+  },
   libraryList: {
     gap: 0,
   },
   libraryPage: {
-    gap: 14,
+    gap: 12,
   },
   librarySearchRow: {
     alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.46)',
+    borderColor: 'rgba(255, 255, 255, 0.74)',
+    borderRadius: 24,
+    borderWidth: 1,
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
+    padding: 6,
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.05,
+    shadowRadius: 24,
   },
   librarySearchInput: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
     flex: 1,
+    shadowOpacity: 0,
   },
   libraryRefreshButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.5)',
-    borderColor: 'rgba(39, 39, 42, 0.1)',
-    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.62)',
+    borderColor: 'rgba(255, 255, 255, 0.82)',
+    borderRadius: 999,
     borderWidth: 1,
-    minHeight: 46,
-    paddingHorizontal: 16,
+    flexDirection: 'row',
+    gap: 6,
     justifyContent: 'center',
+    minHeight: 46,
+    overflow: 'hidden',
+    paddingHorizontal: 15,
+    position: 'relative',
+  },
+  libraryRefreshIcon: {
+    color: '#27272a',
+    fontSize: 15,
+    fontWeight: '900',
+    includeFontPadding: false,
+    lineHeight: 16,
   },
   libraryRefreshText: {
     color: '#27272a',
@@ -1831,27 +2807,43 @@ const styles = StyleSheet.create({
   },
   trackRow: {
     alignItems: 'center',
-    borderBottomColor: 'rgba(39, 39, 42, 0.08)',
+    borderBottomColor: 'rgba(39, 39, 42, 0.065)',
     borderBottomWidth: 1,
     flexDirection: 'row',
-    gap: 12,
-    minHeight: 66,
-    paddingVertical: 10,
+    gap: 13,
+    minHeight: 72,
+    paddingHorizontal: 2,
+    paddingVertical: 12,
   },
   libraryArtwork: {
     alignItems: 'center',
-    backgroundColor: '#e5e5e5',
-    borderColor: 'rgba(39, 39, 42, 0.08)',
-    borderRadius: 12,
+    backgroundColor: '#eeeeeb',
+    borderColor: 'rgba(255, 255, 255, 0.82)',
+    borderRadius: 14,
     borderWidth: 1,
     height: 46,
     justifyContent: 'center',
     overflow: 'hidden',
+    position: 'relative',
     width: 46,
   },
   libraryArtworkImage: {
+    bottom: 0,
     height: '100%',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
     width: '100%',
+  },
+  libraryArtworkFallback: {
+    alignItems: 'center',
+    bottom: 0,
+    justifyContent: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
   },
   libraryArtworkText: {
     color: '#71717a',
@@ -1901,50 +2893,72 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   playInline: {
-    color: '#18181b',
-    fontSize: 15,
+    color: '#52525b',
+    fontSize: 20,
     fontWeight: '900',
+    includeFontPadding: false,
+    lineHeight: 22,
   },
   dock: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.68)',
-    borderColor: 'rgba(255, 255, 255, 0.72)',
-    borderRadius: 30,
+    backgroundColor: 'rgba(255, 255, 255, 0.38)',
+    borderColor: 'rgba(255, 255, 255, 0.86)',
+    borderRadius: 34,
     borderWidth: 1,
-    bottom: 16,
+    bottom: 18,
     flexDirection: 'row',
-    gap: 8,
+    gap: 6,
     justifyContent: 'center',
-    left: 18,
-    padding: 8,
+    left: 20,
+    overflow: 'hidden',
+    padding: 7,
     position: 'absolute',
-    right: 18,
+    right: 20,
     shadowColor: '#18181b',
-    shadowOffset: { width: 0, height: 18 },
-    shadowOpacity: 0.12,
-    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 22 },
+    shadowOpacity: 0.14,
+    shadowRadius: 34,
+  },
+  dockBlur: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
   },
   dockItem: {
     alignItems: 'center',
-    borderRadius: 22,
+    borderRadius: 28,
     flex: 1,
-    gap: 3,
-    paddingVertical: 10,
+    gap: 4,
+    minHeight: 56,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    paddingVertical: 8,
+    position: 'relative',
   },
   dockItemActive: {
-    backgroundColor: 'rgba(24, 24, 27, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.74)',
+    borderColor: 'rgba(24, 24, 27, 0.06)',
+    borderWidth: 1,
+    shadowColor: '#18181b',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
   },
   dockIcon: {
-    color: '#8a8178',
-    fontSize: 20,
+    color: '#77736d',
+    fontSize: 22,
     fontWeight: '900',
+    includeFontPadding: false,
+    lineHeight: 23,
   },
   dockIconActive: {
     color: '#18181b',
   },
   dockLabel: {
-    color: '#8a8178',
+    color: '#77736d',
     fontSize: 12,
     fontWeight: '800',
   },

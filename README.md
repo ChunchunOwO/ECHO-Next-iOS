@@ -1,99 +1,114 @@
-# ECHO iPhone
+<p align="center">
+  <img src="docs/app-icon.svg" width="86" alt="ECHO iPhone icon" />
+</p>
 
-An experimental iOS companion app for [ECHO NEXT](https://github.com/Moekotori/ECHO). It turns an iPhone into a clean music-player style client for your PC library: browse tracks, control playback, view current status, and optionally stream PC music to the phone.
+<h1 align="center">ECHO iPhone</h1>
 
-> This is an unofficial community project. It is not maintained by the official ECHO project.
+<p align="center">
+  一个为 <a href="https://github.com/Moekotori/ECHO">ECHO NEXT</a> 打造的 iPhone 音乐播放器式伴侣应用。
+</p>
 
-> If you have any concerns regarding copyright infringement, suggestions, or questions, you can find me in the official ECHO QQ group: @白雪ユキ.[QQ Group](https://qm.qq.com/q/OdpngxJU86)
+<p align="center">
+  <a href="README.en.md">English</a> · <strong>中文</strong> · <a href="RELEASE_NOTES.md">Release Notes</a>
+</p>
 
-## Highlights
+![ECHO iPhone preview](docs/preview.svg)
 
-- Simple playback page with a compact gray/white visual style.
-- Acrylic-style bottom dock with three pages: Playback, Library, and Connection.
-- Pairing-link and manual LAN connection support.
-- Live playback status refresh for title, state, progress, volume, and queue.
-- Draggable playback progress bar and draggable volume bar.
-- PC playback controls: play/pause, previous, next, seek, volume, and play library tracks.
-- Phone streaming mode for supported local tracks through EchoLink stream URLs.
-- Current queue popover from a small playlist button.
-- Single-track repeat button with real repeat behavior.
-- Lyrics toggle UI prepared for the next lyrics panel.
-- Library list with artwork, concise tags, duration, and playback entry.
-- Artwork loading through `expo-image` with memory/disk caching and fallback handling.
-- Optional technical tags when the desktop EchoLink API exposes them: codec, sample rate, bit depth, and bitrate.
+> 这是一个非官方社区项目，不隶属于 ECHO NEXT 官方仓库。
+>
+> 如果你有版权、建议或问题反馈，可以在 [ECHO 官方 QQ 群](https://qm.qq.com/q/OdpngxJU86) 联系 @白雪ユキ。
 
-## Status
+## 项目定位
 
-This app is focused on proving and improving the iPhone-side EchoLink experience. The current build is usable as a PC controller and early phone-streaming client, but it is still experimental.
+ECHO iPhone 让 iPhone 变成 ECHO NEXT 桌面端的轻量音乐播放器客户端：它可以连接电脑端 EchoLink，浏览电脑本地曲库，控制播放，查看当前播放状态，并在支持的情况下把电脑端音乐串流到手机上播放。
 
-Current limitations:
+界面方向是灰白、简洁、音乐播放器感。播放页保留居中封面模式，也提供歌词模式：封面左上、歌曲信息右侧、歌词滚动显示、当前歌词发光、底部保留紧凑控制区。
 
-- The desktop ECHO NEXT app must have EchoLink enabled.
-- iPhone and PC must be on the same LAN, and Windows Firewall must allow ECHO NEXT.
-- Phone streaming depends on the desktop endpoint and the track format being playable on iOS.
-- Some advanced features, such as a full lyrics panel and richer queue editing, are UI-ready but not finished.
-- This repo is Expo/React Native based, not a native SwiftUI app.
+## 当前能力
 
-## Requirements
+- EchoLink 配对链接连接和手动局域网连接。
+- 播放页、曲库页、连接页三页 dock，并支持左右滑动切换。
+- 高斯玻璃感按钮和液态玻璃 dock。
+- 实时刷新当前播放状态、歌名、进度、音量和队列。
+- 可拖动播放进度条。
+- 音量控制支持普通滑条，以及歌词模式下的可展开短滑条。
+- 上一首、播放/暂停、下一首。
+- 单曲循环，客户端真实可用。
+- 播放列表小窗口预览。
+- 曲库浏览、搜索、点击歌曲让电脑端播放。
+- 歌曲封面显示和失败兜底。
+- 歌词面板：拉取 `/lyrics`、解析 LRC 时间戳、当前歌词高亮、点击歌词跳转。
+- 控制/串流模式切换：可以控制电脑播放，也可以把支持的本地歌曲串流到手机。
+- 曲库与播放页标签：Local、可串流、WASAPI/ASIO、格式、采样率、位深、码率等，取决于桌面端 EchoLink 能提供的信息。
 
-- Node.js and npm
-- Expo CLI through `npx expo`
-- A Mac with Xcode for local iOS builds, or GitHub Actions for an unsigned IPA artifact
-- ECHO NEXT desktop with EchoLink support
-- Sideloadly, AltStore, Xcode, or another signing/install path for real-device testing
+## 当前限制
 
-## Install And Run
+- 电脑端必须开启 ECHO NEXT 的 EchoLink。
+- iPhone 和电脑需要在同一个局域网，Windows 防火墙需要允许 ECHO NEXT 通信。
+- 手机串流依赖桌面端 stream 接口，以及 iOS 可播放的音频格式。
+- 封面和真实音频 tag 取决于桌面端 EchoLink 返回的数据。
+- 本仓库是 Expo / React Native 项目，不是原生 SwiftUI 项目。
+
+## 环境要求
+
+- Node.js 与 npm
+- Expo CLI，通过 `npx expo`
+- 本地 iOS 构建需要 macOS + Xcode
+- Windows 用户可以通过 GitHub Actions 生成未签名 IPA
+- 真机安装需要 Sideloadly、AltStore、Xcode 或其他签名安装方式
+
+## 本地运行
 
 ```powershell
 npm install
 npm run start
 ```
 
-For static checks:
+类型检查：
 
 ```powershell
 npm run typecheck
 ```
 
-For an Expo iOS export check:
+iOS Expo 导出检查：
 
 ```powershell
 npx expo export --platform ios --output-dir build\export-check
 ```
 
-## Connect To ECHO NEXT
+## 连接 ECHO NEXT
 
-Use either pairing-link mode or manual mode.
+可以使用配对链接，也可以手动输入局域网地址。
 
-Pairing link example:
+配对链接示例：
 
 ```text
 echo://pair?host=192.168.1.12&port=26789&token=...
 ```
 
-Manual fields:
+手动连接字段：
 
-- Host: your PC LAN IP, for example `192.168.2.27`
-- Port: usually `26789`
-- Token: copied from the desktop EchoLink pairing screen
+- Host：电脑局域网 IP，例如 `192.168.2.27`
+- Port：通常是 `26789`
+- Token：从桌面端 EchoLink 配对界面复制
 
-If connection fails, check:
+如果连接失败，优先检查：
 
-- The iPhone and PC are on the same Wi-Fi/LAN.
-- ECHO NEXT is running and EchoLink is enabled.
-- Windows Firewall allows ECHO NEXT on private networks.
-- You are using the PC LAN IP, not `localhost` or a virtual adapter IP.
-- iOS local network permission is allowed for the app.
+- iPhone 和电脑是否在同一个 Wi-Fi / LAN。
+- ECHO NEXT 是否正在运行，EchoLink 是否开启。
+- Windows 防火墙是否允许 ECHO NEXT 在专用网络通信。
+- Host 是否填写电脑局域网 IP，而不是 `localhost`、虚拟网卡 IP 或公网 IP。
+- iOS 是否允许本地网络权限。
 
-## EchoLink Protocol
+## EchoLink 协议
 
-The desktop source of truth is:
+桌面端源码参考：
 
 ```text
 src/main/connect/EchoLinkService.ts
 ```
 
-Important endpoints used by this app:
+移动端当前使用的接口：
 
 ```text
 GET  /echo-link/v1/status
@@ -105,69 +120,68 @@ POST /echo-link/v1/library/tracks/:trackId/stream
 GET  /echo-link/v1/library/tracks/:trackId/lyrics
 ```
 
-Requests use:
+请求头：
 
 ```text
 Authorization: Bearer <token>
 x-echo-link-version: 1
 ```
 
-## Build Unsigned IPA
+## 构建未签名 IPA
 
-iOS builds require macOS and Xcode. Windows cannot directly build a working IPA without a macOS builder.
+iOS 构建仍然依赖 macOS 和 Xcode。Windows 不能直接生成可用 IPA，但可以触发 GitHub Actions。
 
 ### GitHub Actions
 
-1. Push this repo to GitHub.
-2. Open GitHub Actions.
-3. Run `Build iOS unsigned IPA`.
-4. Download the `ECHO-iPhone-unsigned-ipa` artifact.
-5. Sign and install with Sideloadly, AltStore, or another free Apple ID flow.
+1. 推送本仓库到 GitHub。
+2. 打开 GitHub Actions。
+3. 运行 `Build iOS unsigned IPA`。
+4. 下载 `ECHO-iPhone-unsigned-ipa` artifact。
+5. 使用 Sideloadly、AltStore 或其他方式签名安装。
 
-### Local Mac Build
+### 本地 Mac 构建
 
 ```bash
 bash scripts/build-unsigned-ipa-for-sideloadly.sh
 ```
 
-Output:
+输出：
 
 ```text
 build/ios-unsigned/ECHO-iPhone-unsigned.ipa
 ```
 
-Then sign/install it with Sideloadly or AltStore. Free Apple ID signing usually expires after 7 days.
-
-### Xcode Free Apple ID
+### Xcode 免费 Apple ID
 
 ```bash
 bash scripts/build-free-apple-id-with-xcode.sh
 ```
 
-The script opens the generated Xcode workspace. Select your Apple ID team, connect the iPhone, and press Run.
+脚本会打开生成的 Xcode workspace。选择自己的 Apple ID Team，连接 iPhone，然后 Run。
 
-## Assets
+## 资源说明
 
-The repo can include a custom `Assets.car` at the project root. The unsigned IPA script copies it into the final `.app` bundle during packaging. If the app icon still appears as the default gray placeholder, make sure the asset catalog contains an `AppIcon` entry and that iOS build settings point to it.
+- `Assets.car` 可以放在仓库根目录，未签名 IPA 脚本会在打包时复制进最终 `.app`。
+- README 顶部图标和预览图位于 `docs/`，用于项目展示，不替代 iOS AppIcon 配置。
+- 歌曲封面从 EchoLink artwork URL 加载；如果远程图片加载失败，移动端会显示 ECHO 占位。
 
-Song artwork is loaded from EchoLink artwork URLs and rendered with `expo-image`. Failed artwork URLs fall back to a neutral placeholder instead of leaving a broken gray image area.
-
-## Project Structure
+## 项目结构
 
 ```text
-App.tsx                         Main mobile UI and playback logic
-app.json                        Expo iOS configuration
-src/echoLink/client.ts          EchoLink HTTP client
-src/echoLink/types.ts           Mobile-side EchoLink types
-src/echoLink/pairing.ts         Pairing URI parser
-src/storage/connectionStore.ts  Saved connection storage
-scripts/                        iOS build helpers
-.github/workflows/              Unsigned IPA workflow
+App.tsx                         主界面、播放控制、歌词和串流逻辑
+app.json                        Expo iOS 配置
+src/echoLink/client.ts          EchoLink HTTP 客户端
+src/echoLink/types.ts           移动端 EchoLink 类型
+src/echoLink/pairing.ts         配对 URI 解析
+src/storage/connectionStore.ts  本地连接信息保存
+scripts/                        iOS 构建辅助脚本
+.github/workflows/              未签名 IPA 工作流
+docs/                           README 图标与预览图
 ```
 
-## Upload Checklist
+## 上传清单
 
-Upload:
+建议上传：
 
 - `.github/workflows/build-ios-unsigned.yml`
 - `.gitattributes`
@@ -178,21 +192,26 @@ Upload:
 - `package.json`
 - `package-lock.json`
 - `README.md`
+- `README.en.md`
+- `RELEASE_NOTES.md`
 - `tsconfig.json`
+- `docs/`
 - `scripts/`
 - `src/`
 
-Do not upload:
+不要上传：
 
 - `node_modules/`
 - `build/`
-- generated `.ipa` files
+- 生成的 `.ipa` 文件
 
-## Roadmap
+## Release 更新日志
 
-- Real lyrics panel connected to the existing lyrics toggle.
-- Better phone streaming controls and handoff polish.
-- Richer queue editing.
-- Album and artist browsing pages.
-- More resilient artwork handling for uncommon formats.
-- More complete release workflow for signed builds.
+最新更新请看 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+
+本轮重点：
+
+- 播放页歌词模式重构。
+- 左右滑动切换页面。
+- 高斯玻璃感按钮和 dock。
+- 中文默认 README、英文切换页、预览图和应用图标展示。
