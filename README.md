@@ -5,7 +5,7 @@
 <h1 align="center">ECHO iPhone</h1>
 
 <p align="center">
-  一款为 <a href="https://github.com/Moekotori/ECHO">ECHO NEXT</a> 打造的非官方 iPhone 音乐伴侣。
+  一款为 <a href="https://github.com/Moekotori/ECHO">ECHO NEXT</a> 打造的非官方 iPhone 音乐播放器。
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 ## 这是什么
 
-ECHO iPhone 把 iPhone 变成 ECHO NEXT 桌面端的音乐播放器式遥控器。它通过 EchoLink 连接电脑端，读取当前播放状态，浏览电脑本地曲库，控制播放、进度、音量、队列，并在支持的音频格式下把歌曲串流到手机播放。
+ECHO iPhone 把 iPhone 变成 ECHO NEXT 桌面端的音乐播放器。它通过 EchoLink 连接电脑端，读取当前播放状态，浏览电脑本地曲库，控制播放、进度、音量、队列，并在支持的音频格式下把歌曲串流到手机播放。
 
 这版重点重做了 UI：播放页不再空，封面、歌词、控制区和 dock 都重新整理成统一的玻璃质感界面。歌词界面使用更大的字号、自动滚动和当前行高亮，适合把手机直接当成正在播放的歌词屏。
 
