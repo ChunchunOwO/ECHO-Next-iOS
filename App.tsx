@@ -7,7 +7,6 @@ import {
   Image as RNImage,
   KeyboardAvoidingView,
   LayoutChangeEvent,
-  LayoutAnimation,
   PanResponder,
   Platform,
   Pressable,
@@ -33,6 +32,7 @@ import {
 import type { EchoLinkStatusResponse, EchoLinkTrackPreview } from './src/echoLink/types';
 import { parsePairingUri } from './src/echoLink/pairing';
 import { loadSavedConnection, saveConnection } from './src/storage/connectionStore';
+import { loadSavedSettings, saveSettings } from './src/storage/settingsStore';
 
 type AppPage = 'control' | 'library' | 'connect' | 'settings';
 type PlaybackOutputMode = 'pc' | 'phone';
@@ -304,6 +304,9 @@ function EchoLinkApp(): ReactElement {
   const [clockMs, setClockMs] = useState(() => Date.now());
   const [tracks, setTracks] = useState<EchoLinkTrackPreview[]>([]);
   const [query, setQuery] = useState('');
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const prevQueryRef = useRef(query);
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
   const [appLanguage, setAppLanguage] = useState<AppLanguage>('zh');
   const [audioTagVisibility, setAudioTagVisibility] = useState<AudioTagVisibility>(defaultAudioTagVisibility);
@@ -326,7 +329,6 @@ function EchoLinkApp(): ReactElement {
   const [phoneSeekPreviewMs, setPhoneSeekPreviewMs] = useState<number | null>(null);
   const [progressTrackWidth, setProgressTrackWidth] = useState(0);
   const [volumeTrackWidth, setVolumeTrackWidth] = useState(0);
-  const [lyricsViewportHeight, setLyricsViewportHeight] = useState(0);
   const [failedArtworkUrls, setFailedArtworkUrls] = useState<Set<string>>(() => new Set());
   const [loadedArtworkUrls, setLoadedArtworkUrls] = useState<Set<string>>(() => new Set());
   const [stableArtworkUrl, setStableArtworkUrl] = useState<string | null>(null);
@@ -505,20 +507,29 @@ function EchoLinkApp(): ReactElement {
     }
 
     try {
-      const library = await client.getLibraryTracks({ page: 1, pageSize: 20, query });
+      const library = await client.getLibraryTracks({ page: 1, pageSize: 20, query: queryRef.current });
       setTracks(library.tracks);
     } catch (libraryLoadError) {
       setLibraryError(`已连接电脑端，但曲库加载失败：${formatRequestError(libraryLoadError)}`);
     } finally {
       setBusy(false);
     }
-  }, [applyStatus, client, query]);
+  }, [applyStatus, client]);
 
   useEffect(() => {
     let mounted = true;
-    void loadSavedConnection().then((saved) => {
-      if (mounted && saved) {
-        setConnection(saved);
+    void Promise.all([loadSavedConnection(), loadSavedSettings()]).then(([savedConn, savedSettings]) => {
+      if (!mounted) {
+        return;
+      }
+      if (savedConn) {
+        setConnection(savedConn);
+      }
+      if (savedSettings.appLanguage) {
+        setAppLanguage(savedSettings.appLanguage);
+      }
+      if (savedSettings.audioTagVisibility) {
+        setAudioTagVisibility((current) => ({ ...current, ...savedSettings.audioTagVisibility }));
       }
     });
     return () => {
@@ -531,6 +542,27 @@ function EchoLinkApp(): ReactElement {
       void refresh();
     }
   }, [client, refresh]);
+
+  useEffect(() => {
+    if (!client || prevQueryRef.current === query) {
+      prevQueryRef.current = query;
+      return;
+    }
+    prevQueryRef.current = query;
+    const timer = setTimeout(async () => {
+      try {
+        const lib = await client.getLibraryTracks({ page: 1, pageSize: 20, query });
+        setTracks(lib.tracks);
+      } catch (searchError) {
+        setLibraryError(`已连接电脑端，但曲库加载失败：${formatRequestError(searchError)}`);
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [client, query]);
+
+  useEffect(() => {
+    void saveSettings({ appLanguage, audioTagVisibility });
+  }, [appLanguage, audioTagVisibility]);
 
   useEffect(() => {
     pageTransition.setValue(0);
@@ -549,12 +581,6 @@ function EchoLinkApp(): ReactElement {
       toValue: lyricsVisible ? 1 : 0,
       useNativeDriver: true,
     }).start();
-    LayoutAnimation.configureNext({
-      duration: 360,
-      update: {
-        type: LayoutAnimation.Types.easeInEaseOut,
-      },
-    });
   }, [lyricsTransition, lyricsVisible]);
 
   useEffect(() => {
@@ -564,12 +590,6 @@ function EchoLinkApp(): ReactElement {
       toValue: volumeExpanded ? 1 : 0,
       useNativeDriver: true,
     }).start();
-    LayoutAnimation.configureNext({
-      duration: 260,
-      update: {
-        type: LayoutAnimation.Types.easeInEaseOut,
-      },
-    });
   }, [volumeExpanded, volumeTransition]);
 
   useEffect(() => {
@@ -816,6 +836,7 @@ function EchoLinkApp(): ReactElement {
     ],
   };
   const isCompactPlayer = windowWidth < 390 || windowHeight < 820;
+  const lyricsViewportTargetHeight = Math.max(200, Math.round(windowHeight * 0.42));
   const playerCoverSize = isCompactPlayer ? Math.min(windowWidth - 118, 184) : Math.min(windowWidth - 96, 236);
   const playerShellPadding = isCompactPlayer ? 12 : 16;
   const playerShellGap = isCompactPlayer ? 9 : 12;
@@ -846,9 +867,9 @@ function EchoLinkApp(): ReactElement {
     if (!layout) {
       return;
     }
-    const targetY = Math.max(0, layout.y - Math.max(24, lyricsViewportHeight * 0.34));
+    const targetY = Math.max(0, layout.y - Math.max(24, lyricsViewportTargetHeight * 0.34));
     lyricsScrollRef.current.scrollTo({ animated: true, y: targetY });
-  }, [activeLyricIndex, lyricLines, lyricsVisible, lyricsViewportHeight]);
+  }, [activeLyricIndex, lyricLines, lyricsVisible, lyricsViewportTargetHeight]);
   const renderOutputSwitch = () => (
     <View style={styles.outputSwitch}>
       <Pressable
@@ -1374,7 +1395,7 @@ function EchoLinkApp(): ReactElement {
         style={[styles.volumeMiniButton, volumeExpanded ? styles.volumeMiniButtonActive : null]}
       >
         {renderButtonBlur(20)}
-        <Text style={styles.volumeMiniIcon}>VOL</Text>
+        <Text style={styles.volumeMiniIcon}>♩</Text>
         <Text style={styles.volumeMiniValue}>{volumePercent}%</Text>
       </Pressable>
       {volumeExpanded ? (
@@ -1394,7 +1415,7 @@ function EchoLinkApp(): ReactElement {
         disabled={!client && !isPhoneOutput}
       >
         {renderButtonBlur(24)}
-        <Text style={[styles.roundButtonText, lyricsMode ? styles.roundButtonTextLyrics : null]}>‹‹</Text>
+        <Text style={[styles.roundButtonText, lyricsMode ? styles.roundButtonTextLyrics : null]}>◀◀</Text>
       </Pressable>
       <Pressable
         accessibilityLabel={isPlaybackActive ? '暂停播放' : '开始播放'}
@@ -1404,11 +1425,18 @@ function EchoLinkApp(): ReactElement {
         disabled={!client && !isPhoneOutput}
       >
         {renderButtonBlur(14)}
-        <Text style={[
-          styles.playButtonText,
-          lyricsMode ? styles.playButtonTextLyrics : null,
-          isPlaybackActive ? null : styles.playButtonTextPlay,
-        ]}>{isPlaybackActive ? 'Ⅱ' : '▶'}</Text>
+        {isPlaybackActive ? (
+          <View style={[styles.pauseIconShell, lyricsMode ? styles.pauseIconShellLyrics : null]}>
+            <View style={[styles.pauseBar, lyricsMode ? styles.pauseBarLyrics : null]} />
+            <View style={[styles.pauseBar, lyricsMode ? styles.pauseBarLyrics : null]} />
+          </View>
+        ) : (
+          <Text style={[
+            styles.playButtonText,
+            lyricsMode ? styles.playButtonTextLyrics : null,
+            styles.playButtonTextPlay,
+          ]}>▶</Text>
+        )}
       </Pressable>
       <Pressable
         accessibilityLabel="下一首"
@@ -1418,7 +1446,7 @@ function EchoLinkApp(): ReactElement {
         disabled={!client && !isPhoneOutput}
       >
         {renderButtonBlur(24)}
-        <Text style={[styles.roundButtonText, lyricsMode ? styles.roundButtonTextLyrics : null]}>››</Text>
+        <Text style={[styles.roundButtonText, lyricsMode ? styles.roundButtonTextLyrics : null]}>▶▶</Text>
       </Pressable>
     </View>
   );
@@ -1461,7 +1489,7 @@ function EchoLinkApp(): ReactElement {
         style={[styles.repeatButton, compact ? styles.repeatButtonCompact : null, repeatOneEnabled ? styles.repeatButtonActive : null]}
       >
         {renderButtonBlur(repeatOneEnabled ? 10 : 22)}
-        <Text style={[styles.repeatButtonIcon, repeatOneEnabled ? styles.repeatButtonIconActive : null]}>↻</Text>
+        <Text style={[styles.repeatButtonIcon, repeatOneEnabled ? styles.repeatButtonIconActive : null]}>↺</Text>
         {repeatOneEnabled ? (
           <Text style={styles.repeatButtonBadge}>1</Text>
         ) : null}
@@ -1482,7 +1510,7 @@ function EchoLinkApp(): ReactElement {
         style={[styles.playlistMiniButton, compact ? styles.playlistMiniButtonCompact : null, playlistOpen ? styles.playlistMiniButtonActive : null]}
       >
         {renderButtonBlur(22)}
-        <Text style={styles.playlistMiniIcon}>☰</Text>
+        <Text style={styles.playlistMiniIcon}>≡</Text>
         <Text style={styles.playlistMiniCount}>{playlistItems.length}</Text>
       </Pressable>
       {compact ? null : renderExpandableVolume()}
@@ -1804,8 +1832,7 @@ function EchoLinkApp(): ReactElement {
                       {renderLyricsHeader()}
 
                       <View
-                        onLayout={(event) => setLyricsViewportHeight(event.nativeEvent.layout.height)}
-                        style={styles.lyricsViewport}
+                        style={[styles.lyricsViewport, { height: lyricsViewportTargetHeight }]}
                       >
                         <ScrollView
                           contentContainerStyle={styles.lyricsScrollContent}
@@ -1965,7 +1992,7 @@ function EchoLinkApp(): ReactElement {
               onPress={() => switchPage('control')}
             >
               {page === 'control' ? renderButtonBlur(16) : null}
-              <Text style={[styles.dockIcon, page === 'control' ? styles.dockIconActive : null]}>▷</Text>
+              <Text style={[styles.dockIcon, page === 'control' ? styles.dockIconActive : null]}>♩</Text>
               <Text style={[styles.dockLabel, page === 'control' ? styles.dockLabelActive : null]}>{languageIsEnglish ? 'Play' : '播放'}</Text>
             </Pressable>
             <Pressable
@@ -1975,7 +2002,7 @@ function EchoLinkApp(): ReactElement {
               onPress={() => switchPage('library')}
             >
               {page === 'library' ? renderButtonBlur(16) : null}
-              <Text style={[styles.dockIcon, page === 'library' ? styles.dockIconActive : null]}>≋</Text>
+              <Text style={[styles.dockIcon, page === 'library' ? styles.dockIconActive : null]}>♪</Text>
               <Text style={[styles.dockLabel, page === 'library' ? styles.dockLabelActive : null]}>{languageIsEnglish ? 'Library' : '曲库'}</Text>
             </Pressable>
             <Pressable
@@ -1995,7 +2022,7 @@ function EchoLinkApp(): ReactElement {
               onPress={() => switchPage('settings')}
             >
               {page === 'settings' ? renderButtonBlur(16) : null}
-              <Text style={[styles.dockIcon, page === 'settings' ? styles.dockIconActive : null]}>⚙</Text>
+              <Text style={[styles.dockIcon, page === 'settings' ? styles.dockIconActive : null]}>✦</Text>
               <Text style={[styles.dockLabel, page === 'settings' ? styles.dockLabelActive : null]}>{languageIsEnglish ? 'Settings' : '设置'}</Text>
             </Pressable>
           </View>
@@ -2714,7 +2741,6 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.12)',
     borderRadius: 28,
     borderWidth: 1,
-    minHeight: 238,
     overflow: 'hidden',
     shadowColor: '#18181b',
     shadowOffset: { width: 0, height: 20 },
@@ -2803,14 +2829,14 @@ const styles = StyleSheet.create({
   },
   roundButtonText: {
     color: '#f8fafc',
-    fontSize: 24,
+    fontSize: 20,
     fontWeight: '900',
     includeFontPadding: false,
-    lineHeight: 28,
+    lineHeight: 24,
     textAlign: 'center',
   },
   roundButtonTextLyrics: {
-    fontSize: 34,
+    fontSize: 26,
   },
   playButton: {
     alignItems: 'center',
@@ -2835,7 +2861,7 @@ const styles = StyleSheet.create({
     fontSize: 30,
     fontWeight: '900',
     includeFontPadding: false,
-    lineHeight: 31,
+    lineHeight: 36,
     textAlign: 'center',
   },
   playButtonTextLyrics: {
@@ -2843,6 +2869,25 @@ const styles = StyleSheet.create({
   },
   playButtonTextPlay: {
     paddingLeft: 3,
+  },
+  pauseIconShell: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    justifyContent: 'center',
+  },
+  pauseIconShellLyrics: {
+    gap: 7,
+  },
+  pauseBar: {
+    backgroundColor: '#101014',
+    borderRadius: 3,
+    height: 24,
+    width: 6,
+  },
+  pauseBarLyrics: {
+    height: 26,
+    width: 7,
   },
   repeatButton: {
     alignItems: 'center',

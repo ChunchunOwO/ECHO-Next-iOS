@@ -11,6 +11,7 @@ const isConnection = (value: unknown): value is EchoLinkConnection => {
   return (
     typeof candidate.host === 'string' &&
     typeof candidate.token === 'string' &&
+    typeof candidate.name === 'string' &&
     typeof candidate.port === 'number' &&
     (candidate.scheme === 'http' || candidate.scheme === 'https')
   );
