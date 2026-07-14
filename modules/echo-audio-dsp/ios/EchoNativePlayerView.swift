@@ -4,6 +4,19 @@ import Foundation
 import SwiftUI
 import UIKit
 
+private extension UIView {
+  func findHostingViewController() -> UIViewController? {
+    var responder: UIResponder? = self
+    while let current = responder {
+      if let controller = current as? UIViewController {
+        return controller
+      }
+      responder = current.next
+    }
+    return nil
+  }
+}
+
 private let nativeEqFrequencies = ["31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
 
 func normalizedNativeEqGains(_ gains: [Double]) -> [Double] {
@@ -75,7 +88,7 @@ public final class EchoNativePlayerView: ExpoView {
 
   public override func didMoveToWindow() {
     super.didMoveToWindow()
-    if window != nil, hostingController.view.superview == nil, let parent = reactViewController() {
+    if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
       if !(parent is UINavigationController) && !(parent is UITabBarController) {
         parent.addChild(hostingController)
       }
@@ -113,7 +126,7 @@ public final class EchoNativeEqLauncherView: ExpoView {
 
   public override func didMoveToWindow() {
     super.didMoveToWindow()
-    if window != nil, hostingController.view.superview == nil, let parent = reactViewController() {
+    if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
       if !(parent is UINavigationController) && !(parent is UITabBarController) {
         parent.addChild(hostingController)
       }
@@ -151,7 +164,7 @@ public final class EchoNativeDockView: ExpoView {
 
   public override func didMoveToWindow() {
     super.didMoveToWindow()
-    if window != nil, hostingController.view.superview == nil, let parent = reactViewController() {
+    if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
       if !(parent is UINavigationController) && !(parent is UITabBarController) {
         parent.addChild(hostingController)
       }
