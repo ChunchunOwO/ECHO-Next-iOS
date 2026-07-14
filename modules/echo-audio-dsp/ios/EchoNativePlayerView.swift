@@ -289,16 +289,24 @@ private struct EchoNativeAppScreen: View {
   private var adaptiveTabView: some View {
     TabView(selection: selection) {
       Tab(title("control"), systemImage: "headphones", value: "control") {
-        EchoNativePlayerScreen(model: playerModel, onAction: onAction)
+        themedTab {
+          EchoNativePlayerScreen(model: playerModel, onAction: onAction)
+        }
       }
       Tab(title("library"), systemImage: "music.note.list", value: "library") {
-        EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+        themedTab {
+          EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+        }
       }
       Tab(title("connect"), systemImage: "link", value: "connect") {
-        EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
+        themedTab {
+          EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
+        }
       }
       Tab(title("settings"), systemImage: "gearshape", value: "settings") {
-        EchoNativePagesScreen(model: pagesModel, page: "settings", onAction: onAction)
+        themedTab {
+          EchoNativePagesScreen(model: pagesModel, page: "settings", onAction: onAction)
+        }
       }
     }
     .tabViewStyle(.sidebarAdaptable)
@@ -307,18 +315,33 @@ private struct EchoNativeAppScreen: View {
 
   private var legacyTabView: some View {
     TabView(selection: selection) {
-      EchoNativePlayerScreen(model: playerModel, onAction: onAction)
+      themedTab {
+        EchoNativePlayerScreen(model: playerModel, onAction: onAction)
+      }
         .tag("control")
         .tabItem { Label(title("control"), systemImage: "headphones") }
-      EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+      themedTab {
+        EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+      }
         .tag("library")
         .tabItem { Label(title("library"), systemImage: "music.note.list") }
-      EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
+      themedTab {
+        EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
+      }
         .tag("connect")
         .tabItem { Label(title("connect"), systemImage: "link") }
-      EchoNativePagesScreen(model: pagesModel, page: "settings", onAction: onAction)
+      themedTab {
+        EchoNativePagesScreen(model: pagesModel, page: "settings", onAction: onAction)
+      }
         .tag("settings")
         .tabItem { Label(title("settings"), systemImage: "gearshape") }
+    }
+  }
+
+  private func themedTab<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    ZStack {
+      echoWarmBackground.ignoresSafeArea()
+      content()
     }
   }
 
