@@ -3822,7 +3822,7 @@ function EchoLinkApp(): ReactElement {
   );
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={[styles.safeArea, page === 'control' && nativePlayerEnabled ? styles.safeAreaPlayer : null]}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.root}>
         <View style={styles.pageShell} {...pagePanResponder.panHandlers}>
           <ScrollView
@@ -4241,7 +4241,7 @@ function EchoLinkApp(): ReactElement {
                               </Pressable>
                             </View>
                           ) : (
-                            <SuperconIcon glyph="play-circle" size={22} color="#22c55e" />
+                            <SuperconIcon glyph="play-circle" size={22} color="#ad2025" />
                           )}
                         </Pressable>
                       </View>
@@ -4620,6 +4620,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#101014',
   },
+  safeAreaPlayer: {
+    backgroundColor: '#f6d0c3',
+  },
   root: {
     flex: 1,
   },
@@ -4670,7 +4673,7 @@ const styles = StyleSheet.create({
   },
   nativePlayer: {
     alignSelf: 'stretch',
-    backgroundColor: '#101014',
+    backgroundColor: '#f6d0c3',
     overflow: 'hidden',
     width: '100%',
   },
@@ -4724,8 +4727,8 @@ const styles = StyleSheet.create({
     shadowRadius: 18,
   },
   statusPillOnline: {
-    backgroundColor: 'rgba(34, 197, 94, 0.16)',
-    borderColor: 'rgba(34, 197, 94, 0.28)',
+    backgroundColor: 'rgba(173, 32, 37, 0.16)',
+    borderColor: 'rgba(173, 32, 37, 0.28)',
   },
   statusPillError: {
     backgroundColor: 'rgba(127, 29, 29, 0.28)',
@@ -4738,7 +4741,7 @@ const styles = StyleSheet.create({
     width: 7,
   },
   statusDotOnline: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#ad2025',
   },
   statusDotError: {
     backgroundColor: '#dc2626',
@@ -4749,7 +4752,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   statusPillTextOnline: {
-    color: '#bbf7d0',
+    color: '#fecaca',
   },
   statusPillTextError: {
     color: '#dc2626',
@@ -4815,7 +4818,7 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     alignItems: 'center',
-    backgroundColor: '#22c55e',
+    backgroundColor: '#ad2025',
     borderRadius: 18,
     flexDirection: 'row',
     gap: 8,
@@ -5100,7 +5103,7 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   artworkGlow: {
-    backgroundColor: 'rgba(34, 197, 94, 0.52)',
+    backgroundColor: 'rgba(173, 32, 37, 0.52)',
     borderRadius: 999,
     height: 14,
     opacity: 0.42,
@@ -5245,7 +5248,7 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   outputSwitchButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.18)',
+    backgroundColor: 'rgba(173, 32, 37, 0.18)',
     shadowColor: '#18181b',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
@@ -5257,7 +5260,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   outputSwitchTextActive: {
-    color: '#bbf7d0',
+    color: '#fecaca',
   },
   phoneAudioError: {
     alignSelf: 'stretch',
@@ -5286,7 +5289,7 @@ const styles = StyleSheet.create({
     minHeight: 36,
   },
   progressFill: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#ad2025',
     borderRadius: 999,
     height: '100%',
   },
@@ -5447,8 +5450,8 @@ const styles = StyleSheet.create({
     width: 42,
   },
   repeatButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.2)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.2)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   repeatButtonBadge: {
     color: '#ffffff',
@@ -5478,8 +5481,8 @@ const styles = StyleSheet.create({
     width: 42,
   },
   lyricsButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.2)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.2)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   lyricsButtonText: {
     color: '#f8fafc',
@@ -5517,8 +5520,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 11,
   },
   playlistMiniButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.2)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.2)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   playlistMiniCount: {
     color: 'rgba(248, 250, 252, 0.58)',
@@ -5625,7 +5628,7 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   playlistItemActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.14)',
+    backgroundColor: 'rgba(173, 32, 37, 0.14)',
     borderRadius: 14,
     borderBottomWidth: 0,
     paddingHorizontal: 10,
@@ -5638,7 +5641,7 @@ const styles = StyleSheet.create({
     width: 24,
   },
   playlistIndexActive: {
-    color: '#bbf7d0',
+    color: '#fecaca',
   },
   playlistText: {
     flex: 1,
@@ -5669,7 +5672,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   playlistTitleActive: {
-    color: '#bbf7d0',
+    color: '#fecaca',
   },
   playlistMeta: {
     color: 'rgba(248, 250, 252, 0.54)',
@@ -5705,7 +5708,7 @@ const styles = StyleSheet.create({
     height: 7,
   },
   volumeFill: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#ad2025',
     borderRadius: 999,
     height: '100%',
   },
@@ -5735,8 +5738,8 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
   },
   volumeMiniButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.18)',
-    borderColor: 'rgba(34, 197, 94, 0.38)',
+    backgroundColor: 'rgba(173, 32, 37, 0.18)',
+    borderColor: 'rgba(173, 32, 37, 0.38)',
   },
   volumeMiniValue: {
     color: '#f8fafc',
@@ -5850,10 +5853,10 @@ const styles = StyleSheet.create({
     width: 34,
   },
   eqPanelBadge: {
-    borderColor: 'rgba(34, 197, 94, 0.36)',
+    borderColor: 'rgba(173, 32, 37, 0.36)',
     borderRadius: 999,
     borderWidth: 1,
-    color: '#bbf7d0',
+    color: '#fecaca',
     fontSize: 11,
     fontWeight: '900',
     overflow: 'hidden',
@@ -5941,7 +5944,7 @@ const styles = StyleSheet.create({
     width: 2,
   },
   eqBandActiveTrack: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#ad2025',
     borderRadius: 999,
     left: '50%',
     marginLeft: -1,
@@ -5949,7 +5952,7 @@ const styles = StyleSheet.create({
     width: 2,
   },
   eqBandKnob: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#ad2025',
     borderColor: '#f8fafc',
     borderRadius: 6,
     borderWidth: 2,
@@ -5983,8 +5986,8 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   eqPresetButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.22)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   eqPresetText: {
     color: 'rgba(248, 250, 252, 0.58)',
@@ -5995,7 +5998,7 @@ const styles = StyleSheet.create({
     color: '#f8fafc',
   },
   eqHint: {
-    color: '#bbf7d0',
+    color: '#fecaca',
     fontSize: 11,
     fontWeight: '800',
   },
@@ -6033,7 +6036,7 @@ const styles = StyleSheet.create({
   },
   settingsSectionCardOpen: {
     backgroundColor: 'rgba(255, 255, 255, 0.09)',
-    borderColor: 'rgba(34, 197, 94, 0.22)',
+    borderColor: 'rgba(173, 32, 37, 0.22)',
   },
   settingsSectionHeader: {
     alignItems: 'center',
@@ -6052,7 +6055,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   settingsChevron: {
-    color: '#bbf7d0',
+    color: '#fecaca',
     fontSize: 22,
     fontWeight: '900',
     includeFontPadding: false,
@@ -6075,8 +6078,8 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   segmentButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.22)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   segmentButtonText: {
     color: 'rgba(248, 250, 252, 0.58)',
@@ -6145,7 +6148,7 @@ const styles = StyleSheet.create({
     width: 52,
   },
   switchTrackActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.86)',
+    backgroundColor: 'rgba(173, 32, 37, 0.86)',
   },
   switchThumb: {
     alignSelf: 'flex-start',
@@ -6228,8 +6231,8 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   libraryFilterChipActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.22)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   libraryFilterText: {
     color: 'rgba(248, 250, 252, 0.58)',
@@ -6257,8 +6260,8 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   localViewChipActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.22)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   trackRowShell: {
     gap: 7,
@@ -6374,8 +6377,8 @@ const styles = StyleSheet.create({
     width: 29,
   },
   localTrackActionButtonActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
-    borderColor: 'rgba(34, 197, 94, 0.42)',
+    backgroundColor: 'rgba(173, 32, 37, 0.22)',
+    borderColor: 'rgba(173, 32, 37, 0.42)',
   },
   localTrackActionText: {
     color: 'rgba(248, 250, 252, 0.7)',
@@ -6384,7 +6387,7 @@ const styles = StyleSheet.create({
     includeFontPadding: false,
   },
   localTrackActionTextActive: {
-    color: '#bbf7d0',
+    color: '#fecaca',
   },
   dock: {
     alignItems: 'center',
