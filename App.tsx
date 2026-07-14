@@ -24,10 +24,12 @@ import {
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import * as FileSystem from 'expo-file-system/legacy';
+import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from 'react-native-svg';
 import {
   echoAudioDsp,
   EchoNativeDockView,
   EchoNativeEqLauncherView,
+  EchoNativePagesView,
   EchoNativePlayerView,
   type EchoAudioDspStatus,
   type EchoNativeAction,
@@ -3206,6 +3208,151 @@ function EchoLinkApp(): ReactElement {
       case 'lyrics':
         setLyricsVisible(true);
         break;
+      case 'lyricsClose':
+        setLyricsVisible(false);
+        break;
+      case 'librarySource':
+        if (action.selection === 'echo' || action.selection === 'local') {
+          setLibrarySource(action.selection);
+        }
+        break;
+      case 'libraryView':
+        if (localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
+          setLocalLibraryView(action.selection as LocalLibraryView);
+        }
+        break;
+      case 'libraryFilter':
+        if (action.selection === 'all' || action.selection === 'streamable' || action.selection === 'local') {
+          setLibraryFilter(action.selection);
+        }
+        break;
+      case 'libraryQuery':
+        setQuery(action.text ?? '');
+        break;
+      case 'libraryRefresh':
+        if (librarySource === 'local') {
+          void refreshLocalLibrary();
+        } else {
+          void refresh();
+        }
+        break;
+      case 'libraryImport':
+        void importLocalLibrary();
+        break;
+      case 'libraryPlayFirst':
+        switchToLocalPlayback();
+        break;
+      case 'trackPlay': {
+        if (action.source === 'local') {
+          const track = localTracks.find((item) => item.id === action.id);
+          if (track) void playTrackOnLocal(track, 0);
+          break;
+        }
+        const track = tracks.find((item) => item.id === action.id);
+        if (track) {
+          if (isPhoneOutput && track.canPlayOnPhone) {
+            void playTrackOnPhone(track, 0, false);
+          } else {
+            playTrackOnPc(track);
+          }
+        }
+        break;
+      }
+      case 'trackFavorite': {
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track) toggleLocalFavorite(track);
+        break;
+      }
+      case 'trackQueue': {
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track) addLocalTrackToQueue(track);
+        break;
+      }
+      case 'trackNext': {
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track) playLocalTrackNext(track);
+        break;
+      }
+      case 'trackLyrics': {
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track) void importLyricsForLocalTrack(track);
+        break;
+      }
+      case 'trackDelete': {
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track) deleteLocalTrack(track);
+        break;
+      }
+      case 'connectMode':
+        if (action.selection === 'echo' || action.selection === 'streaming') {
+          setConnectPanelMode(action.selection);
+          if (action.selection === 'streaming') {
+            showErrorAlert(text.streamingServices, text.streamingComingSoon, 'streaming-coming-soon');
+          }
+        }
+        break;
+      case 'echoConnectionEnabled':
+        if (typeof action.enabled === 'boolean') setEchoConnectionEnabled(action.enabled);
+        break;
+      case 'pairingText':
+        setPairingText(action.text ?? '');
+        break;
+      case 'pairConnection':
+        void applyPairingText();
+        break;
+      case 'connectionField':
+        if (action.field === 'host') {
+          setConnection((current) => ({ ...current, host: action.text ?? '' }));
+        } else if (action.field === 'port') {
+          setConnection((current) => ({ ...current, port: Number(action.text) || 26789 }));
+        } else if (action.field === 'token') {
+          setConnection((current) => ({ ...current, token: action.text ?? '' }));
+        }
+        break;
+      case 'connectionSave':
+        void saveManualConnection();
+        break;
+      case 'connectionTest':
+        void refresh();
+        break;
+      case 'settingToggle':
+        if (typeof action.enabled !== 'boolean') break;
+        if (action.key === 'loudness') setLoudnessNormalizationEnabled(action.enabled);
+        if (action.key === 'autoLyrics') setAutoOpenLyricsForLocalTracks(action.enabled);
+        if (action.key === 'artworkGlow') setShowArtworkGlow(action.enabled);
+        if (action.key === 'lrclib') setLrclibExternalDataEnabled(action.enabled);
+        if (action.key === 'netease') setNeteaseExternalDataEnabled(action.enabled);
+        if (action.key === 'autoQueueImports') setAutoQueueImportedLocalTracks(action.enabled);
+        if (action.key === 'confirmDelete') setConfirmBeforeDeletingLocalTracks(action.enabled);
+        if (action.key?.startsWith('audioTag.')) {
+          const key = action.key.slice('audioTag.'.length) as AudioTagKey;
+          if (audioTagOptions.some((option) => option.key === key)) {
+            setAudioTagVisibility((current) => ({ ...current, [key]: action.enabled! }));
+          }
+        }
+        break;
+      case 'settingSelect':
+        if (action.key === 'language' && (action.selection === 'zh' || action.selection === 'en')) {
+          setAppLanguage(action.selection);
+        }
+        if (action.key === 'defaultPage' && appPages.includes(action.selection as AppPage)) {
+          setDefaultPage(action.selection as AppPage);
+        }
+        if (action.key === 'defaultLibrarySource' && (action.selection === 'echo' || action.selection === 'local')) {
+          setDefaultLibrarySource(action.selection);
+          setLibrarySource(action.selection);
+        }
+        if (action.key === 'defaultLocalView' && localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
+          setDefaultLocalLibraryView(action.selection as LocalLibraryView);
+          setLocalLibraryView(action.selection as LocalLibraryView);
+        }
+        break;
+      case 'settingAction':
+        if (action.key === 'resetTags') setAudioTagVisibility(defaultAudioTagVisibility);
+        if (action.key === 'rescanMetadata') void refreshLocalLibrary();
+        if (action.key === 'clearLocalQueue') setLocalQueueTrackIds([]);
+        if (action.key === 'clearRecent') setRecentLocalTrackIds([]);
+        break;
       case 'next':
         playNext();
         break;
@@ -3797,6 +3944,7 @@ function EchoLinkApp(): ReactElement {
   );
   const renderNativePlayer = () => (
     <EchoNativePlayerView
+      activeLyricIndex={activeLyricIndex}
       artist={displayTrack?.artist ?? ''}
       artworkUrl={displayArtworkUrl ?? stableArtworkUrl ?? ''}
       connectionLabel={connectedLabel}
@@ -3807,6 +3955,9 @@ function EchoLinkApp(): ReactElement {
       eqPreset={eqPreset}
       isPlaying={isPlaybackActive}
       language={appLanguage}
+      lyricTexts={lyricLines.map((line) => line.text)}
+      lyricTimesMs={lyricLines.map((line) => line.timeMs ?? -1)}
+      lyricsVisible={lyricsVisible}
       modeLabel={playbackModeLabel}
       onAction={handleNativeAction}
       outputMode={playbackOutputMode}
@@ -3820,26 +3971,267 @@ function EchoLinkApp(): ReactElement {
       volume={outputVolume}
     />
   );
+  const renderNativePages = () => {
+    const settingToggle = (id: string, title: string, description: string, boolValue: boolean) => ({
+      boolValue,
+      description,
+      disabled: false,
+      id,
+      kind: 'toggle',
+      options: [],
+      selection: null,
+      title,
+      value: '',
+    });
+    const settingPicker = (
+      id: string,
+      title: string,
+      description: string,
+      selection: string,
+      options: Array<[string, string]>,
+    ) => ({
+      boolValue: null,
+      description,
+      disabled: false,
+      id,
+      kind: 'picker',
+      options: options.map(([optionId, label]) => ({ id: optionId, label })),
+      selection,
+      title,
+      value: '',
+    });
+    const settingAction = (id: string, title: string, description: string, disabled = false) => ({
+      boolValue: null,
+      description,
+      disabled,
+      id,
+      kind: 'action',
+      options: [],
+      selection: null,
+      title,
+      value: '',
+    });
+    const settingRows = {
+      interface: [
+        settingPicker('language', text.language, text.languageHint, appLanguage, [['zh', '中文'], ['en', 'English']]),
+        settingPicker('defaultPage', text.defaultPage, text.defaultPageHint, defaultPage, pageSettingOptions),
+      ],
+      playback: [
+        {
+          boolValue: null,
+          description: text.eqDescription,
+          disabled: false,
+          id: 'eq',
+          kind: 'eq',
+          options: [],
+          selection: null,
+          title: text.eq,
+          value: currentEqLabel,
+        },
+        settingToggle('loudness', text.loudness, text.loudnessDescription, loudnessNormalizationEnabled),
+        settingToggle('autoLyrics', text.autoLyrics, text.autoLyricsDescription, autoOpenLyricsForLocalTracks),
+        settingToggle('artworkGlow', text.glow, text.glowDescription, showArtworkGlow),
+      ],
+      externalData: [
+        settingToggle('lrclib', text.lrclibSource, text.lrclibSourceHint, lrclibExternalDataEnabled),
+        settingToggle('netease', text.neteaseSource, text.neteaseSourceHint, neteaseExternalDataEnabled),
+      ],
+      library: [
+        settingPicker(
+          'defaultLibrarySource',
+          text.defaultLibrarySource,
+          text.defaultLibrarySourceHint,
+          defaultLibrarySource,
+          librarySourceSettingOptions,
+        ),
+        settingPicker(
+          'defaultLocalView',
+          text.defaultLocalView,
+          text.defaultLocalViewHint,
+          defaultLocalLibraryView,
+          localLibraryViewOptions.map((value) => [value, labelForLocalLibraryView(value)]),
+        ),
+        settingToggle(
+          'autoQueueImports',
+          text.autoQueueImports,
+          text.autoQueueImportsDescription,
+          autoQueueImportedLocalTracks,
+        ),
+      ],
+      audioTags: [
+        ...audioTagOptions.map((option) => settingToggle(
+          `audioTag.${option.key}`,
+          languageIsEnglish ? option.labelEn : option.labelZh,
+          languageIsEnglish ? option.descriptionEn : option.descriptionZh,
+          audioTagVisibility[option.key],
+        )),
+        settingAction('resetTags', text.resetTags, text.resetTagsDescription),
+      ],
+      storage: [
+        {
+          boolValue: null,
+          description: '',
+          disabled: false,
+          id: 'storageUsed',
+          kind: 'info',
+          options: [],
+          selection: null,
+          title: text.storageUsed,
+          value: formatStorageSize(localStorageBytes),
+        },
+        settingToggle('confirmDelete', text.confirmDelete, text.confirmDeleteDescription, confirmBeforeDeletingLocalTracks),
+        settingAction('rescanMetadata', text.rescanMetadata, text.rescanMetadataDescription, localLibraryBusy),
+        settingAction('clearLocalQueue', text.clearLocalQueue, text.clearLocalQueueDescription, localQueueTrackIds.length === 0),
+        settingAction('clearRecent', text.clearRecent, text.clearRecentDescription, recentLocalTrackIds.length === 0),
+      ],
+    };
+    const sectionSymbols: Record<SettingsSectionKey, string> = {
+      interface: 'paintbrush',
+      playback: 'waveform',
+      externalData: 'globe',
+      library: 'music.note.list',
+      audioTags: 'tag',
+      storage: 'internaldrive',
+    };
+    const payload = {
+      connection: page === 'connect' ? {
+        busy: busy || !client,
+        enabled: echoConnectionEnabled,
+        host: connection.host,
+        labels: {
+          connect: text.connect,
+          connectionDescription: text.echoConnectionDescription,
+          echoConnection: text.echoConnection,
+          enabled: text.echoConnectionEnabled,
+          host: text.host,
+          hostPlaceholder: text.manualHostPlaceholder,
+          library: text.library,
+          manual: text.manual,
+          pairLink: text.pairLink,
+          port: text.portPlaceholder,
+          save: text.save,
+          streamable: text.streamable,
+          streamingComingSoon: text.streamingComingSoon,
+          streamingReserved: text.streamingReserved,
+          test: busy ? text.testing : text.test,
+          token: 'Token',
+        },
+        libraryCount: String(tracks.length),
+        mode: connectPanelMode,
+        modeOptions: connectPanelOptions.map(([id, label]) => ({ id, label })),
+        pairingText,
+        port: String(connection.port),
+        streamableCount: String(streamableTrackCount),
+        token: connection.token,
+      } : null,
+      language: appLanguage,
+      library: page === 'library' ? {
+        busy: librarySource === 'local' ? localLibraryBusy : busy || !client,
+        canPlayLocal: localTracks.length > 0,
+        filter: libraryFilter,
+        filterOptions: [
+          { id: 'all', label: `${text.all} ${tracks.length}` },
+          { id: 'streamable', label: `${text.streamable} ${streamableTrackCount}` },
+          { id: 'local', label: `${text.pcLocal} ${pcLocalTrackCount}` },
+        ],
+        labels: {
+          addToQueue: text.addToQueue,
+          deleteTrack: text.deleteLocalTrackTitle,
+          empty: librarySource === 'local' ? text.emptyLocalLibrary : text.emptyEchoLibrary,
+          favorite: languageIsEnglish ? 'Favorite' : '收藏',
+          importLyrics: text.importLyricsA11y,
+          importMusic: text.importMusic,
+          localPlay: text.localPlay,
+          playNext: text.playNextA11y,
+          refresh: librarySource === 'local' ? text.scan : text.sync,
+          searchPlaceholder: text.searchPlaceholder,
+          unfavorite: languageIsEnglish ? 'Remove Favorite' : '取消收藏',
+        },
+        query,
+        source: librarySource,
+        sourceOptions: librarySourceSettingOptions.map(([id, label]) => ({ id, label })),
+        totalLabel: languageIsEnglish ? `${activeLibraryTotal} tracks` : `${activeLibraryTotal} 首`,
+        tracks: activeLibraryTracks.map((item) => {
+          const localItem = item as LocalMusicTrack;
+          const artworkUrl = resolveArtworkUrl(item.artworkUrl);
+          return {
+            artworkUrl: artworkUrlIsVisible(artworkUrl) ? artworkUrl ?? '' : '',
+            artist: item.artist,
+            canPlayOnPhone: item.canPlayOnPhone,
+            favorite: librarySource === 'local' && favoriteLocalTrackIdSet.has(item.id),
+            group: librarySource === 'local' ? localGroupLabel(localItem) ?? '' : '',
+            hasLyrics: librarySource === 'local' && localItem.hasLyrics,
+            id: item.id,
+            isLocal: librarySource === 'local',
+            tags: tagsForTrack(item, { includeDuration: true, visibleAudioTags: audioTagVisibility }),
+            title: item.title,
+          };
+        }),
+        view: localLibraryView,
+        viewOptions: localLibraryViewOptions.map((id) => ({ id, label: labelForLocalLibraryView(id) })),
+      } : null,
+      page,
+      settings: page === 'settings' ? {
+        sections: settingsSections.map((section) => ({
+          ...section,
+          id: section.key,
+          rows: settingRows[section.key],
+          symbol: sectionSymbols[section.key],
+        })),
+        subtitle: text.settingsDescription,
+      } : null,
+      status: {
+        broken: echoConnectionBroken,
+        label: connectedLabel,
+        online: echoConnectionOnline,
+      },
+      title: pageTitle,
+    };
+    return (
+      <EchoNativePagesView
+        eqGains={eqGains}
+        eqPreset={eqPreset}
+        language={appLanguage}
+        onAction={handleNativeAction}
+        payload={JSON.stringify(payload)}
+        style={[styles.nativePages, { height: Math.max(320, windowHeight - 118) }]}
+      />
+    );
+  };
 
   return (
-    <SafeAreaView style={[styles.safeArea, page === 'control' && nativePlayerEnabled ? styles.safeAreaPlayer : null]}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.root}>
-        <View style={styles.pageShell} {...pagePanResponder.panHandlers}>
+    <View style={[styles.appRoot, nativePlayerEnabled ? styles.appRootNative : null]}>
+      {nativePlayerEnabled ? (
+        <Svg height="100%" pointerEvents="none" style={StyleSheet.absoluteFill} width="100%">
+          <Defs>
+            <SvgLinearGradient id="player-page-gradient" x1="0" x2="1" y1="0" y2="1">
+              <Stop offset="0" stopColor="#f7c9ba" />
+              <Stop offset="0.52" stopColor="#fce0b0" />
+              <Stop offset="1" stopColor="#f5d1cc" />
+            </SvgLinearGradient>
+          </Defs>
+          <Rect fill="url(#player-page-gradient)" height="100%" width="100%" x="0" y="0" />
+        </Svg>
+      ) : null}
+      <SafeAreaView style={[styles.safeArea, nativePlayerEnabled ? styles.safeAreaNative : null]}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' && !nativePlayerEnabled ? 'padding' : undefined} style={styles.root}>
+          <View style={styles.pageShell} {...(nativePlayerEnabled ? {} : pagePanResponder.panHandlers)}>
           <ScrollView
             contentContainerStyle={[
               styles.content,
               page === 'control' ? styles.playerContent : null,
-              page === 'control' && lyricsVisible ? styles.playerContentLyrics : null,
+              page === 'control' && lyricsVisible && !nativePlayerEnabled ? styles.playerContentLyrics : null,
+              page !== 'control' && nativePlayerEnabled ? styles.nativePagesContent : null,
             ]}
             alwaysBounceVertical={page !== 'control'}
             automaticallyAdjustKeyboardInsets={false}
             bounces={page !== 'control'}
             keyboardShouldPersistTaps="handled"
-            refreshControl={page === 'control' ? undefined : <RefreshControl refreshing={pullRefreshing} onRefresh={() => void refreshFromPull()} tintColor="#18181b" />}
-            scrollEnabled={page !== 'control' || lyricsVisible || volumeExpanded}
+            refreshControl={page === 'control' || nativePlayerEnabled ? undefined : <RefreshControl refreshing={pullRefreshing} onRefresh={() => void refreshFromPull()} tintColor="#18181b" />}
+            scrollEnabled={nativePlayerEnabled ? false : page !== 'control' || lyricsVisible || volumeExpanded}
           >
             <Animated.View style={[styles.pageTransition, pageAnimatedStyle]}>
-            {page !== 'control' ? (
+            {page !== 'control' && !nativePlayerEnabled ? (
               <View style={styles.header}>
                 <Text style={styles.title}>{pageTitle}</Text>
                 {page === 'connect' ? (
@@ -3873,7 +4265,9 @@ function EchoLinkApp(): ReactElement {
               </View>
             ) : null}
 
-            {page === 'connect' ? (
+            {page !== 'control' && nativePlayerEnabled ? (
+              renderNativePages()
+            ) : page === 'connect' ? (
               <View style={styles.connectPage}>
                 {connectPanelMode === 'streaming' ? (
                   <View style={styles.connectPanel}>
@@ -4295,7 +4689,7 @@ function EchoLinkApp(): ReactElement {
                   })}
                 </View>
               </View>
-            ) : nativePlayerEnabled && !lyricsVisible ? (
+            ) : nativePlayerEnabled ? (
               renderNativePlayer()
             ) : (
               <>
@@ -4601,9 +4995,10 @@ function EchoLinkApp(): ReactElement {
             </Pressable>
           </View>
           )}
-        </View>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </View>
   );
 }
 
@@ -4616,12 +5011,19 @@ export default function App(): ReactElement {
 }
 
 const styles = StyleSheet.create({
+  appRoot: {
+    flex: 1,
+    backgroundColor: '#101014',
+  },
+  appRootNative: {
+    backgroundColor: '#f6d0c3',
+  },
   safeArea: {
     flex: 1,
     backgroundColor: '#101014',
   },
-  safeAreaPlayer: {
-    backgroundColor: '#f6d0c3',
+  safeAreaNative: {
+    backgroundColor: 'transparent',
   },
   root: {
     flex: 1,
@@ -4673,9 +5075,20 @@ const styles = StyleSheet.create({
   },
   nativePlayer: {
     alignSelf: 'stretch',
-    backgroundColor: '#f6d0c3',
+    backgroundColor: 'transparent',
     overflow: 'hidden',
     width: '100%',
+  },
+  nativePages: {
+    alignSelf: 'stretch',
+    backgroundColor: 'transparent',
+    overflow: 'hidden',
+    width: '100%',
+  },
+  nativePagesContent: {
+    gap: 0,
+    padding: 0,
+    paddingBottom: 0,
   },
   playerContentLyrics: {
     justifyContent: 'center',

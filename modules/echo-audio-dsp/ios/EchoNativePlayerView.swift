@@ -4,7 +4,7 @@ import Foundation
 import SwiftUI
 import UIKit
 
-private extension UIView {
+extension UIView {
   func findHostingViewController() -> UIViewController? {
     var responder: UIResponder? = self
     while let current = responder {
@@ -17,10 +17,10 @@ private extension UIView {
   }
 }
 
-private let echoInk = Color(red: 0.17, green: 0.10, blue: 0.09)
-private let echoAccent = Color(red: 0.67, green: 0.12, blue: 0.14)
-private let echoGold = Color(red: 0.82, green: 0.55, blue: 0.08)
-private var echoWarmBackground: LinearGradient {
+let echoInk = Color(red: 0.17, green: 0.10, blue: 0.09)
+let echoAccent = Color(red: 0.67, green: 0.12, blue: 0.14)
+let echoGold = Color(red: 0.82, green: 0.55, blue: 0.08)
+var echoWarmBackground: LinearGradient {
   LinearGradient(
     colors: [
       Color(red: 0.97, green: 0.79, blue: 0.73),
@@ -32,7 +32,7 @@ private var echoWarmBackground: LinearGradient {
   )
 }
 
-private extension View {
+extension View {
   @ViewBuilder
   func echoGlass<S: Shape>(
     tint: Color? = nil,
@@ -77,7 +77,7 @@ private extension View {
 }
 
 @ViewBuilder
-private func echoGlassGroup<Content: View>(
+func echoGlassGroup<Content: View>(
   spacing: CGFloat,
   @ViewBuilder content: () -> Content
 ) -> some View {
@@ -109,6 +109,7 @@ final class EchoNativeEqualizerModel: ObservableObject {
 }
 
 final class EchoNativePlayerModel: ObservableObject {
+  @Published var activeLyricIndex = 0
   @Published var artist = ""
   @Published var artworkUrl = ""
   @Published var connectionLabel = "ECHO未连接"
@@ -117,6 +118,9 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var durationMs = 0.0
   @Published var isPlaying = false
   @Published var language = "zh"
+  @Published var lyricTexts: [String] = []
+  @Published var lyricTimesMs: [Double] = []
+  @Published var lyricsVisible = false
   @Published var modeLabel = "Controlling Mode"
   @Published var outputMode = "pc"
   @Published var positionMs = 0.0
@@ -295,7 +299,7 @@ private struct EchoNativeDockScreen: View {
       #endif
     }
     .padding(4)
-    .preferredColorScheme(model.activePage == "control" ? .light : .dark)
+    .preferredColorScheme(.light)
   }
 
   private var dockContent: some View {
@@ -303,7 +307,6 @@ private struct EchoNativeDockScreen: View {
       HStack(spacing: 6) {
         ForEach(items) { item in
           let selected = item.id == (interactionPage ?? model.activePage)
-          let lightBackground = model.activePage == "control"
           ZStack {
             selectionBackground(selected: selected)
             VStack(spacing: 2) {
@@ -314,15 +317,11 @@ private struct EchoNativeDockScreen: View {
                 .font(.system(size: 10, weight: .semibold))
                 .lineLimit(1)
             }
-            .foregroundColor(
-              lightBackground
-                ? echoInk.opacity(selected ? 1 : 0.48)
-                : Color.white.opacity(selected ? 1 : 0.5)
-            )
+            .foregroundColor(echoInk.opacity(selected ? 1 : 0.48))
           }
           .frame(maxWidth: .infinity, minHeight: 54)
           .contentShape(Capsule())
-          .scaleEffect(isInteracting && selected ? 1.1 : 1)
+          .scaleEffect(isInteracting && selected ? 1.04 : 1)
           .zIndex(selected ? 1 : 0)
           .accessibilityElement()
           .accessibilityLabel(item.title)
@@ -353,8 +352,14 @@ private struct EchoNativeDockScreen: View {
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
         Color.clear
-          .glassEffect(.regular.tint(Color.black.opacity(0.18)).interactive(), in: Capsule())
+          .glassEffect(
+            .regular
+              .tint(isInteracting ? Color.white.opacity(0.04) : Color.black.opacity(0.18))
+              .interactive(),
+            in: Capsule()
+          )
           .glassEffectID("dock-selection", in: glassNamespace)
+          .scaleEffect(x: isInteracting ? 1.48 : 1, y: isInteracting ? 1.12 : 1)
       } else {
         legacySelection
       }
@@ -367,6 +372,7 @@ private struct EchoNativeDockScreen: View {
   private var legacySelection: some View {
     Color.black.opacity(0.09)
       .echoLegacyGlass(tint: Color.black.opacity(0.12), clear: false, in: Capsule())
+      .scaleEffect(x: isInteracting ? 1.48 : 1, y: isInteracting ? 1.12 : 1)
   }
 
   private var legacyDock: some View {
@@ -423,40 +429,30 @@ private struct EchoNativeDockScreen: View {
 private struct EchoNativePlayerScreen: View {
   @ObservedObject var model: EchoNativePlayerModel
   let onAction: ([String: Any]) -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   @State private var isSeeking = false
   @State private var isSettingVolume = false
+  @State private var lastLyricsInteraction = Date.distantPast
   @State private var seekValue = 0.0
   @State private var showEqualizer = false
   @State private var volumeValue = 1.0
 
   var body: some View {
     GeometryReader { geometry in
-      let compact = geometry.size.height < 600
-      let spacing: CGFloat = compact ? 5 : 11
-      let coverScale: CGFloat = compact ? 0.24 : 0.32
-      let coverMinimum: CGFloat = compact ? 104 : 142
-      let coverMaximum: CGFloat = compact ? 138 : 232
-      let coverSize = min(
-        geometry.size.width - 72,
-        max(coverMinimum, min(coverMaximum, geometry.size.height * coverScale))
-      )
-
-      VStack(spacing: spacing) {
-        statusHeader
-        artwork(size: coverSize, compact: compact)
-        trackDetails(compact: compact)
-        progressControl
-        transportControls(compact: compact)
-        secondaryControls
-        volumeControl
-        outputControl
+      ZStack {
+        if model.lyricsVisible {
+          lyricsLayout(geometry: geometry)
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        } else {
+          playerLayout(geometry: geometry)
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        }
       }
-      .padding(.horizontal, 16)
-      .padding(.vertical, compact ? 8 : 12)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(echoWarmBackground)
+      .background(Color.clear)
     }
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: model.lyricsVisible)
     .preferredColorScheme(.light)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
@@ -470,6 +466,187 @@ private struct EchoNativePlayerScreen: View {
     }
     .onChange(of: model.volume) { value in
       if !isSettingVolume { volumeValue = value }
+    }
+  }
+
+  private func playerLayout(geometry: GeometryProxy) -> some View {
+    let compact = geometry.size.height < 600
+    let spacing: CGFloat = compact ? 5 : 11
+    let coverScale: CGFloat = compact ? 0.24 : 0.32
+    let coverMinimum: CGFloat = compact ? 104 : 142
+    let coverMaximum: CGFloat = compact ? 138 : 232
+    let coverSize = min(
+      geometry.size.width - 72,
+      max(coverMinimum, min(coverMaximum, geometry.size.height * coverScale))
+    )
+
+    return VStack(spacing: spacing) {
+      statusHeader
+      artwork(size: coverSize, compact: compact)
+      trackDetails(compact: compact)
+      progressControl
+      transportControls(compact: compact)
+      secondaryControls(lyricsMode: false)
+      volumeControl
+      outputControl
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, compact ? 8 : 12)
+  }
+
+  private func lyricsLayout(geometry: GeometryProxy) -> some View {
+    let compact = geometry.size.height < 600
+
+    return VStack(spacing: compact ? 7 : 11) {
+      lyricsHeader(compact: compact)
+      lyricsScroller(compact: compact)
+      VStack(spacing: compact ? 6 : 9) {
+        progressControl
+        transportControls(compact: true)
+        secondaryControls(lyricsMode: true)
+        volumeControl
+      }
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, compact ? 8 : 12)
+  }
+
+  private func lyricsHeader(compact: Bool) -> some View {
+    let artworkSize: CGFloat = compact ? 68 : 84
+
+    return HStack(alignment: .top, spacing: 12) {
+      EchoNativeArtwork(urlString: model.artworkUrl) {
+        onAction(["action": "artworkError", "url": model.artworkUrl])
+      }
+      .frame(width: artworkSize, height: artworkSize)
+      .clipShape(RoundedRectangle(cornerRadius: compact ? 17 : 21, style: .continuous))
+      .overlay {
+        RoundedRectangle(cornerRadius: compact ? 17 : 21, style: .continuous)
+          .stroke(Color.white.opacity(0.58), lineWidth: 1)
+      }
+
+      VStack(alignment: .leading, spacing: compact ? 3 : 5) {
+        Text(model.title)
+          .font(.system(size: compact ? 17 : 20, weight: .bold))
+          .foregroundColor(echoInk)
+          .lineLimit(2)
+          .minimumScaleFactor(0.82)
+        if !model.artist.isEmpty {
+          Text(model.artist)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.56))
+            .lineLimit(1)
+        }
+        HStack(spacing: 5) {
+          ForEach(Array(model.tags.prefix(compact ? 2 : 3)), id: \.self) { tag in
+            Text(tag)
+              .font(.system(size: 9, weight: .bold))
+              .foregroundColor(echoInk.opacity(0.68))
+              .lineLimit(1)
+              .minimumScaleFactor(0.7)
+              .padding(.horizontal, 6)
+              .frame(height: 20)
+              .overlay(Capsule().stroke(echoInk.opacity(0.14), lineWidth: 1))
+          }
+        }
+        HStack(spacing: 5) {
+          Circle()
+            .fill(model.connectionOnline ? echoGold : echoAccent)
+            .frame(width: 6, height: 6)
+          Text(model.connectionLabel)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(model.connectionOnline ? echoInk.opacity(0.62) : echoAccent)
+            .lineLimit(1)
+        }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+
+      Button {
+        onAction(["action": "lyricsClose"])
+      } label: {
+        Image(systemName: "xmark")
+          .font(.system(size: 13, weight: .bold))
+          .foregroundColor(echoInk)
+          .frame(width: 36, height: 36)
+          .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(model.language == "en" ? "Close lyrics" : "关闭歌词")
+    }
+  }
+
+  private func lyricsScroller(compact: Bool) -> some View {
+    ScrollViewReader { proxy in
+      ScrollView(.vertical, showsIndicators: false) {
+        LazyVStack(alignment: .leading, spacing: compact ? 12 : 18) {
+          ForEach(model.lyricTexts.indices, id: \.self) { index in
+            let active = index == model.activeLyricIndex
+            let distance = abs(index - model.activeLyricIndex)
+            let timeMs = lyricTime(at: index)
+            Button {
+              guard timeMs >= 0 else { return }
+              onAction(["action": "seek", "value": timeMs])
+            } label: {
+              VStack(alignment: .leading, spacing: 3) {
+                Text(model.lyricTexts[index])
+                  .font(.system(
+                    size: active ? (compact ? 20 : 24) : (distance == 1 ? 18 : 16),
+                    weight: active ? .bold : .semibold
+                  ))
+                  .foregroundColor(active ? echoInk : echoInk.opacity(distance == 1 ? 0.56 : 0.3))
+                  .multilineTextAlignment(.leading)
+                  .fixedSize(horizontal: false, vertical: true)
+                  .shadow(color: active ? Color.white.opacity(0.7) : .clear, radius: 8)
+                if timeMs >= 0 && !active {
+                  Text(formatTime(timeMs))
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(echoInk.opacity(0.32))
+                }
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(timeMs < 0)
+            .id(index)
+            .accessibilityLabel(lyricAccessibilityLabel(index: index, timeMs: timeMs))
+          }
+        }
+        .padding(.vertical, compact ? 56 : 76)
+      }
+      .simultaneousGesture(
+        DragGesture(minimumDistance: 4)
+          .onChanged { _ in lastLyricsInteraction = Date() }
+          .onEnded { _ in lastLyricsInteraction = Date() }
+      )
+      .onAppear {
+        scrollToActiveLyric(proxy, index: model.activeLyricIndex, animated: false)
+      }
+      .onChange(of: model.activeLyricIndex) { index in
+        guard Date().timeIntervalSince(lastLyricsInteraction) > 1.5 else { return }
+        scrollToActiveLyric(proxy, index: index, animated: true)
+      }
+    }
+    .frame(maxHeight: .infinity)
+  }
+
+  private func lyricTime(at index: Int) -> Double {
+    index < model.lyricTimesMs.count ? model.lyricTimesMs[index] : -1
+  }
+
+  private func lyricAccessibilityLabel(index: Int, timeMs: Double) -> String {
+    guard timeMs >= 0 else { return model.lyricTexts[index] }
+    return "\(formatTime(timeMs)), \(model.lyricTexts[index])"
+  }
+
+  private func scrollToActiveLyric(_ proxy: ScrollViewProxy, index: Int, animated: Bool) {
+    guard model.lyricTexts.indices.contains(index) else { return }
+    if animated && !reduceMotion {
+      withAnimation(.easeOut(duration: 0.3)) {
+        proxy.scrollTo(index, anchor: .center)
+      }
+    } else {
+      proxy.scrollTo(index, anchor: .center)
     }
   }
 
@@ -617,7 +794,7 @@ private struct EchoNativePlayerScreen: View {
     }
   }
 
-  private var secondaryControls: some View {
+  private func secondaryControls(lyricsMode: Bool) -> some View {
     echoGlassGroup(spacing: 8) {
       HStack(spacing: 18) {
         iconButton(
@@ -628,8 +805,12 @@ private struct EchoNativePlayerScreen: View {
           model.repeatOne.toggle()
           onAction(["action": "repeat"])
         }
-        iconButton(symbol: "quote.bubble", label: model.language == "en" ? "Lyrics" : "歌词", active: false) {
-          onAction(["action": "lyrics"])
+        iconButton(
+          symbol: lyricsMode ? "quote.bubble.fill" : "quote.bubble",
+          label: model.language == "en" ? (lyricsMode ? "Close lyrics" : "Lyrics") : (lyricsMode ? "关闭歌词" : "歌词"),
+          active: lyricsMode
+        ) {
+          onAction(["action": lyricsMode ? "lyricsClose" : "lyrics"])
         }
         ZStack(alignment: .topTrailing) {
           iconButton(symbol: "list.bullet", label: model.language == "en" ? "Queue" : "播放列表", active: false) {
@@ -742,7 +923,7 @@ private struct EchoNativePlayerScreen: View {
   }
 }
 
-private struct EchoNativeArtwork: View {
+struct EchoNativeArtwork: View {
   let urlString: String
   let onError: () -> Void
 
@@ -825,7 +1006,7 @@ private struct EchoNativeEqLauncherScreen: View {
   }
 }
 
-private struct EchoNativeEqualizerSheet: View {
+struct EchoNativeEqualizerSheet: View {
   @ObservedObject var model: EchoNativeEqualizerModel
   let onAction: ([String: Any]) -> Void
   @Environment(\.dismiss) private var dismiss

@@ -4,6 +4,7 @@ import { requireNativeModule } from 'expo-modules-core';
 export {
   EchoNativeDockView,
   EchoNativeEqLauncherView,
+  EchoNativePagesView,
   EchoNativePlayerView,
   type EchoNativeAction,
 } from './views';

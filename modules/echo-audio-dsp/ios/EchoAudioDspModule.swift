@@ -259,6 +259,7 @@ public final class EchoAudioDspModule: Module {
     View(EchoNativePlayerView.self) {
       Events("onAction")
 
+      Prop("activeLyricIndex") { (view: EchoNativePlayerView, value: Int) in view.model.activeLyricIndex = value }
       Prop("artist") { (view: EchoNativePlayerView, value: String) in view.model.artist = value }
       Prop("artworkUrl") { (view: EchoNativePlayerView, value: String) in view.model.artworkUrl = value }
       Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in view.model.connectionLabel = value }
@@ -274,6 +275,9 @@ public final class EchoAudioDspModule: Module {
         view.model.language = value
         view.model.equalizer.language = value
       }
+      Prop("lyricTexts") { (view: EchoNativePlayerView, value: [String]) in view.model.lyricTexts = value }
+      Prop("lyricTimesMs") { (view: EchoNativePlayerView, value: [Double]) in view.model.lyricTimesMs = value }
+      Prop("lyricsVisible") { (view: EchoNativePlayerView, value: Bool) in view.model.lyricsVisible = value }
       Prop("modeLabel") { (view: EchoNativePlayerView, value: String) in view.model.modeLabel = value }
       Prop("outputMode") { (view: EchoNativePlayerView, value: String) in view.model.outputMode = value }
       Prop("positionMs") { (view: EchoNativePlayerView, value: Double) in view.model.positionMs = value }
@@ -303,6 +307,17 @@ public final class EchoAudioDspModule: Module {
 
       Prop("activePage") { (view: EchoNativeDockView, value: String) in view.model.activePage = value }
       Prop("language") { (view: EchoNativeDockView, value: String) in view.model.language = value }
+    }
+
+    View(EchoNativePagesView.self) {
+      Events("onAction")
+
+      Prop("eqGains") { (view: EchoNativePagesView, value: [Double]) in
+        view.model.equalizer.gains = normalizedNativeEqGains(value)
+      }
+      Prop("eqPreset") { (view: EchoNativePagesView, value: String) in view.model.equalizer.preset = value }
+      Prop("language") { (view: EchoNativePagesView, value: String) in view.model.equalizer.language = value }
+      Prop("payload") { (view: EchoNativePagesView, value: String) in view.model.update(payloadJSON: value) }
     }
 
     AsyncFunction("playFile") { (uri: String, positionMs: Double, volume: Double, gains: [Double], loudnessEnabled: Bool) in
