@@ -24,7 +24,14 @@ import {
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import * as FileSystem from 'expo-file-system/legacy';
-import { echoAudioDsp, type EchoAudioDspStatus } from 'echo-audio-dsp';
+import {
+  echoAudioDsp,
+  EchoNativeDockView,
+  EchoNativeEqLauncherView,
+  EchoNativePlayerView,
+  type EchoAudioDspStatus,
+  type EchoNativeAction,
+} from 'echo-audio-dsp';
 import {
   createEchoLinkClient,
   EchoLinkHttpError,
@@ -56,7 +63,7 @@ type LibraryFilter = 'all' | 'streamable' | 'local';
 type LibrarySource = 'echo' | 'local';
 type LocalLibraryView = 'albums' | 'artists' | 'favorites' | 'formats' | 'recent' | 'songs';
 type SettingsSectionKey = 'audioTags' | 'externalData' | 'interface' | 'library' | 'playback' | 'storage';
-type EqPreset = 'bass' | 'clarity' | 'flat' | 'lateNight' | 'vocal' | 'warm';
+type EqPreset = 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
 type AppLanguage = 'zh' | 'en';
 type AudioTagKey = 'output' | 'source' | 'streamability' | 'quality' | 'bitrate' | 'duration';
 type AudioTagVisibility = Record<AudioTagKey, boolean>;
@@ -78,6 +85,92 @@ type AnimatedButtonContentProps = {
   children: ReactNode;
   motionKey: MotionKey;
   style?: StyleProp<ViewStyle>;
+};
+
+const eqFrequencyLabels = ['31', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k'] as const;
+const eqGainMin = -12;
+const eqGainMax = 12;
+const eqGainStep = 0.5;
+
+const clampEqGain = (gain: number): number => (
+  Math.max(eqGainMin, Math.min(eqGainMax, Math.round(gain / eqGainStep) * eqGainStep))
+);
+
+const normalizeEqGains = (gains: number[] | null | undefined): number[] => (
+  eqFrequencyLabels.map((_, index) => clampEqGain(Number.isFinite(gains?.[index]) ? gains![index]! : 0))
+);
+
+const gainForEqPosition = (locationY: number, trackHeight: number): number => (
+  clampEqGain(eqGainMax - (Math.max(0, Math.min(trackHeight, locationY)) / trackHeight) * (eqGainMax - eqGainMin))
+);
+
+const formatEqGain = (gain: number): string => `${gain > 0 ? '+' : ''}${gain.toFixed(1)}`;
+const formatEqFrequency = (label: string): string => (
+  label.endsWith('k') ? `${label.slice(0, -1)} kHz` : `${label} Hz`
+);
+
+const EqBandSlider = ({
+  gain,
+  label,
+  onChange,
+  onFocus,
+  trackHeight,
+}: {
+  gain: number;
+  label: string;
+  onChange: (gain: number) => void;
+  onFocus: () => void;
+  trackHeight: number;
+}): ReactElement => {
+  const onChangeRef = useRef(onChange);
+  const onFocusRef = useRef(onFocus);
+  onChangeRef.current = onChange;
+  onFocusRef.current = onFocus;
+
+  const updateGain = useCallback((locationY: number) => {
+    onFocusRef.current();
+    onChangeRef.current(gainForEqPosition(locationY, trackHeight));
+  }, [trackHeight]);
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (event) => updateGain(event.nativeEvent.locationY),
+    onPanResponderMove: (event) => updateGain(event.nativeEvent.locationY),
+    onPanResponderTerminationRequest: () => false,
+    onStartShouldSetPanResponder: () => true,
+  }), [updateGain]);
+  const knobTop = ((eqGainMax - gain) / (eqGainMax - eqGainMin)) * trackHeight;
+  const center = trackHeight / 2;
+
+  return (
+    <View style={styles.eqEditorBand}>
+      <View
+        accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+        accessibilityLabel={`${label} ${formatEqGain(gain)} dB`}
+        accessibilityRole="adjustable"
+        accessibilityValue={{ max: eqGainMax, min: eqGainMin, now: gain, text: `${formatEqGain(gain)} dB` }}
+        onAccessibilityAction={(event) => {
+          const delta = event.nativeEvent.actionName === 'increment' ? eqGainStep : -eqGainStep;
+          onFocus();
+          onChange(clampEqGain(gain + delta));
+        }}
+        style={[styles.eqBandTouch, { height: trackHeight }]}
+        {...panResponder.panHandlers}
+      >
+        <View style={styles.eqBandTrack} />
+        <View
+          style={[
+            styles.eqBandActiveTrack,
+            {
+              height: Math.max(2, Math.abs(knobTop - center)),
+              top: Math.min(knobTop, center),
+            },
+          ]}
+        />
+        <View style={[styles.eqBandKnob, { top: knobTop - 6 }]} />
+      </View>
+      <Text style={styles.eqFrequencyLabel}>{label}</Text>
+    </View>
+  );
 };
 
 const AnimatedButtonContent = ({ children, motionKey, style }: AnimatedButtonContentProps): ReactElement => {
@@ -223,17 +316,17 @@ const localLibraryViewOptions: LocalLibraryView[] = [
 const eqPresetOptions: Array<{
   descriptionEn: string;
   descriptionZh: string;
-  gains: [number, number, number, number, number];
+  gains: number[];
   key: EqPreset;
   labelEn: string;
   labelZh: string;
 }> = [
-  { key: 'flat', labelZh: '均衡', labelEn: 'Flat', descriptionZh: '不强调任何频段', descriptionEn: 'Neutral response', gains: [0, 0, 0, 0, 0] },
-  { key: 'bass', labelZh: '低频', labelEn: 'Bass', descriptionZh: '增强低频和律动感', descriptionEn: 'More low-end weight', gains: [5, 3, 0, -1, 0] },
-  { key: 'vocal', labelZh: '人声', labelEn: 'Vocal', descriptionZh: '突出人声和中频', descriptionEn: 'Forward vocal range', gains: [-1, 0, 4, 2, 0] },
-  { key: 'clarity', labelZh: '清晰', labelEn: 'Clarity', descriptionZh: '增强细节和空气感', descriptionEn: 'More detail and air', gains: [-2, -1, 1, 3, 4] },
-  { key: 'warm', labelZh: '暖声', labelEn: 'Warm', descriptionZh: '柔和高频，增加厚度', descriptionEn: 'Softer treble, fuller body', gains: [2, 3, 1, -1, -2] },
-  { key: 'lateNight', labelZh: '夜间', labelEn: 'Late Night', descriptionZh: '轻压动态，适合小音量', descriptionEn: 'Gentler late-night balance', gains: [-3, -1, 2, 1, -2] },
+  { key: 'flat', labelZh: '平直', labelEn: 'Flat', descriptionZh: '不强调任何频段', descriptionEn: 'Neutral response', gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  { key: 'bass', labelZh: '低频', labelEn: 'Bass', descriptionZh: '增强低频和律动感', descriptionEn: 'More low-end weight', gains: [6, 5, 4, 3, 1, 0, -1, -1, 0, 1] },
+  { key: 'vocal', labelZh: '人声', labelEn: 'Vocal', descriptionZh: '突出人声和中频', descriptionEn: 'Forward vocal range', gains: [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1] },
+  { key: 'clarity', labelZh: '清晰', labelEn: 'Clarity', descriptionZh: '增强细节和空气感', descriptionEn: 'More detail and air', gains: [-2, -1, -1, 0, 1, 2, 3, 4, 5, 4] },
+  { key: 'warm', labelZh: '暖声', labelEn: 'Warm', descriptionZh: '柔和高频，增加厚度', descriptionEn: 'Softer treble, fuller body', gains: [3, 4, 3, 2, 1, 0, -1, -2, -3, -3] },
+  { key: 'lateNight', labelZh: '夜间', labelEn: 'Late Night', descriptionZh: '轻压动态，适合小音量', descriptionEn: 'Gentler late-night balance', gains: [-3, -2, -1, 1, 2, 2, 1, 0, -2, -4] },
 ];
 const defaultEqOption = eqPresetOptions[0]!;
 
@@ -247,6 +340,7 @@ const defaultSettings: SavedSettings = {
   defaultLocalLibraryView: 'songs',
   defaultPage: 'control',
   echoConnectionEnabled: false,
+  eqGains: [...defaultEqOption.gains],
   eqPreset: 'flat',
   lrclibExternalDataEnabled: false,
   neteaseExternalDataEnabled: false,
@@ -752,8 +846,11 @@ function EchoLinkApp(): ReactElement {
   const [autoOpenLyricsForLocalTracks, setAutoOpenLyricsForLocalTracks] = useState(defaultSettings.autoOpenLyricsForLocalTracks);
   const [autoQueueImportedLocalTracks, setAutoQueueImportedLocalTracks] = useState(defaultSettings.autoQueueImportedLocalTracks);
   const [confirmBeforeDeletingLocalTracks, setConfirmBeforeDeletingLocalTracks] = useState(defaultSettings.confirmBeforeDeletingLocalTracks);
+  const [eqGains, setEqGains] = useState(() => normalizeEqGains(defaultSettings.eqGains));
   const [eqPreset, setEqPreset] = useState<EqPreset>(defaultSettings.eqPreset);
   const [eqPanelOpen, setEqPanelOpen] = useState(false);
+  const [eqPanelVisible, setEqPanelVisible] = useState(false);
+  const [activeEqBand, setActiveEqBand] = useState(4);
   const [lrclibExternalDataEnabled, setLrclibExternalDataEnabled] = useState(defaultSettings.lrclibExternalDataEnabled);
   const [neteaseExternalDataEnabled, setNeteaseExternalDataEnabled] = useState(defaultSettings.neteaseExternalDataEnabled);
   const [loudnessNormalizationEnabled, setLoudnessNormalizationEnabled] = useState(defaultSettings.loudnessNormalizationEnabled);
@@ -800,6 +897,7 @@ function EchoLinkApp(): ReactElement {
   const dockIndexTransition = useRef(new Animated.Value(appPages.indexOf('control'))).current;
   const lyricsTransition = useRef(new Animated.Value(0)).current;
   const playlistTransition = useRef(new Animated.Value(0)).current;
+  const eqTransition = useRef(new Animated.Value(0)).current;
   const volumeTransition = useRef(new Animated.Value(0)).current;
   const lyricsScrollRef = useRef<ScrollView | null>(null);
   const lyricLineLayoutsRef = useRef<Record<string, { height: number; y: number }>>({});
@@ -912,6 +1010,7 @@ function EchoLinkApp(): ReactElement {
     control: 'Control',
     controlComputerPlayback: 'Control computer playback',
     controllingMode: 'Controlling Mode',
+    customEq: 'Custom',
     defaultLibrarySource: 'Default library source',
     defaultLibrarySourceHint: 'Choose whether the library page starts with ECHO or local songs.',
     defaultLocalView: 'Default local view',
@@ -930,7 +1029,8 @@ function EchoLinkApp(): ReactElement {
     emptyEchoLibrary: client ? 'No matching tracks' : 'Connect to show the desktop library',
     emptyLocalLibrary: localTracks.length > 0 ? 'No matching local tracks' : 'Tap “Import Music” to choose audio files',
     eq: 'EQ',
-    eqDescription: 'Preset is saved for local / streaming playback. Native DSP will use it when the audio engine is connected.',
+    eqDescription: 'Ten-band EQ for local and streaming playback. Presets and manual gains are saved on this phone.',
+    eqTenBand: '10-band equalizer',
     eqUnavailable: 'EQ is for Local and Streaming modes.',
     expandVolume: 'Expand volume control',
     externalData: 'External Data',
@@ -1082,6 +1182,7 @@ function EchoLinkApp(): ReactElement {
     control: '控制',
     controlComputerPlayback: '控制电脑播放',
     controllingMode: 'Controlling Mode',
+    customEq: '手动',
     defaultLibrarySource: '默认曲库源',
     defaultLibrarySourceHint: '选择曲库页默认显示 ECHO 曲库还是手机本地曲库。',
     defaultLocalView: '默认本地视图',
@@ -1100,7 +1201,8 @@ function EchoLinkApp(): ReactElement {
     emptyEchoLibrary: client ? '没有匹配的歌曲' : '连接后会显示电脑端曲库',
     emptyLocalLibrary: localTracks.length > 0 ? '没有匹配的本地歌曲' : '点“导入音乐”选择音频文件',
     eq: 'EQ',
-    eqDescription: '预设会随本地/串流播放保存；接入原生 DSP 音频引擎后会直接生效。',
+    eqDescription: '本地/串流播放使用十段 EQ；预设和手动增益会保存在本机。',
+    eqTenBand: '十段均衡器',
     eqUnavailable: 'EQ 仅用于本地和串流模式。',
     expandVolume: '展开音量调节',
     externalData: '外源数据',
@@ -1390,8 +1492,15 @@ function EchoLinkApp(): ReactElement {
       if (typeof savedSettings.echoConnectionEnabled === 'boolean') {
         setEchoConnectionEnabled(savedSettings.echoConnectionEnabled);
       }
-      if (savedSettings.eqPreset) {
-        setEqPreset(savedSettings.eqPreset);
+      if (savedSettings.eqPreset === 'custom') {
+        setEqPreset('custom');
+        setEqGains(normalizeEqGains(savedSettings.eqGains));
+      } else {
+        const savedEqOption = eqPresetOptions.find((option) => option.key === savedSettings.eqPreset);
+        if (savedEqOption) {
+          setEqPreset(savedEqOption.key);
+          setEqGains([...savedEqOption.gains]);
+        }
       }
       if (typeof savedSettings.lrclibExternalDataEnabled === 'boolean') {
         setLrclibExternalDataEnabled(savedSettings.lrclibExternalDataEnabled);
@@ -1483,6 +1592,7 @@ function EchoLinkApp(): ReactElement {
       defaultLocalLibraryView,
       defaultPage,
       echoConnectionEnabled,
+      eqGains,
       eqPreset,
       lrclibExternalDataEnabled,
       loudnessNormalizationEnabled,
@@ -1499,6 +1609,7 @@ function EchoLinkApp(): ReactElement {
     defaultLocalLibraryView,
     defaultPage,
     echoConnectionEnabled,
+    eqGains,
     eqPreset,
     lrclibExternalDataEnabled,
     loudnessNormalizationEnabled,
@@ -1576,6 +1687,30 @@ function EchoLinkApp(): ReactElement {
       }
     });
   }, [playlistOpen, playlistTransition]);
+
+  useEffect(() => {
+    if (eqPanelOpen) {
+      setEqPanelVisible(true);
+      Animated.timing(eqTransition, {
+        duration: 240,
+        easing: Easing.out(Easing.cubic),
+        toValue: 1,
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+
+    Animated.timing(eqTransition, {
+      duration: 180,
+      easing: Easing.in(Easing.cubic),
+      toValue: 0,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) {
+        setEqPanelVisible(false);
+      }
+    });
+  }, [eqPanelOpen, eqTransition]);
 
   useEffect(() => {
     Animated.timing(volumeTransition, {
@@ -1867,9 +2002,13 @@ function EchoLinkApp(): ReactElement {
   const isPhoneOutput = playbackOutputMode === 'phone';
   const isDeviceOutput = isLocalOutput || isPhoneOutput;
   const useDspPlayback = echoAudioDsp.isAvailable && isDeviceOutput;
+  const nativePlayerEnabled = Platform.OS === 'ios' && echoAudioDsp.isAvailable;
   const currentEqOption = useMemo(() => (
     eqPresetOptions.find((option) => option.key === eqPreset) ?? defaultEqOption
   ), [eqPreset]);
+  const currentEqLabel = eqPreset === 'custom'
+    ? text.customEq
+    : languageIsEnglish ? currentEqOption.labelEn : currentEqOption.labelZh;
   const localTrackById = useMemo(() => new Map(localTracks.map((track) => [track.id, track])), [localTracks]);
   const localQueueTracks = useMemo(() => (
     localQueueTrackIds
@@ -2012,10 +2151,10 @@ function EchoLinkApp(): ReactElement {
     if (!echoAudioDsp.isAvailable) {
       return;
     }
-    void echoAudioDsp.setEq(currentEqOption.gains).catch((dspError) => {
+    void echoAudioDsp.setEq(eqGains).catch((dspError) => {
       setPhoneAudioError(formatPhoneAudioError(dspError));
     });
-  }, [currentEqOption]);
+  }, [eqGains]);
 
   useEffect(() => {
     if (!echoAudioDsp.isAvailable) {
@@ -2217,7 +2356,28 @@ function EchoLinkApp(): ReactElement {
       },
     ],
   };
+  const eqBackdropAnimatedStyle = {
+    opacity: eqTransition,
+  };
+  const eqModalAnimatedStyle = {
+    opacity: eqTransition,
+    transform: [
+      {
+        translateY: eqTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [24, 0],
+        }),
+      },
+      {
+        scale: eqTransition.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.96, 1],
+        }),
+      },
+    ],
+  };
   const isCompactPlayer = windowWidth < 390 || windowHeight < 820;
+  const eqTrackHeight = windowHeight < 760 ? 170 : 216;
   const lyricsViewportTargetHeight = Math.max(200, Math.round(windowHeight * 0.42));
   const playerCoverSize = isCompactPlayer ? Math.min(windowWidth - 118, 184) : Math.min(windowWidth - 96, 236);
   const playerShellPadding = isCompactPlayer ? 12 : 16;
@@ -2418,7 +2578,7 @@ function EchoLinkApp(): ReactElement {
       phonePlayer.clearLockScreenControls();
       if (echoAudioDsp.isAvailable) {
         await echoAudioDsp.playFile(track.uri, {
-          gains: currentEqOption.gains,
+          gains: eqGains,
           loudnessEnabled: loudnessNormalizationEnabled,
           positionMs,
           volume: phoneVolume,
@@ -2448,7 +2608,7 @@ function EchoLinkApp(): ReactElement {
     } catch (localPlaybackError) {
       setPhoneAudioError(formatPhoneAudioError(localPlaybackError));
     }
-  }, [autoOpenLyricsForLocalTracks, currentEqOption, loudnessNormalizationEnabled, markLocalTrackPlayed, phonePlayer, phoneVolume]);
+  }, [autoOpenLyricsForLocalTracks, eqGains, loudnessNormalizationEnabled, markLocalTrackPlayed, phonePlayer, phoneVolume]);
 
   const switchToLocalPlayback = useCallback(() => {
     if (isLocalOutput) {
@@ -2495,7 +2655,7 @@ function EchoLinkApp(): ReactElement {
         phonePlayer.clearLockScreenControls();
         const cachedStreamUri = await downloadStreamForDsp(stream.streamUrl, stream.track);
         await echoAudioDsp.playFile(cachedStreamUri, {
-          gains: currentEqOption.gains,
+          gains: eqGains,
           loudnessEnabled: loudnessNormalizationEnabled,
           positionMs,
           volume: nextVolume,
@@ -2532,7 +2692,7 @@ function EchoLinkApp(): ReactElement {
     } finally {
       setPhoneAudioBusy(false);
     }
-  }, [applyStatus, client, currentEqOption, isDeviceOutput, loudnessNormalizationEnabled, phonePlayer, phoneVolume, status, text.streamUnsupportedMessage]);
+  }, [applyStatus, client, eqGains, isDeviceOutput, loudnessNormalizationEnabled, phonePlayer, phoneVolume, status, text.streamUnsupportedMessage]);
 
   const switchToPhonePlayback = useCallback(() => {
     if (isPhoneOutput) {
@@ -2736,12 +2896,11 @@ function EchoLinkApp(): ReactElement {
     status?.playback.track,
   ]);
 
-  const updateSeekFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
-    if ((!status && !isDeviceOutput) || !playbackDurationMs || progressTrackWidth <= 0) {
+  const seekToPosition = useCallback((requestedPositionMs: number, commit: boolean) => {
+    if ((!status && !isDeviceOutput) || !playbackDurationMs) {
       return;
     }
-    const ratio = ratioFromGesture(event, progressTrackWidth);
-    const positionMs = Math.round(playbackDurationMs * ratio);
+    const positionMs = Math.max(0, Math.min(playbackDurationMs, Math.round(requestedPositionMs)));
     if (isDeviceOutput) {
       setPhoneSeekPreviewMs(commit ? null : positionMs);
       if (commit) {
@@ -2768,7 +2927,14 @@ function EchoLinkApp(): ReactElement {
         sliderInteractionInFlight.current = false;
       });
     }
-  }, [isDeviceOutput, patchPlayback, phonePlayer, playbackDurationMs, progressTrackWidth, sendCommand, status, useDspPlayback]);
+  }, [isDeviceOutput, patchPlayback, phonePlayer, playbackDurationMs, sendCommand, status, useDspPlayback]);
+
+  const updateSeekFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
+    if (progressTrackWidth <= 0) {
+      return;
+    }
+    seekToPosition(playbackDurationMs * ratioFromGesture(event, progressTrackWidth), commit);
+  }, [playbackDurationMs, progressTrackWidth, seekToPosition]);
 
   const seekToLyric = useCallback((line: LyricLine) => {
     if (line.timeMs === null || (!status && !isDeviceOutput)) {
@@ -2794,11 +2960,11 @@ function EchoLinkApp(): ReactElement {
     void sendCommand({ command: 'seekTo', positionMs: line.timeMs });
   }, [isDeviceOutput, patchPlayback, phonePlayer, sendCommand, status, useDspPlayback]);
 
-  const updateVolumeFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
-    if ((!status && !isDeviceOutput) || volumeTrackWidth <= 0) {
+  const setPlaybackVolume = useCallback((requestedVolume: number, commit: boolean) => {
+    if (!status && !isDeviceOutput) {
       return;
     }
-    const volume = ratioFromGesture(event, volumeTrackWidth);
+    const volume = clamp01(requestedVolume);
     if (isDeviceOutput) {
       setPhoneVolume(volume);
       if (useDspPlayback) {
@@ -2816,7 +2982,14 @@ function EchoLinkApp(): ReactElement {
     if (commit) {
       void sendCommand({ command: 'setVolume', volume });
     }
-  }, [isDeviceOutput, patchPlayback, phonePlayer, sendCommand, status, useDspPlayback, volumeTrackWidth]);
+  }, [isDeviceOutput, patchPlayback, phonePlayer, sendCommand, status, useDspPlayback]);
+
+  const updateVolumeFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
+    if (volumeTrackWidth <= 0) {
+      return;
+    }
+    setPlaybackVolume(ratioFromGesture(event, volumeTrackWidth), commit);
+  }, [setPlaybackVolume, volumeTrackWidth]);
 
   const handleProgressLayout = useCallback((event: LayoutChangeEvent) => {
     setProgressTrackWidth(event.nativeEvent.layout.width);
@@ -2924,7 +3097,7 @@ function EchoLinkApp(): ReactElement {
     {
       description: text.playbackSettingsDescription,
       key: 'playback',
-      summary: `${languageIsEnglish ? currentEqOption.labelEn : currentEqOption.labelZh} · ${loudnessNormalizationEnabled ? text.loudness : 'DSP'}`,
+      summary: `${currentEqLabel} · ${loudnessNormalizationEnabled ? text.loudness : 'DSP'}`,
       title: text.playback,
     },
     {
@@ -2957,7 +3130,7 @@ function EchoLinkApp(): ReactElement {
   ], [
     appLanguage,
     autoOpenLyricsForLocalTracks,
-    currentEqOption,
+    currentEqLabel,
     defaultLibrarySource,
     defaultLocalLibraryView,
     defaultPage,
@@ -2997,6 +3170,77 @@ function EchoLinkApp(): ReactElement {
       ))}
     </View>
   );
+  const openEqPanel = () => {
+    setPlaylistOpen(false);
+    setVolumeExpanded(false);
+    setEqPanelOpen(true);
+  };
+  const applyEqPreset = (option: (typeof eqPresetOptions)[number]) => {
+    setEqPreset(option.key);
+    setEqGains([...option.gains]);
+  };
+  const updateEqBand = (index: number, gain: number) => {
+    setEqPreset('custom');
+    setEqGains((current) => normalizeEqGains(current).map((value, bandIndex) => (
+      bandIndex === index ? clampEqGain(gain) : value
+    )));
+  };
+  const handleNativeAction = (event: { nativeEvent: EchoNativeAction }) => {
+    const action = event.nativeEvent;
+    switch (action.action) {
+      case 'artworkError':
+        markArtworkUrlFailed(action.url);
+        break;
+      case 'eqChange':
+        if (typeof action.index === 'number' && typeof action.value === 'number') {
+          updateEqBand(action.index, action.value);
+        }
+        break;
+      case 'eqPreset': {
+        const option = eqPresetOptions.find((item) => item.key === action.preset);
+        if (option) {
+          applyEqPreset(option);
+        }
+        break;
+      }
+      case 'lyrics':
+        setLyricsVisible(true);
+        break;
+      case 'next':
+        playNext();
+        break;
+      case 'output':
+        if (action.mode === 'local') switchToLocalPlayback();
+        if (action.mode === 'pc') switchToPcPlayback();
+        if (action.mode === 'phone') switchToPhonePlayback();
+        break;
+      case 'page':
+        if (action.page) switchPage(action.page);
+        break;
+      case 'playPause':
+        togglePlayPause();
+        break;
+      case 'playlist':
+        setPlaylistOpen(true);
+        break;
+      case 'previous':
+        playPrevious();
+        break;
+      case 'repeat':
+        setRepeatOneEnabled((current) => !current);
+        break;
+      case 'seek':
+        if (typeof action.value === 'number') {
+          seekToPosition(action.value, true);
+        }
+        break;
+      case 'volume':
+        if (typeof action.value === 'number') {
+          setPlaybackVolume(action.value, action.commit ?? true);
+        }
+        break;
+    }
+  };
   const renderSettingSwitch = (
     title: string,
     description: string,
@@ -3067,28 +3311,18 @@ function EchoLinkApp(): ReactElement {
     if (section === 'playback') {
       return (
         <View style={styles.settingsList}>
-          <View style={styles.settingGroupBlock}>
-            <Text style={styles.settingGroupTitle}>{text.eq}</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.eqPresetRow}>
-              {eqPresetOptions.map((option) => {
-                const active = option.key === eqPreset;
-                const label = languageIsEnglish ? option.labelEn : option.labelZh;
-                return (
-                  <Pressable
-                    accessibilityLabel={`${text.eq} ${label}`}
-                    accessibilityRole="button"
-                    key={option.key}
-                    onPress={() => setEqPreset(option.key)}
-                    style={[styles.eqPresetButton, active ? styles.eqPresetButtonActive : null]}
-                  >
-                    {renderButtonBlur(active ? 10 : 20)}
-                    <Text style={[styles.eqPresetText, active ? styles.eqPresetTextActive : null]}>{label}</Text>
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-            <Text style={styles.settingDescription}>{text.eqDescription}</Text>
-          </View>
+          {nativePlayerEnabled ? (
+            <EchoNativeEqLauncherView
+              description={text.eqDescription}
+              eqGains={eqGains}
+              eqPreset={eqPreset}
+              label={currentEqLabel}
+              language={appLanguage}
+              onAction={handleNativeAction}
+              style={styles.nativeEqLauncher}
+              title={text.eq}
+            />
+          ) : renderSettingAction(text.eq, `${currentEqLabel} · ${text.eqDescription}`, openEqPanel)}
           {renderSettingSwitch(text.loudness, text.loudnessDescription, loudnessNormalizationEnabled, setLoudnessNormalizationEnabled)}
           {renderSettingSwitch(text.autoLyrics, text.autoLyricsDescription, autoOpenLyricsForLocalTracks, setAutoOpenLyricsForLocalTracks)}
           {renderSettingSwitch(text.glow, text.glowDescription, showArtworkGlow, setShowArtworkGlow)}
@@ -3343,59 +3577,95 @@ function EchoLinkApp(): ReactElement {
       ) : null}
     </View>
   );
-  const renderEqPresetButton = (option: (typeof eqPresetOptions)[number]) => {
-    const active = option.key === eqPreset;
-    const label = languageIsEnglish ? option.labelEn : option.labelZh;
-    return (
-      <Pressable
-        accessibilityLabel={`${text.eq} ${label}`}
-        accessibilityRole="button"
-        key={option.key}
-        onPress={() => setEqPreset(option.key)}
-        style={[styles.eqPresetButton, active ? styles.eqPresetButtonActive : null]}
-      >
-        {renderButtonBlur(active ? 10 : 20)}
-        <Text style={[styles.eqPresetText, active ? styles.eqPresetTextActive : null]}>{label}</Text>
-      </Pressable>
-    );
-  };
-  const renderEqPanel = () => (
-    eqPanelOpen ? (
-      <Animated.View style={[styles.eqPanel, volumeExpandedAnimatedStyle]}>
-        <View style={styles.eqPanelHeader}>
-          <View>
-            <Text style={styles.eqPanelTitle}>{text.eq}</Text>
-            <Text style={styles.eqPanelDescription} numberOfLines={2}>
-              {isDeviceOutput
-                ? (languageIsEnglish ? currentEqOption?.descriptionEn : currentEqOption?.descriptionZh)
-                : text.eqUnavailable}
-            </Text>
+  const renderEqModal = () => (
+    eqPanelVisible ? (
+      <View style={styles.eqOverlay}>
+        <Animated.View style={[styles.eqBackdrop, eqBackdropAnimatedStyle]}>
+          <Pressable
+            accessibilityLabel={text.closeEqPanel}
+            accessibilityRole="button"
+            onPress={() => setEqPanelOpen(false)}
+            style={styles.eqBackdropPressable}
+          />
+        </Animated.View>
+        <Animated.View
+          accessibilityLabel={text.eqTenBand}
+          accessibilityViewIsModal
+          style={[styles.eqModal, eqModalAnimatedStyle]}
+        >
+          <BlurView intensity={54} pointerEvents="none" style={styles.eqModalBlur} tint="dark" />
+          <View style={styles.eqModalHeader}>
+            <View style={styles.eqModalHeading}>
+              <Text style={styles.eqModalTitle}>{text.eq}</Text>
+              <Text style={styles.eqModalSubtitle}>{isDeviceOutput ? text.eqTenBand : text.eqUnavailable}</Text>
+            </View>
+            <View style={styles.eqModalHeaderActions}>
+              <Text style={styles.eqPanelBadge}>{currentEqLabel}</Text>
+              <Pressable
+                accessibilityLabel={text.closeEqPanel}
+                accessibilityRole="button"
+                hitSlop={8}
+                onPress={() => setEqPanelOpen(false)}
+                style={styles.eqCloseButton}
+              >
+                <SuperconIcon glyph="view-close-small" size={18} color="#f8fafc" />
+              </Pressable>
+            </View>
           </View>
-          <Text style={styles.eqPanelBadge}>{languageIsEnglish ? currentEqOption?.labelEn : currentEqOption?.labelZh}</Text>
-        </View>
-        <View style={styles.eqCurveRow}>
-          {currentEqOption?.gains.map((gain, index) => (
-            <View key={`${eqPreset}-${index}`} style={styles.eqBand}>
-              <View style={styles.eqBandRail}>
-                <View
-                  style={[
-                    styles.eqBandFill,
-                    {
-                      height: `${Math.max(10, Math.min(100, 50 + gain * 8))}%`,
-                    },
-                  ]}
-                />
+
+          <View style={styles.eqReadout}>
+            <Text style={styles.eqReadoutFrequency}>{formatEqFrequency(eqFrequencyLabels[activeEqBand]!)}</Text>
+            <Text style={styles.eqReadoutGain}>{formatEqGain(eqGains[activeEqBand] ?? 0)} dB</Text>
+          </View>
+
+          <View style={styles.eqChartRow}>
+            <View style={[styles.eqYAxis, { height: eqTrackHeight }]}>
+              {[12, 6, 0, -6, -12].map((gain) => (
+                <Text key={gain} style={styles.eqYAxisLabel}>{gain > 0 ? '+' : ''}{gain}dB</Text>
+              ))}
+            </View>
+            <View style={styles.eqPlotColumn}>
+              <View pointerEvents="none" style={[styles.eqGrid, { height: eqTrackHeight }]}>
+                {[0, 1, 2, 3, 4].map((line) => (
+                  <View key={line} style={[styles.eqGridLine, { top: line * eqTrackHeight / 4 }]} />
+                ))}
+              </View>
+              <View style={styles.eqBandsRow}>
+                {eqFrequencyLabels.map((label, index) => (
+                  <EqBandSlider
+                    gain={eqGains[index] ?? 0}
+                    key={label}
+                    label={label}
+                    onChange={(gain) => updateEqBand(index, gain)}
+                    onFocus={() => setActiveEqBand(index)}
+                    trackHeight={eqTrackHeight}
+                  />
+                ))}
               </View>
             </View>
-          ))}
-        </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.eqPresetRow}>
-          {eqPresetOptions.map(renderEqPresetButton)}
-        </ScrollView>
-        {loudnessNormalizationEnabled ? (
-          <Text style={styles.eqHint}>{text.loudnessEnabled}</Text>
-        ) : null}
-      </Animated.View>
+          </View>
+
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.eqPresetRow}>
+            {eqPresetOptions.map((option) => {
+              const active = option.key === eqPreset;
+              const label = languageIsEnglish ? option.labelEn : option.labelZh;
+              return (
+                <Pressable
+                  accessibilityLabel={`${text.eq} ${label}`}
+                  accessibilityRole="button"
+                  key={option.key}
+                  onPress={() => applyEqPreset(option)}
+                  style={[styles.eqPresetButton, active ? styles.eqPresetButtonActive : null]}
+                >
+                  {renderButtonBlur(active ? 10 : 20)}
+                  <Text style={[styles.eqPresetText, active ? styles.eqPresetTextActive : null]}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          {loudnessNormalizationEnabled ? <Text style={styles.eqHint}>{text.loudnessEnabled}</Text> : null}
+        </Animated.View>
+      </View>
     ) : null
   );
   const renderTransportControls = (lyricsMode = false) => (
@@ -3514,7 +3784,7 @@ function EchoLinkApp(): ReactElement {
       <Pressable
         accessibilityLabel={eqPanelOpen ? text.closeEqPanel : text.openEqPanel}
         accessibilityRole="button"
-        onPress={() => setEqPanelOpen((current) => !current)}
+        onPress={() => eqPanelOpen ? setEqPanelOpen(false) : openEqPanel()}
         style={[styles.lyricsButton, compact ? styles.lyricsButtonCompact : null, eqPanelOpen ? styles.lyricsButtonActive : null]}
       >
         {renderButtonBlur(eqPanelOpen ? 10 : 22)}
@@ -3524,6 +3794,31 @@ function EchoLinkApp(): ReactElement {
       </Pressable>
       {compact ? null : renderExpandableVolume()}
     </View>
+  );
+  const renderNativePlayer = () => (
+    <EchoNativePlayerView
+      artist={displayTrack?.artist ?? ''}
+      artworkUrl={displayArtworkUrl ?? stableArtworkUrl ?? ''}
+      connectionLabel={connectedLabel}
+      connectionOnline={echoConnectionOnline}
+      controlsEnabled={Boolean(client || isDeviceOutput || localTracks.length > 0)}
+      durationMs={playbackDurationMs}
+      eqGains={eqGains}
+      eqPreset={eqPreset}
+      isPlaying={isPlaybackActive}
+      language={appLanguage}
+      modeLabel={playbackModeLabel}
+      onAction={handleNativeAction}
+      outputMode={playbackOutputMode}
+      positionMs={playbackPositionMs}
+      queueCount={playlistItems.length}
+      repeatOne={repeatOneEnabled}
+      showArtworkGlow={showArtworkGlow}
+      style={[styles.nativePlayer, { height: Math.max(440, windowHeight - 210) }]}
+      tags={playbackTags}
+      title={displayTrack?.title ?? text.noTrack}
+      volume={outputVolume}
+    />
   );
 
   return (
@@ -4000,6 +4295,8 @@ function EchoLinkApp(): ReactElement {
                   })}
                 </View>
               </View>
+            ) : nativePlayerEnabled && !lyricsVisible ? (
+              renderNativePlayer()
             ) : (
               <>
                 <View
@@ -4064,7 +4361,6 @@ function EchoLinkApp(): ReactElement {
                         </View>
                         {renderTransportControls(true)}
                         {renderSecondaryControls(true)}
-                        {renderEqPanel()}
                       </View>
                     </Animated.View>
                   ) : (
@@ -4092,7 +4388,6 @@ function EchoLinkApp(): ReactElement {
                         {renderProgressScrubber()}
                         {renderTransportControls()}
                         {renderSecondaryControls()}
-                        {renderEqPanel()}
                       </View>
 
                       {renderOutputSwitch()}
@@ -4103,6 +4398,8 @@ function EchoLinkApp(): ReactElement {
             )}
             </Animated.View>
           </ScrollView>
+
+          {renderEqModal()}
 
           {page === 'control' && playlistVisible ? (
             <View style={styles.playlistOverlay} pointerEvents="box-none">
@@ -4229,6 +4526,14 @@ function EchoLinkApp(): ReactElement {
             </View>
           ) : null}
 
+          {nativePlayerEnabled ? (
+            <EchoNativeDockView
+              activePage={page}
+              language={appLanguage}
+              onAction={handleNativeAction}
+              style={styles.nativeDock}
+            />
+          ) : (
           <View style={styles.dock} onLayout={handleDockLayout}>
             <BlurView intensity={34} pointerEvents="none" style={styles.dockBlur} tint="dark" />
             <Animated.View pointerEvents="none" style={[styles.dockActiveIndicator, dockIndicatorAnimatedStyle]}>
@@ -4295,6 +4600,7 @@ function EchoLinkApp(): ReactElement {
               </AnimatedButtonContent>
             </Pressable>
           </View>
+          )}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -4361,6 +4667,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingBottom: 94,
     paddingTop: 30,
+  },
+  nativePlayer: {
+    alignSelf: 'stretch',
+    backgroundColor: '#101014',
+    overflow: 'hidden',
+    width: '100%',
   },
   playerContentLyrics: {
     justifyContent: 'center',
@@ -5460,32 +5772,82 @@ const styles = StyleSheet.create({
     minWidth: 34,
     textAlign: 'right',
   },
-  eqPanel: {
-    alignSelf: 'stretch',
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    borderRadius: 22,
-    borderWidth: 1,
-    gap: 10,
-    overflow: 'hidden',
-    padding: 12,
+  eqOverlay: {
+    alignItems: 'center',
+    bottom: 0,
+    justifyContent: 'center',
+    left: 0,
+    paddingHorizontal: 12,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    zIndex: 30,
   },
-  eqPanelHeader: {
-    alignItems: 'flex-start',
+  eqBackdrop: {
+    backgroundColor: 'rgba(0, 0, 0, 0.64)',
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  eqBackdropPressable: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  eqModal: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(18, 18, 22, 0.92)',
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    borderRadius: 24,
+    borderWidth: 1,
+    gap: 14,
+    maxWidth: 520,
+    overflow: 'hidden',
+    padding: 16,
+    width: '100%',
+  },
+  eqModalBlur: {
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  eqModalHeader: {
+    alignItems: 'center',
     flexDirection: 'row',
     gap: 12,
     justifyContent: 'space-between',
   },
-  eqPanelTitle: {
+  eqModalHeading: {
+    flex: 1,
+    gap: 2,
+  },
+  eqModalTitle: {
     color: '#f8fafc',
-    fontSize: 16,
+    fontSize: 20,
     fontWeight: '900',
   },
-  eqPanelDescription: {
+  eqModalSubtitle: {
     color: 'rgba(248, 250, 252, 0.54)',
     fontSize: 12,
-    lineHeight: 17,
-    maxWidth: 220,
+  },
+  eqModalHeaderActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  eqCloseButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 17,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
   },
   eqPanelBadge: {
     borderColor: 'rgba(34, 197, 94, 0.36)',
@@ -5498,31 +5860,111 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 5,
   },
-  eqCurveRow: {
-    alignItems: 'flex-end',
+  eqReadout: {
+    alignItems: 'baseline',
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingBottom: 10,
+  },
+  eqReadoutFrequency: {
+    color: 'rgba(248, 250, 252, 0.62)',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  eqReadoutGain: {
+    color: '#f8fafc',
+    fontSize: 22,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '900',
+  },
+  eqChartRow: {
+    alignItems: 'flex-start',
     flexDirection: 'row',
     gap: 8,
-    height: 54,
-    justifyContent: 'center',
   },
-  eqBand: {
+  eqYAxis: {
+    justifyContent: 'space-between',
+    paddingVertical: 0,
+    width: 38,
+  },
+  eqYAxisLabel: {
+    color: 'rgba(248, 250, 252, 0.44)',
+    fontSize: 9,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '700',
+    lineHeight: 10,
+    textAlign: 'right',
+  },
+  eqPlotColumn: {
+    flex: 1,
+    position: 'relative',
+  },
+  eqGrid: {
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  eqGridLine: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    height: 1,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+  },
+  eqBandsRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: 2,
+  },
+  eqEditorBand: {
     alignItems: 'center',
     flex: 1,
-    maxWidth: 34,
+    gap: 7,
+    minWidth: 0,
   },
-  eqBandRail: {
+  eqBandTouch: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 999,
-    height: 54,
-    justifyContent: 'flex-end',
-    overflow: 'hidden',
-    width: 9,
+    maxWidth: 30,
+    position: 'relative',
+    width: '100%',
   },
-  eqBandFill: {
+  eqBandTrack: {
+    backgroundColor: 'rgba(248, 250, 252, 0.22)',
+    bottom: 0,
+    left: '50%',
+    marginLeft: -1,
+    position: 'absolute',
+    top: 0,
+    width: 2,
+  },
+  eqBandActiveTrack: {
     backgroundColor: '#22c55e',
     borderRadius: 999,
-    width: '100%',
+    left: '50%',
+    marginLeft: -1,
+    position: 'absolute',
+    width: 2,
+  },
+  eqBandKnob: {
+    backgroundColor: '#22c55e',
+    borderColor: '#f8fafc',
+    borderRadius: 6,
+    borderWidth: 2,
+    height: 12,
+    left: '50%',
+    marginLeft: -6,
+    position: 'absolute',
+    width: 12,
+  },
+  eqFrequencyLabel: {
+    color: 'rgba(248, 250, 252, 0.54)',
+    fontSize: 9,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '800',
+    textAlign: 'center',
   },
   eqPresetRow: {
     gap: 8,
@@ -5646,6 +6088,12 @@ const styles = StyleSheet.create({
   },
   settingsList: {
     gap: 8,
+  },
+  nativeEqLauncher: {
+    alignSelf: 'stretch',
+    height: 68,
+    overflow: 'hidden',
+    width: '100%',
   },
   settingGroupBlock: {
     gap: 8,
@@ -5958,6 +6406,14 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 18 },
     shadowOpacity: 0.14,
     shadowRadius: 28,
+  },
+  nativeDock: {
+    bottom: 10,
+    height: 74,
+    left: 12,
+    position: 'absolute',
+    right: 12,
+    zIndex: 20,
   },
   dockBlur: {
     bottom: 0,

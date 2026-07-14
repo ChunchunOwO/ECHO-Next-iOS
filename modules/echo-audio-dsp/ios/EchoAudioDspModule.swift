@@ -6,7 +6,7 @@ import ExpoModulesCore
 private final class DspPlaybackEngine {
   private let engine = AVAudioEngine()
   private let player = AVAudioPlayerNode()
-  private let eq = AVAudioUnitEQ(numberOfBands: 5)
+  private let eq = AVAudioUnitEQ(numberOfBands: 10)
   private let dynamics = DspPlaybackEngine.makeDynamicsProcessor()
   private var audioFile: AVAudioFile?
   private var sampleRate: Double = 44_100
@@ -18,7 +18,7 @@ private final class DspPlaybackEngine {
   private var configured = false
 
   init() {
-    configureEqBands([0, 0, 0, 0, 0])
+    configureEqBands(Array(repeating: 0, count: 10))
     configureDynamicsProcessor()
   }
 
@@ -192,7 +192,7 @@ private final class DspPlaybackEngine {
   }
 
   private func configureEqBands(_ gains: [Double]) {
-    let frequencies: [Float] = [60, 230, 910, 3600, 14_000]
+    let frequencies: [Float] = [31, 63, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     for (index, band) in eq.bands.enumerated() {
       band.filterType = .parametric
       band.frequency = frequencies[index]
@@ -255,6 +255,55 @@ public final class EchoAudioDspModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("EchoAudioDsp")
+
+    View(EchoNativePlayerView.self) {
+      Events("onAction")
+
+      Prop("artist") { (view: EchoNativePlayerView, value: String) in view.model.artist = value }
+      Prop("artworkUrl") { (view: EchoNativePlayerView, value: String) in view.model.artworkUrl = value }
+      Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in view.model.connectionLabel = value }
+      Prop("connectionOnline") { (view: EchoNativePlayerView, value: Bool) in view.model.connectionOnline = value }
+      Prop("controlsEnabled") { (view: EchoNativePlayerView, value: Bool) in view.model.controlsEnabled = value }
+      Prop("durationMs") { (view: EchoNativePlayerView, value: Double) in view.model.durationMs = value }
+      Prop("eqGains") { (view: EchoNativePlayerView, value: [Double]) in
+        view.model.equalizer.gains = normalizedNativeEqGains(value)
+      }
+      Prop("eqPreset") { (view: EchoNativePlayerView, value: String) in view.model.equalizer.preset = value }
+      Prop("isPlaying") { (view: EchoNativePlayerView, value: Bool) in view.model.isPlaying = value }
+      Prop("language") { (view: EchoNativePlayerView, value: String) in
+        view.model.language = value
+        view.model.equalizer.language = value
+      }
+      Prop("modeLabel") { (view: EchoNativePlayerView, value: String) in view.model.modeLabel = value }
+      Prop("outputMode") { (view: EchoNativePlayerView, value: String) in view.model.outputMode = value }
+      Prop("positionMs") { (view: EchoNativePlayerView, value: Double) in view.model.positionMs = value }
+      Prop("queueCount") { (view: EchoNativePlayerView, value: Int) in view.model.queueCount = value }
+      Prop("repeatOne") { (view: EchoNativePlayerView, value: Bool) in view.model.repeatOne = value }
+      Prop("showArtworkGlow") { (view: EchoNativePlayerView, value: Bool) in view.model.showArtworkGlow = value }
+      Prop("tags") { (view: EchoNativePlayerView, value: [String]) in view.model.tags = value }
+      Prop("title") { (view: EchoNativePlayerView, value: String) in view.model.title = value }
+      Prop("volume") { (view: EchoNativePlayerView, value: Double) in view.model.volume = value }
+    }
+
+    View(EchoNativeEqLauncherView.self) {
+      Events("onAction")
+
+      Prop("description") { (view: EchoNativeEqLauncherView, value: String) in view.model.description = value }
+      Prop("eqGains") { (view: EchoNativeEqLauncherView, value: [Double]) in
+        view.model.equalizer.gains = normalizedNativeEqGains(value)
+      }
+      Prop("eqPreset") { (view: EchoNativeEqLauncherView, value: String) in view.model.equalizer.preset = value }
+      Prop("label") { (view: EchoNativeEqLauncherView, value: String) in view.model.label = value }
+      Prop("language") { (view: EchoNativeEqLauncherView, value: String) in view.model.equalizer.language = value }
+      Prop("title") { (view: EchoNativeEqLauncherView, value: String) in view.model.title = value }
+    }
+
+    View(EchoNativeDockView.self) {
+      Events("onAction")
+
+      Prop("activePage") { (view: EchoNativeDockView, value: String) in view.model.activePage = value }
+      Prop("language") { (view: EchoNativeDockView, value: String) in view.model.language = value }
+    }
 
     AsyncFunction("playFile") { (uri: String, positionMs: Double, volume: Double, gains: [Double], loudnessEnabled: Bool) in
       try self.playbackEngine.playFile(

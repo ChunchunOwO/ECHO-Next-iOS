@@ -10,7 +10,8 @@ export type SavedSettings = {
   defaultLocalLibraryView: 'albums' | 'artists' | 'favorites' | 'formats' | 'recent' | 'songs';
   defaultPage: 'connect' | 'control' | 'library' | 'settings';
   echoConnectionEnabled: boolean;
-  eqPreset: 'bass' | 'clarity' | 'flat' | 'lateNight' | 'vocal' | 'warm';
+  eqGains: number[];
+  eqPreset: 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
   lrclibExternalDataEnabled: boolean;
   neteaseExternalDataEnabled: boolean;
   loudnessNormalizationEnabled: boolean;

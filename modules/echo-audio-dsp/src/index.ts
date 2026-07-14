@@ -1,6 +1,13 @@
 import { Platform } from 'react-native';
 import { requireNativeModule } from 'expo-modules-core';
 
+export {
+  EchoNativeDockView,
+  EchoNativeEqLauncherView,
+  EchoNativePlayerView,
+  type EchoNativeAction,
+} from './views';
+
 export type EchoAudioDspStatus = {
   currentTime: number;
   didJustFinish: boolean;
