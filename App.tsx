@@ -24,12 +24,9 @@ import {
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import * as FileSystem from 'expo-file-system/legacy';
-import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from 'react-native-svg';
 import {
   echoAudioDsp,
-  EchoNativeDockView,
   EchoNativeEqLauncherView,
-  EchoNativePagesView,
   EchoNativePlayerView,
   type EchoAudioDspStatus,
   type EchoNativeAction,
@@ -891,12 +888,10 @@ function EchoLinkApp(): ReactElement {
   const [phoneSeekPreviewMs, setPhoneSeekPreviewMs] = useState<number | null>(null);
   const [progressTrackWidth, setProgressTrackWidth] = useState(0);
   const [volumeTrackWidth, setVolumeTrackWidth] = useState(0);
-  const [dockWidth, setDockWidth] = useState(0);
   const [failedArtworkUrls, setFailedArtworkUrls] = useState<Set<string>>(() => new Set());
   const [loadedArtworkUrls, setLoadedArtworkUrls] = useState<Set<string>>(() => new Set());
   const [stableArtworkUrl, setStableArtworkUrl] = useState<string | null>(null);
   const pageTransition = useRef(new Animated.Value(1)).current;
-  const dockIndexTransition = useRef(new Animated.Value(appPages.indexOf('control'))).current;
   const lyricsTransition = useRef(new Animated.Value(0)).current;
   const playlistTransition = useRef(new Animated.Value(0)).current;
   const eqTransition = useRef(new Animated.Value(0)).current;
@@ -1649,15 +1644,6 @@ function EchoLinkApp(): ReactElement {
   }, [page, pageTransition]);
 
   useEffect(() => {
-    Animated.timing(dockIndexTransition, {
-      duration: 260,
-      easing: Easing.out(Easing.cubic),
-      toValue: appPages.indexOf(page),
-      useNativeDriver: true,
-    }).start();
-  }, [dockIndexTransition, page]);
-
-  useEffect(() => {
     Animated.timing(lyricsTransition, {
       duration: 360,
       easing: Easing.out(Easing.cubic),
@@ -1802,9 +1788,9 @@ function EchoLinkApp(): ReactElement {
     };
   }, [applyStatus, client]);
 
-  const applyPairingText = useCallback(async () => {
+  const applyPairingValue = useCallback(async (value: string) => {
     try {
-      const parsed = parsePairingUri(pairingText);
+      const parsed = parsePairingUri(value);
       parsed.host = normalizeEchoLinkHost(parsed.host);
       setEchoConnectionEnabled(true);
       setConnection(parsed);
@@ -1815,7 +1801,10 @@ function EchoLinkApp(): ReactElement {
     } catch (pairingError) {
       Alert.alert(text.pairingFailedTitle, pairingError instanceof Error ? pairingError.message : String(pairingError));
     }
-  }, [pairingText, switchPage, text.pairingFailedTitle]);
+  }, [switchPage, text.pairingFailedTitle]);
+  const applyPairingText = useCallback(async () => {
+    await applyPairingValue(pairingText);
+  }, [applyPairingValue, pairingText]);
 
   const saveManualConnection = useCallback(async () => {
     const nextConnection = {
@@ -3001,10 +2990,6 @@ function EchoLinkApp(): ReactElement {
     setVolumeTrackWidth(event.nativeEvent.layout.width);
   }, []);
 
-  const handleDockLayout = useCallback((event: LayoutChangeEvent) => {
-    setDockWidth(event.nativeEvent.layout.width);
-  }, []);
-
   const toggleAudioTagVisibility = useCallback((key: AudioTagKey) => {
     setAudioTagVisibility((current) => ({
       ...current,
@@ -3040,24 +3025,6 @@ function EchoLinkApp(): ReactElement {
         }),
       },
     ],
-  };
-  const dockOuterPadding = 8;
-  const dockGap = 8;
-  const dockItemWidth = dockWidth > 0
-    ? Math.max(0, (dockWidth - dockOuterPadding * 2 - dockGap * (appPages.length - 1)) / appPages.length)
-    : 0;
-  const dockIndicatorStep = dockItemWidth + dockGap;
-  const dockIndicatorAnimatedStyle = {
-    opacity: dockWidth > 0 ? 1 : 0,
-    transform: [
-      {
-        translateX: dockIndexTransition.interpolate({
-          inputRange: [0, appPages.length - 1],
-          outputRange: [0, dockIndicatorStep * (appPages.length - 1)],
-        }),
-      },
-    ],
-    width: dockItemWidth,
   };
   const pageSettingOptions: Array<[AppPage, string]> = [
     ['control', text.playback],
@@ -3300,6 +3267,9 @@ function EchoLinkApp(): ReactElement {
       case 'pairConnection':
         void applyPairingText();
         break;
+      case 'pairScanned':
+        if (action.text) void applyPairingValue(action.text);
+        break;
       case 'connectionField':
         if (action.field === 'host') {
           setConnection((current) => ({ ...current, host: action.text ?? '' }));
@@ -3369,6 +3339,36 @@ function EchoLinkApp(): ReactElement {
         break;
       case 'playlist':
         setPlaylistOpen(true);
+        break;
+      case 'queuePlay': {
+        if (action.source === 'local') {
+          const track = localTracks.find((item) => item.id === action.id);
+          if (track) void playTrackOnLocal(track, 0);
+          break;
+        }
+        const track = tracks.find((item) => item.id === action.id)
+          ?? playlistItems.find((item) => item.id === action.id);
+        if (track) {
+          if (isPhoneOutput) {
+            void playTrackOnPhone(track, 0, false);
+          } else {
+            playTrackOnPc(track);
+          }
+        }
+        break;
+      }
+      case 'queueMove': {
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track && (action.value === -1 || action.value === 1)) {
+          moveLocalQueueTrack(track, action.value);
+        }
+        break;
+      }
+      case 'queueRemove':
+        if (action.id) setLocalQueueTrackIds((current) => current.filter((id) => id !== action.id));
+        break;
+      case 'queueClear':
+        setLocalQueueTrackIds([]);
         break;
       case 'previous':
         playPrevious();
@@ -3945,6 +3945,7 @@ function EchoLinkApp(): ReactElement {
   const renderNativePlayer = () => (
     <EchoNativePlayerView
       activeLyricIndex={activeLyricIndex}
+      activePage={page}
       artist={displayTrack?.artist ?? ''}
       artworkUrl={displayArtworkUrl ?? stableArtworkUrl ?? ''}
       connectionLabel={connectedLabel}
@@ -3961,17 +3962,35 @@ function EchoLinkApp(): ReactElement {
       modeLabel={playbackModeLabel}
       onAction={handleNativeAction}
       outputMode={playbackOutputMode}
+      pagePayload={buildNativePagePayload()}
       positionMs={playbackPositionMs}
       queueCount={playlistItems.length}
+      queuePayload={JSON.stringify({
+        clearLabel: text.clear,
+        emptyLabel: text.queueEmpty,
+        isLocal: isLocalOutput,
+        items: playlistItems.map((item, index) => ({
+          artist: item.artist,
+          current: item.id === playbackQueue?.currentTrackId || item.id === displayTrack?.id,
+          id: `${item.id}-${index}`,
+          meta: item.album || item.sourceLabel,
+          title: item.title,
+          trackId: item.id,
+        })),
+        moveDownLabel: text.moveDown,
+        moveUpLabel: text.moveUp,
+        removeLabel: text.removeFromQueue,
+        title: text.playlist,
+      })}
       repeatOne={repeatOneEnabled}
       showArtworkGlow={showArtworkGlow}
-      style={[styles.nativePlayer, { height: Math.max(440, windowHeight - 210) }]}
+      style={styles.nativeApp}
       tags={playbackTags}
       title={displayTrack?.title ?? text.noTrack}
       volume={outputVolume}
     />
   );
-  const renderNativePages = () => {
+  const buildNativePagePayload = () => {
     const settingToggle = (id: string, title: string, description: string, boolValue: boolean) => ({
       boolValue,
       description,
@@ -4108,6 +4127,7 @@ function EchoLinkApp(): ReactElement {
           library: text.library,
           manual: text.manual,
           pairLink: text.pairLink,
+          scanPairing: languageIsEnglish ? 'Scan QR Code' : '扫描二维码',
           port: text.portPlaceholder,
           save: text.save,
           streamable: text.streamable,
@@ -4187,51 +4207,32 @@ function EchoLinkApp(): ReactElement {
       },
       title: pageTitle,
     };
-    return (
-      <EchoNativePagesView
-        eqGains={eqGains}
-        eqPreset={eqPreset}
-        language={appLanguage}
-        onAction={handleNativeAction}
-        payload={JSON.stringify(payload)}
-        style={[styles.nativePages, { height: Math.max(320, windowHeight - 118) }]}
-      />
-    );
+    return JSON.stringify(payload);
   };
 
   return (
     <View style={[styles.appRoot, nativePlayerEnabled ? styles.appRootNative : null]}>
       {nativePlayerEnabled ? (
-        <Svg height="100%" pointerEvents="none" style={StyleSheet.absoluteFill} width="100%">
-          <Defs>
-            <SvgLinearGradient id="player-page-gradient" x1="0" x2="1" y1="0" y2="1">
-              <Stop offset="0" stopColor="#f7c9ba" />
-              <Stop offset="0.52" stopColor="#fce0b0" />
-              <Stop offset="1" stopColor="#f5d1cc" />
-            </SvgLinearGradient>
-          </Defs>
-          <Rect fill="url(#player-page-gradient)" height="100%" width="100%" x="0" y="0" />
-        </Svg>
-      ) : null}
-      <SafeAreaView style={[styles.safeArea, nativePlayerEnabled ? styles.safeAreaNative : null]}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' && !nativePlayerEnabled ? 'padding' : undefined} style={styles.root}>
-          <View style={styles.pageShell} {...(nativePlayerEnabled ? {} : pagePanResponder.panHandlers)}>
+        renderNativePlayer()
+      ) : (
+      <SafeAreaView style={styles.safeArea}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.root}>
+          <View style={styles.pageShell} {...pagePanResponder.panHandlers}>
           <ScrollView
             contentContainerStyle={[
               styles.content,
               page === 'control' ? styles.playerContent : null,
-              page === 'control' && lyricsVisible && !nativePlayerEnabled ? styles.playerContentLyrics : null,
-              page !== 'control' && nativePlayerEnabled ? styles.nativePagesContent : null,
+              page === 'control' && lyricsVisible ? styles.playerContentLyrics : null,
             ]}
             alwaysBounceVertical={page !== 'control'}
             automaticallyAdjustKeyboardInsets={false}
             bounces={page !== 'control'}
             keyboardShouldPersistTaps="handled"
-            refreshControl={page === 'control' || nativePlayerEnabled ? undefined : <RefreshControl refreshing={pullRefreshing} onRefresh={() => void refreshFromPull()} tintColor="#18181b" />}
-            scrollEnabled={nativePlayerEnabled ? false : page !== 'control' || lyricsVisible || volumeExpanded}
+            refreshControl={page === 'control' ? undefined : <RefreshControl refreshing={pullRefreshing} onRefresh={() => void refreshFromPull()} tintColor="#18181b" />}
+            scrollEnabled={page !== 'control' || lyricsVisible || volumeExpanded}
           >
             <Animated.View style={[styles.pageTransition, pageAnimatedStyle]}>
-            {page !== 'control' && !nativePlayerEnabled ? (
+            {page !== 'control' ? (
               <View style={styles.header}>
                 <Text style={styles.title}>{pageTitle}</Text>
                 {page === 'connect' ? (
@@ -4265,9 +4266,7 @@ function EchoLinkApp(): ReactElement {
               </View>
             ) : null}
 
-            {page !== 'control' && nativePlayerEnabled ? (
-              renderNativePages()
-            ) : page === 'connect' ? (
+            {page === 'connect' ? (
               <View style={styles.connectPage}>
                 {connectPanelMode === 'streaming' ? (
                   <View style={styles.connectPanel}>
@@ -4689,8 +4688,6 @@ function EchoLinkApp(): ReactElement {
                   })}
                 </View>
               </View>
-            ) : nativePlayerEnabled ? (
-              renderNativePlayer()
             ) : (
               <>
                 <View
@@ -4920,19 +4917,7 @@ function EchoLinkApp(): ReactElement {
             </View>
           ) : null}
 
-          {nativePlayerEnabled ? (
-            <EchoNativeDockView
-              activePage={page}
-              language={appLanguage}
-              onAction={handleNativeAction}
-              style={styles.nativeDock}
-            />
-          ) : (
-          <View style={styles.dock} onLayout={handleDockLayout}>
-            <BlurView intensity={34} pointerEvents="none" style={styles.dockBlur} tint="dark" />
-            <Animated.View pointerEvents="none" style={[styles.dockActiveIndicator, dockIndicatorAnimatedStyle]}>
-              {renderButtonBlur(16)}
-            </Animated.View>
+          <View style={styles.dock}>
             <Pressable
               accessibilityLabel={text.playbackPage}
               accessibilityRole="button"
@@ -4943,7 +4928,7 @@ function EchoLinkApp(): ReactElement {
                 <SuperconIcon
                   glyph="headphones"
                   size={20}
-                  color={page === 'control' ? '#f8fafc' : 'rgba(248, 250, 252, 0.5)'}
+                  color={page === 'control' ? '#ad2025' : 'rgba(45, 26, 23, 0.48)'}
                 />
                 <Text style={[styles.dockLabel, page === 'control' ? styles.dockLabelActive : null]}>{text.playback}</Text>
               </AnimatedButtonContent>
@@ -4958,7 +4943,7 @@ function EchoLinkApp(): ReactElement {
                 <SuperconIcon
                   glyph="list"
                   size={20}
-                  color={page === 'library' ? '#f8fafc' : 'rgba(248, 250, 252, 0.5)'}
+                  color={page === 'library' ? '#ad2025' : 'rgba(45, 26, 23, 0.48)'}
                 />
                 <Text style={[styles.dockLabel, page === 'library' ? styles.dockLabelActive : null]}>{text.library}</Text>
               </AnimatedButtonContent>
@@ -4973,7 +4958,7 @@ function EchoLinkApp(): ReactElement {
                 <SuperconIcon
                   glyph="link"
                   size={20}
-                  color={page === 'connect' ? '#f8fafc' : 'rgba(248, 250, 252, 0.5)'}
+                  color={page === 'connect' ? '#ad2025' : 'rgba(45, 26, 23, 0.48)'}
                 />
                 <Text style={[styles.dockLabel, page === 'connect' ? styles.dockLabelActive : null]}>{text.connect}</Text>
               </AnimatedButtonContent>
@@ -4988,16 +4973,16 @@ function EchoLinkApp(): ReactElement {
                 <SuperconIcon
                   glyph="settings"
                   size={20}
-                  color={page === 'settings' ? '#f8fafc' : 'rgba(248, 250, 252, 0.5)'}
+                  color={page === 'settings' ? '#ad2025' : 'rgba(45, 26, 23, 0.48)'}
                 />
                 <Text style={[styles.dockLabel, page === 'settings' ? styles.dockLabelActive : null]}>{text.settings}</Text>
               </AnimatedButtonContent>
             </Pressable>
           </View>
-          )}
           </View>
         </KeyboardAvoidingView>
       </SafeAreaView>
+      )}
     </View>
   );
 }
@@ -5021,9 +5006,6 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#101014',
-  },
-  safeAreaNative: {
-    backgroundColor: 'transparent',
   },
   root: {
     flex: 1,
@@ -5073,22 +5055,10 @@ const styles = StyleSheet.create({
     paddingBottom: 94,
     paddingTop: 30,
   },
-  nativePlayer: {
-    alignSelf: 'stretch',
+  nativeApp: {
+    flex: 1,
     backgroundColor: 'transparent',
-    overflow: 'hidden',
     width: '100%',
-  },
-  nativePages: {
-    alignSelf: 'stretch',
-    backgroundColor: 'transparent',
-    overflow: 'hidden',
-    width: '100%',
-  },
-  nativePagesContent: {
-    gap: 0,
-    padding: 0,
-    paddingBottom: 0,
   },
   playerContentLyrics: {
     justifyContent: 'center',
@@ -6805,8 +6775,8 @@ const styles = StyleSheet.create({
   dock: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: 'rgba(16, 16, 20, 0.72)',
-    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.46)',
+    borderColor: 'rgba(255, 255, 255, 0.7)',
     borderRadius: 36,
     borderWidth: 1,
     bottom: 14,
@@ -6818,40 +6788,10 @@ const styles = StyleSheet.create({
     padding: 8,
     position: 'absolute',
     right: 16,
-    shadowColor: '#18181b',
+    shadowColor: '#5f3b35',
     shadowOffset: { width: 0, height: 18 },
     shadowOpacity: 0.14,
     shadowRadius: 28,
-  },
-  nativeDock: {
-    bottom: 10,
-    height: 74,
-    left: 12,
-    position: 'absolute',
-    right: 12,
-    zIndex: 20,
-  },
-  dockBlur: {
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
-    right: 0,
-    top: 0,
-  },
-  dockActiveIndicator: {
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-    borderColor: 'rgba(255, 255, 255, 0.14)',
-    borderRadius: 26,
-    borderWidth: 1,
-    bottom: 8,
-    left: 8,
-    overflow: 'hidden',
-    position: 'absolute',
-    shadowColor: '#18181b',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.08,
-    shadowRadius: 18,
-    top: 8,
   },
   dockItem: {
     alignItems: 'center',
@@ -6873,11 +6813,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   dockLabel: {
-    color: 'rgba(248, 250, 252, 0.5)',
+    color: 'rgba(45, 26, 23, 0.48)',
     fontSize: 10,
     fontWeight: '800',
   },
   dockLabelActive: {
-    color: '#f8fafc',
+    color: '#ad2025',
   },
 });

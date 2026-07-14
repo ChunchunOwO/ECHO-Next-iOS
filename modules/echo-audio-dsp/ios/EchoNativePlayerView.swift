@@ -108,7 +108,28 @@ final class EchoNativeEqualizerModel: ObservableObject {
   @Published var preset = "flat"
 }
 
+struct EchoNativeQueueItem: Decodable, Identifiable {
+  let artist: String
+  let current: Bool
+  let id: String
+  let meta: String
+  let title: String
+  let trackId: String
+}
+
+struct EchoNativeQueuePayload: Decodable {
+  let clearLabel: String
+  let emptyLabel: String
+  let isLocal: Bool
+  let items: [EchoNativeQueueItem]
+  let moveDownLabel: String
+  let moveUpLabel: String
+  let removeLabel: String
+  let title: String
+}
+
 final class EchoNativePlayerModel: ObservableObject {
+  @Published var activePage = "control"
   @Published var activeLyricIndex = 0
   @Published var artist = ""
   @Published var artworkUrl = ""
@@ -125,12 +146,23 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var outputMode = "pc"
   @Published var positionMs = 0.0
   @Published var queueCount = 0
+  @Published var queuePayload: EchoNativeQueuePayload?
   @Published var repeatOne = false
   @Published var showArtworkGlow = true
   @Published var tags: [String] = []
   @Published var title = ""
   @Published var volume = 1.0
   let equalizer = EchoNativeEqualizerModel()
+
+  func updateQueue(payloadJSON: String) {
+    guard
+      let data = payloadJSON.data(using: .utf8),
+      let payload = try? JSONDecoder().decode(EchoNativeQueuePayload.self, from: data)
+    else {
+      return
+    }
+    queuePayload = payload
+  }
 }
 
 final class EchoNativeEqLauncherModel: ObservableObject {
@@ -140,17 +172,13 @@ final class EchoNativeEqLauncherModel: ObservableObject {
   let equalizer = EchoNativeEqualizerModel()
 }
 
-final class EchoNativeDockModel: ObservableObject {
-  @Published var activePage = "control"
-  @Published var language = "zh"
-}
-
 public final class EchoNativePlayerView: ExpoView {
   let model = EchoNativePlayerModel()
+  let pagesModel = EchoNativePagesModel()
   let onAction = EventDispatcher()
 
   private lazy var hostingController = UIHostingController(
-    rootView: EchoNativePlayerScreen(model: model) { [weak self] payload in
+    rootView: EchoNativeAppScreen(playerModel: model, pagesModel: pagesModel) { [weak self] payload in
       self?.onAction(payload)
     }
   )
@@ -221,212 +249,91 @@ public final class EchoNativeEqLauncherView: ExpoView {
   }
 }
 
-public final class EchoNativeDockView: ExpoView {
-  let model = EchoNativeDockModel()
-  let onAction = EventDispatcher()
-
-  private lazy var hostingController = UIHostingController(
-    rootView: EchoNativeDockScreen(model: model) { [weak self] payload in
-      self?.onAction(payload)
-    }
-  )
-
-  public required init(appContext: AppContext? = nil) {
-    super.init(appContext: appContext)
-    clipsToBounds = false
-    hostingController.view.backgroundColor = .clear
-    hostingController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-  }
-
-  public override func layoutSubviews() {
-    super.layoutSubviews()
-    hostingController.view.frame = bounds
-  }
-
-  public override func didMoveToWindow() {
-    super.didMoveToWindow()
-    if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
-      if !(parent is UINavigationController) && !(parent is UITabBarController) {
-        parent.addChild(hostingController)
-      }
-      addSubview(hostingController.view)
-      hostingController.didMove(toParent: parent)
-      hostingController.view.frame = bounds
-    } else if window == nil {
-      hostingController.view.removeFromSuperview()
-      hostingController.removeFromParent()
-    }
-  }
-}
-
-private struct EchoNativeDockItem: Identifiable {
-  let id: String
-  let symbol: String
-  let title: String
-}
-
-private struct EchoNativeDockScreen: View {
-  @ObservedObject var model: EchoNativeDockModel
+private struct EchoNativeAppScreen: View {
+  @ObservedObject var playerModel: EchoNativePlayerModel
+  @ObservedObject var pagesModel: EchoNativePagesModel
   let onAction: ([String: Any]) -> Void
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @Namespace private var glassNamespace
-  @State private var interactionPage: String?
-  @State private var isInteracting = false
-
-  private var items: [EchoNativeDockItem] {
-    let english = model.language == "en"
-    return [
-      EchoNativeDockItem(id: "control", symbol: "headphones", title: english ? "Playback" : "播放"),
-      EchoNativeDockItem(id: "library", symbol: "music.note.list", title: english ? "Library" : "曲库"),
-      EchoNativeDockItem(id: "connect", symbol: "link", title: english ? "Connect" : "连接"),
-      EchoNativeDockItem(id: "settings", symbol: "gearshape", title: english ? "Settings" : "设置"),
-    ]
-  }
 
   var body: some View {
-    Group {
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        GlassEffectContainer(spacing: 8) {
-          dockContent
+    ZStack {
+      echoWarmBackground.ignoresSafeArea()
+      Group {
+        #if compiler(>=6.0)
+        if #available(iOS 18.0, *) {
+          adaptiveTabView
+        } else {
+          legacyTabView
         }
-        .glassEffect(.clear.interactive(), in: Capsule())
-      } else {
-        legacyDock
+        #else
+        legacyTabView
+        #endif
       }
-      #else
-      legacyDock
-      #endif
+      .tint(echoAccent)
     }
-    .padding(4)
     .preferredColorScheme(.light)
   }
 
-  private var dockContent: some View {
-    GeometryReader { geometry in
-      HStack(spacing: 6) {
-        ForEach(items) { item in
-          let selected = item.id == (interactionPage ?? model.activePage)
-          ZStack {
-            selectionBackground(selected: selected)
-            VStack(spacing: 2) {
-              Image(systemName: item.symbol)
-                .font(.system(size: 19, weight: selected ? .semibold : .medium))
-                .symbolRenderingMode(.hierarchical)
-              Text(item.title)
-                .font(.system(size: 10, weight: .semibold))
-                .lineLimit(1)
-            }
-            .foregroundColor(echoInk.opacity(selected ? 1 : 0.48))
-          }
-          .frame(maxWidth: .infinity, minHeight: 54)
-          .contentShape(Capsule())
-          .scaleEffect(isInteracting && selected ? 1.04 : 1)
-          .zIndex(selected ? 1 : 0)
-          .accessibilityElement()
-          .accessibilityLabel(item.title)
-          .accessibilityAddTraits(item.id == model.activePage ? [.isButton, .isSelected] : [.isButton])
-          .accessibilityAction {
-            activatePage(item.id)
-          }
-        }
+  private var selection: Binding<String> {
+    Binding(
+      get: { playerModel.activePage },
+      set: { page in
+        guard page != playerModel.activePage else { return }
+        playerModel.activePage = page
+        onAction(["action": "page", "page": page])
       }
-      .padding(6)
-      .contentShape(Capsule())
-      .gesture(
-        DragGesture(minimumDistance: 0)
-          .onChanged { value in
-            updateInteraction(at: value.location.x, width: geometry.size.width)
-          }
-          .onEnded { value in
-            finishInteraction(at: value.location.x, width: geometry.size.width)
-          }
-      )
-    }
-    .frame(height: 66)
+    )
   }
 
-  @ViewBuilder
-  private func selectionBackground(selected: Bool) -> some View {
-    if selected {
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        Color.clear
-          .glassEffect(
-            .regular
-              .tint(isInteracting ? Color.white.opacity(0.04) : Color.black.opacity(0.18))
-              .interactive(),
-            in: Capsule()
-          )
-          .glassEffectID("dock-selection", in: glassNamespace)
-          .scaleEffect(x: isInteracting ? 1.48 : 1, y: isInteracting ? 1.12 : 1)
-      } else {
-        legacySelection
+  #if compiler(>=6.0)
+  @available(iOS 18.0, *)
+  private var adaptiveTabView: some View {
+    TabView(selection: selection) {
+      Tab(title("control"), systemImage: "headphones", value: "control") {
+        EchoNativePlayerScreen(model: playerModel, onAction: onAction)
       }
-      #else
-      legacySelection
-      #endif
-    }
-  }
-
-  private var legacySelection: some View {
-    Color.black.opacity(0.09)
-      .echoLegacyGlass(tint: Color.black.opacity(0.12), clear: false, in: Capsule())
-      .scaleEffect(x: isInteracting ? 1.48 : 1, y: isInteracting ? 1.12 : 1)
-  }
-
-  private var legacyDock: some View {
-    dockContent
-      .echoLegacyGlass(clear: true, in: Capsule())
-  }
-
-  private func page(at locationX: CGFloat, width: CGFloat) -> String? {
-    guard width > 0, !items.isEmpty else { return nil }
-    let ratio = min(0.999, max(0, locationX / width))
-    return items[min(items.count - 1, Int(ratio * CGFloat(items.count)))].id
-  }
-
-  private func updateInteraction(at locationX: CGFloat, width: CGFloat) {
-    guard let nextPage = page(at: locationX, width: width) else { return }
-    let changedPage = nextPage != interactionPage
-    if reduceMotion {
-      interactionPage = nextPage
-      isInteracting = true
-    } else {
-      withAnimation(.easeOut(duration: 0.16)) {
-        interactionPage = nextPage
-        isInteracting = true
+      Tab(title("library"), systemImage: "music.note.list", value: "library") {
+        EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+      }
+      Tab(title("connect"), systemImage: "link", value: "connect") {
+        EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
+      }
+      Tab(title("settings"), systemImage: "gearshape", value: "settings") {
+        EchoNativePagesScreen(model: pagesModel, page: "settings", onAction: onAction)
       }
     }
-    if changedPage {
-      UISelectionFeedbackGenerator().selectionChanged()
+    .tabViewStyle(.sidebarAdaptable)
+  }
+  #endif
+
+  private var legacyTabView: some View {
+    TabView(selection: selection) {
+      EchoNativePlayerScreen(model: playerModel, onAction: onAction)
+        .tag("control")
+        .tabItem { Label(title("control"), systemImage: "headphones") }
+      EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+        .tag("library")
+        .tabItem { Label(title("library"), systemImage: "music.note.list") }
+      EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
+        .tag("connect")
+        .tabItem { Label(title("connect"), systemImage: "link") }
+      EchoNativePagesScreen(model: pagesModel, page: "settings", onAction: onAction)
+        .tag("settings")
+        .tabItem { Label(title("settings"), systemImage: "gearshape") }
     }
   }
 
-  private func finishInteraction(at locationX: CGFloat, width: CGFloat) {
-    let nextPage = page(at: locationX, width: width) ?? interactionPage
-    if reduceMotion {
-      interactionPage = nil
-      isInteracting = false
-    } else {
-      withAnimation(.easeOut(duration: 0.2)) {
-        interactionPage = nil
-        isInteracting = false
-      }
+  private func title(_ page: String) -> String {
+    let english = playerModel.language == "en"
+    switch page {
+    case "control": return english ? "Playback" : "播放"
+    case "library": return english ? "Library" : "曲库"
+    case "connect": return english ? "Connect" : "连接"
+    default: return english ? "Settings" : "设置"
     }
-    if let nextPage {
-      activatePage(nextPage)
-    }
-  }
-
-  private func activatePage(_ page: String) {
-    guard page != model.activePage else { return }
-    model.activePage = page
-    onAction(["action": "page", "page": page])
   }
 }
 
-private struct EchoNativePlayerScreen: View {
+struct EchoNativePlayerScreen: View {
   @ObservedObject var model: EchoNativePlayerModel
   let onAction: ([String: Any]) -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -436,6 +343,7 @@ private struct EchoNativePlayerScreen: View {
   @State private var lastLyricsInteraction = Date.distantPast
   @State private var seekValue = 0.0
   @State private var showEqualizer = false
+  @State private var showQueue = false
   @State private var volumeValue = 1.0
 
   var body: some View {
@@ -456,6 +364,9 @@ private struct EchoNativePlayerScreen: View {
     .preferredColorScheme(.light)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
+    }
+    .sheet(isPresented: $showQueue) {
+      EchoNativeQueueSheet(model: model, onAction: onAction)
     }
     .onAppear {
       seekValue = model.positionMs
@@ -814,7 +725,7 @@ private struct EchoNativePlayerScreen: View {
         }
         ZStack(alignment: .topTrailing) {
           iconButton(symbol: "list.bullet", label: model.language == "en" ? "Queue" : "播放列表", active: false) {
-            onAction(["action": "playlist"])
+            showQueue = true
           }
           if model.queueCount > 0 {
             Text("\(model.queueCount)")
@@ -920,6 +831,132 @@ private struct EchoNativePlayerScreen: View {
   private func formatTime(_ milliseconds: Double) -> String {
     let seconds = max(0, Int(milliseconds / 1000))
     return String(format: "%d:%02d", seconds / 60, seconds % 60)
+  }
+}
+
+private struct EchoNativeQueueSheet: View {
+  @ObservedObject var model: EchoNativePlayerModel
+  let onAction: ([String: Any]) -> Void
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    VStack(spacing: 14) {
+      HStack {
+        Text(model.queuePayload?.title ?? (model.language == "en" ? "Queue" : "播放列表"))
+          .font(.system(size: 24, weight: .bold, design: .rounded))
+        Spacer()
+        if model.queuePayload?.isLocal == true, !(model.queuePayload?.items.isEmpty ?? true) {
+          Button(model.queuePayload?.clearLabel ?? (model.language == "en" ? "Clear" : "清空")) {
+            onAction(["action": "queueClear"])
+          }
+          .font(.system(size: 12, weight: .bold))
+          .foregroundColor(echoAccent)
+        }
+        Button {
+          dismiss()
+        } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 13, weight: .bold))
+            .frame(width: 34, height: 34)
+            .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
+        }
+        .buttonStyle(.plain)
+      }
+
+      if let payload = model.queuePayload, !payload.items.isEmpty {
+        ScrollView(showsIndicators: false) {
+          LazyVStack(spacing: 0) {
+            ForEach(Array(payload.items.enumerated()), id: \.element.id) { index, item in
+              HStack(spacing: 10) {
+                Button {
+                  dismiss()
+                  onAction([
+                    "action": "queuePlay",
+                    "id": item.trackId,
+                    "source": payload.isLocal ? "local" : "echo",
+                  ])
+                } label: {
+                  HStack(spacing: 11) {
+                    Text(String(format: "%02d", index + 1))
+                      .font(.system(size: 11, weight: .bold, design: .monospaced))
+                      .foregroundColor(item.current ? echoAccent : echoInk.opacity(0.36))
+                      .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 3) {
+                      Text(item.title)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(item.current ? echoAccent : echoInk)
+                        .lineLimit(1)
+                      Text(item.meta.isEmpty ? item.artist : "\(item.artist) · \(item.meta)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(echoInk.opacity(0.48))
+                        .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                  }
+                  .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if payload.isLocal {
+                  queueButton(
+                    symbol: "chevron.up",
+                    label: payload.moveUpLabel,
+                    disabled: index == 0
+                  ) {
+                    onAction(["action": "queueMove", "id": item.trackId, "value": -1])
+                  }
+                  queueButton(
+                    symbol: "chevron.down",
+                    label: payload.moveDownLabel,
+                    disabled: index == payload.items.count - 1
+                  ) {
+                    onAction(["action": "queueMove", "id": item.trackId, "value": 1])
+                  }
+                  queueButton(symbol: "xmark", label: payload.removeLabel) {
+                    onAction(["action": "queueRemove", "id": item.trackId])
+                  }
+                }
+              }
+              .padding(.vertical, 11)
+              .overlay(alignment: .bottom) {
+                Rectangle().fill(echoInk.opacity(0.08)).frame(height: 0.7)
+              }
+            }
+          }
+        }
+      } else {
+        VStack(spacing: 12) {
+          Image(systemName: "music.note.list")
+            .font(.system(size: 28, weight: .medium))
+          Text(model.queuePayload?.emptyLabel ?? (model.language == "en" ? "The queue is empty." : "当前播放列表暂无内容。"))
+            .font(.system(size: 13, weight: .semibold))
+        }
+        .foregroundColor(echoInk.opacity(0.42))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+    }
+    .padding(20)
+    .foregroundColor(echoInk)
+    .background(echoWarmBackground.ignoresSafeArea())
+    .preferredColorScheme(.light)
+  }
+
+  private func queueButton(
+    symbol: String,
+    label: String,
+    disabled: Bool = false,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Image(systemName: symbol)
+        .font(.system(size: 10, weight: .bold))
+        .frame(width: 28, height: 28)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+    }
+    .buttonStyle(.plain)
+    .disabled(disabled)
+    .opacity(disabled ? 0.3 : 1)
+    .accessibilityLabel(label)
   }
 }
 

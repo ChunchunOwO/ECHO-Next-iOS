@@ -1,5 +1,5 @@
 import Combine
-import ExpoModulesCore
+import AVFoundation
 import Foundation
 import SwiftUI
 import UIKit
@@ -67,6 +67,7 @@ private struct EchoNativeConnectionLabels: Decodable {
   let library: String
   let manual: String
   let pairLink: String
+  let scanPairing: String
   let port: String
   let save: String
   let streamable: String
@@ -133,67 +134,34 @@ final class EchoNativePagesModel: ObservableObject {
   func update(payloadJSON: String) {
     guard
       let data = payloadJSON.data(using: .utf8),
-      let nextPayload = try? JSONDecoder().decode(EchoNativePagePayload.self, from: data)
+      var nextPayload = try? JSONDecoder().decode(EchoNativePagePayload.self, from: data)
     else {
       return
     }
+    nextPayload.connection = nextPayload.connection ?? payload?.connection
+    nextPayload.library = nextPayload.library ?? payload?.library
+    nextPayload.settings = nextPayload.settings ?? payload?.settings
     payload = nextPayload
     equalizer.language = nextPayload.language
   }
 }
 
-public final class EchoNativePagesView: ExpoView {
-  let model = EchoNativePagesModel()
-  let onAction = EventDispatcher()
-
-  private lazy var hostingController = UIHostingController(
-    rootView: EchoNativePagesScreen(model: model) { [weak self] payload in
-      self?.onAction(payload)
-    }
-  )
-
-  public required init(appContext: AppContext? = nil) {
-    super.init(appContext: appContext)
-    clipsToBounds = true
-    hostingController.view.backgroundColor = .clear
-    hostingController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-  }
-
-  public override func layoutSubviews() {
-    super.layoutSubviews()
-    hostingController.view.frame = bounds
-  }
-
-  public override func didMoveToWindow() {
-    super.didMoveToWindow()
-    if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
-      if !(parent is UINavigationController) && !(parent is UITabBarController) {
-        parent.addChild(hostingController)
-      }
-      addSubview(hostingController.view)
-      hostingController.didMove(toParent: parent)
-      hostingController.view.frame = bounds
-    } else if window == nil {
-      hostingController.view.removeFromSuperview()
-      hostingController.removeFromParent()
-    }
-  }
-}
-
-private struct EchoNativePagesScreen: View {
+struct EchoNativePagesScreen: View {
   @ObservedObject var model: EchoNativePagesModel
+  let page: String
   let onAction: ([String: Any]) -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var expandedSection = "interface"
+  @State private var showPairingScanner = false
   @State private var showEqualizer = false
 
   var body: some View {
     Group {
       if let payload = model.payload {
         VStack(spacing: 0) {
-          pageHeader(payload)
+          pageHeader(payload, title: pageTitle(payload.language))
           Group {
-            switch payload.page {
+            switch page {
             case "library":
               if let library = payload.library {
                 libraryPage(library)
@@ -210,7 +178,7 @@ private struct EchoNativePagesScreen: View {
               EmptyView()
             }
           }
-          .id(payload.page)
+          .id(page)
           .transition(.opacity.combined(with: .move(edge: .trailing)))
         }
         .foregroundColor(echoInk)
@@ -222,11 +190,16 @@ private struct EchoNativePagesScreen: View {
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
     }
+    .fullScreenCover(isPresented: $showPairingScanner) {
+      EchoPairingScannerSheet(language: model.payload?.language ?? "zh") { code in
+        onAction(["action": "pairScanned", "text": code])
+      }
+    }
   }
 
-  private func pageHeader(_ payload: EchoNativePagePayload) -> some View {
+  private func pageHeader(_ payload: EchoNativePagePayload, title: String) -> some View {
     HStack(alignment: .center, spacing: 14) {
-      Text(payload.title)
+      Text(title)
         .font(.system(size: 32, weight: .bold, design: .rounded))
         .lineLimit(1)
       Spacer(minLength: 8)
@@ -251,6 +224,15 @@ private struct EchoNativePagesScreen: View {
     .padding(.horizontal, 20)
     .padding(.top, 18)
     .padding(.bottom, 12)
+  }
+
+  private func pageTitle(_ language: String) -> String {
+    let english = language == "en"
+    switch page {
+    case "library": return english ? "Library" : "曲库"
+    case "connect": return english ? "Connect" : "连接"
+    default: return english ? "Settings" : "设置"
+    }
   }
 
   private func statusColor(_ status: EchoNativePageStatus) -> Color {
@@ -365,7 +347,7 @@ private struct EchoNativePagesScreen: View {
         }
       }
       .padding(.horizontal, 20)
-      .padding(.bottom, 112)
+      .padding(.bottom, 24)
     }
     .refreshable { onAction(["action": "libraryRefresh"]) }
   }
@@ -510,8 +492,13 @@ private struct EchoNativePagesScreen: View {
                 }
               )
             )
-            EchoNativeLabelButton(symbol: "link", title: connection.labels.connect) {
-              onAction(["action": "pairConnection"])
+            HStack(spacing: 10) {
+              EchoNativeLabelButton(symbol: "link", title: connection.labels.connect) {
+                onAction(["action": "pairConnection"])
+              }
+              EchoNativeLabelButton(symbol: "qrcode.viewfinder", title: connection.labels.scanPairing) {
+                showPairingScanner = true
+              }
             }
           }
           connectionSection(symbol: "slider.horizontal.3", title: connection.labels.manual) {
@@ -547,7 +534,7 @@ private struct EchoNativePagesScreen: View {
         }
       }
       .padding(.horizontal, 20)
-      .padding(.bottom, 112)
+      .padding(.bottom, 24)
     }
   }
 
@@ -710,7 +697,7 @@ private struct EchoNativePagesScreen: View {
         }
       }
       .padding(.horizontal, 20)
-      .padding(.bottom, 112)
+      .padding(.bottom, 24)
     }
   }
 
@@ -832,6 +819,222 @@ private struct EchoNativePagesScreen: View {
       model.payload = payload
       return
     }
+  }
+}
+
+private struct EchoPairingScannerSheet: View {
+  let language: String
+  let onCode: (String) -> Void
+  @Environment(\.dismiss) private var dismiss
+  @State private var cameraUnavailable = false
+
+  var body: some View {
+    ZStack {
+      EchoQRCodeScannerView(
+        onCode: { code in
+          dismiss()
+          onCode(code)
+        },
+        onUnavailable: { cameraUnavailable = true }
+      )
+      .ignoresSafeArea()
+
+      VStack(spacing: 0) {
+        HStack {
+          VStack(alignment: .leading, spacing: 3) {
+            Text(language == "en" ? "Scan Pairing Code" : "扫描配对二维码")
+              .font(.system(size: 22, weight: .bold, design: .rounded))
+            Text(language == "en" ? "Point the camera at the QR code shown by ECHO." : "将 ECHO 显示的二维码放入取景框。")
+              .font(.system(size: 11, weight: .semibold))
+              .foregroundColor(.white.opacity(0.7))
+          }
+          Spacer()
+          Button {
+            dismiss()
+          } label: {
+            Image(systemName: "xmark")
+              .font(.system(size: 13, weight: .bold))
+              .frame(width: 38, height: 38)
+              .echoGlass(tint: Color.black.opacity(0.14), in: Circle())
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel(language == "en" ? "Close scanner" : "关闭扫码")
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+
+        Spacer()
+
+        RoundedRectangle(cornerRadius: 26, style: .continuous)
+          .stroke(Color.white.opacity(0.9), lineWidth: 3)
+          .frame(width: 250, height: 250)
+          .shadow(color: .black.opacity(0.25), radius: 18)
+
+        Spacer()
+
+        Text(language == "en" ? "The connection is saved automatically after a successful scan." : "识别成功后会自动保存连接信息。")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundColor(.white.opacity(0.76))
+          .multilineTextAlignment(.center)
+          .padding(.horizontal, 30)
+          .padding(.bottom, 26)
+      }
+
+      if cameraUnavailable {
+        Color.black.opacity(0.88).ignoresSafeArea()
+        VStack(spacing: 14) {
+          Image(systemName: "camera.fill")
+            .font(.system(size: 30, weight: .medium))
+          Text(language == "en" ? "Camera access is required" : "需要相机权限")
+            .font(.system(size: 20, weight: .bold))
+          Text(language == "en" ? "Enable Camera for ECHO iPhone in Settings, then scan again." : "请在系统设置中允许 ECHO iPhone 使用相机，然后重新扫码。")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.white.opacity(0.68))
+            .multilineTextAlignment(.center)
+          Button(language == "en" ? "Open Settings" : "打开设置") {
+            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+            UIApplication.shared.open(url)
+          }
+          .font(.system(size: 13, weight: .bold))
+          .padding(.horizontal, 18)
+          .frame(height: 42)
+          .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: Capsule())
+        }
+        .foregroundColor(.white)
+        .padding(28)
+      }
+    }
+    .background(Color.black.ignoresSafeArea())
+    .preferredColorScheme(.dark)
+  }
+}
+
+private struct EchoQRCodeScannerView: UIViewControllerRepresentable {
+  let onCode: (String) -> Void
+  let onUnavailable: () -> Void
+
+  func makeUIViewController(context: Context) -> EchoQRCodeScannerViewController {
+    EchoQRCodeScannerViewController(onCode: onCode, onUnavailable: onUnavailable)
+  }
+
+  func updateUIViewController(_ uiViewController: EchoQRCodeScannerViewController, context: Context) {}
+
+  static func dismantleUIViewController(_ uiViewController: EchoQRCodeScannerViewController, coordinator: ()) {
+    uiViewController.stopScanning()
+  }
+}
+
+private final class EchoQRCodeScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+  private let onCode: (String) -> Void
+  private let onUnavailable: () -> Void
+  private let previewLayer: AVCaptureVideoPreviewLayer
+  private let session = AVCaptureSession()
+  private let sessionQueue = DispatchQueue(label: "app.echo.qr-scanner")
+  private var configured = false
+  private var handledCode = false
+
+  init(onCode: @escaping (String) -> Void, onUnavailable: @escaping () -> Void) {
+    self.onCode = onCode
+    self.onUnavailable = onUnavailable
+    previewLayer = AVCaptureVideoPreviewLayer(session: session)
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = .black
+    previewLayer.videoGravity = .resizeAspectFill
+    view.layer.addSublayer(previewLayer)
+    requestCameraAccess()
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    previewLayer.frame = view.bounds
+  }
+
+  func stopScanning() {
+    sessionQueue.async { [weak self] in
+      guard let self, self.session.isRunning else { return }
+      self.session.stopRunning()
+    }
+  }
+
+  private func requestCameraAccess() {
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
+    case .authorized:
+      configureAndStart()
+    case .notDetermined:
+      AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+        DispatchQueue.main.async {
+          if granted {
+            self?.configureAndStart()
+          } else {
+            self?.onUnavailable()
+          }
+        }
+      }
+    default:
+      onUnavailable()
+    }
+  }
+
+  private func configureAndStart() {
+    guard !configured else { return }
+    guard
+      let camera = AVCaptureDevice.default(for: .video),
+      let input = try? AVCaptureDeviceInput(device: camera),
+      session.canAddInput(input)
+    else {
+      onUnavailable()
+      return
+    }
+
+    let output = AVCaptureMetadataOutput()
+    guard session.canAddOutput(output) else {
+      onUnavailable()
+      return
+    }
+
+    session.beginConfiguration()
+    if session.canSetSessionPreset(.high) {
+      session.sessionPreset = .high
+    }
+    session.addInput(input)
+    session.addOutput(output)
+    output.setMetadataObjectsDelegate(self, queue: .main)
+    output.metadataObjectTypes = [.qr]
+    session.commitConfiguration()
+    configured = true
+
+    sessionQueue.async { [weak self] in
+      self?.session.startRunning()
+    }
+  }
+
+  func metadataOutput(
+    _ output: AVCaptureMetadataOutput,
+    didOutput metadataObjects: [AVMetadataObject],
+    from connection: AVCaptureConnection
+  ) {
+    guard
+      !handledCode,
+      let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+      let value = object.stringValue,
+      !value.isEmpty
+    else {
+      return
+    }
+    handledCode = true
+    stopScanning()
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    onCode(value)
   }
 }
 

@@ -36,6 +36,7 @@ type SharedEqProps = {
 
 export type EchoNativePlayerViewProps = SharedEqProps & {
   activeLyricIndex: number;
+  activePage: 'connect' | 'control' | 'library' | 'settings';
   artist: string;
   artworkUrl: string;
   connectionLabel: string;
@@ -48,8 +49,10 @@ export type EchoNativePlayerViewProps = SharedEqProps & {
   lyricsVisible: boolean;
   modeLabel: string;
   outputMode: 'local' | 'pc' | 'phone';
+  pagePayload: string;
   positionMs: number;
   queueCount: number;
+  queuePayload: string;
   repeatOne: boolean;
   showArtworkGlow: boolean;
   tags: string[];
@@ -63,28 +66,11 @@ export type EchoNativeEqLauncherViewProps = SharedEqProps & {
   title: string;
 };
 
-export type EchoNativeDockViewProps = {
-  activePage: 'connect' | 'control' | 'library' | 'settings';
-  language: 'en' | 'zh';
-  onAction?: (event: NativeSyntheticEvent<EchoNativeAction>) => void;
-  style?: StyleProp<ViewStyle>;
-};
-
-export type EchoNativePagesViewProps = SharedEqProps & {
-  payload: string;
-};
-
 const NativePlayer = Platform.OS === 'ios'
   ? requireNativeViewManager<EchoNativePlayerViewProps>('EchoAudioDsp', 'EchoNativePlayerView')
   : null;
 const NativeEqLauncher = Platform.OS === 'ios'
   ? requireNativeViewManager<EchoNativeEqLauncherViewProps>('EchoAudioDsp', 'EchoNativeEqLauncherView')
-  : null;
-const NativeDock = Platform.OS === 'ios'
-  ? requireNativeViewManager<EchoNativeDockViewProps>('EchoAudioDsp', 'EchoNativeDockView')
-  : null;
-const NativePages = Platform.OS === 'ios'
-  ? requireNativeViewManager<EchoNativePagesViewProps>('EchoAudioDsp', 'EchoNativePagesView')
   : null;
 
 export const EchoNativePlayerView = (props: EchoNativePlayerViewProps): ReactElement => (
@@ -93,12 +79,4 @@ export const EchoNativePlayerView = (props: EchoNativePlayerViewProps): ReactEle
 
 export const EchoNativeEqLauncherView = (props: EchoNativeEqLauncherViewProps): ReactElement => (
   NativeEqLauncher ? <NativeEqLauncher {...props} /> : <View style={props.style} />
-);
-
-export const EchoNativeDockView = (props: EchoNativeDockViewProps): ReactElement => (
-  NativeDock ? <NativeDock {...props} /> : <View style={props.style} />
-);
-
-export const EchoNativePagesView = (props: EchoNativePagesViewProps): ReactElement => (
-  NativePages ? <NativePages {...props} /> : <View style={props.style} />
 );
