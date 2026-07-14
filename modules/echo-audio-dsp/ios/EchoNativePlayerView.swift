@@ -310,6 +310,7 @@ private struct EchoNativeAppScreen: View {
       }
     }
     .tabViewStyle(.sidebarAdaptable)
+    .background(echoWarmBackground.ignoresSafeArea())
   }
   #endif
 
@@ -336,13 +337,13 @@ private struct EchoNativeAppScreen: View {
         .tag("settings")
         .tabItem { Label(title("settings"), systemImage: "gearshape") }
     }
+    .background(echoWarmBackground.ignoresSafeArea())
   }
 
   private func themedTab<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-    ZStack {
-      echoWarmBackground.ignoresSafeArea()
-      content()
-    }
+    content()
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(echoWarmBackground.ignoresSafeArea())
   }
 
   private func title(_ page: String) -> String {
