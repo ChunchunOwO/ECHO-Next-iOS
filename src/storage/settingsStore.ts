@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type SavedSettings = {
   appLanguage: 'zh' | 'en';
+  artworkBackgroundEnabled: boolean;
   audioTagVisibility: Record<string, boolean>;
   autoOpenLyricsForLocalTracks: boolean;
   autoQueueImportedLocalTracks: boolean;
@@ -14,6 +15,8 @@ export type SavedSettings = {
   eqPreset: 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
   lrcApiExternalDataEnabled: boolean;
   lrclibExternalDataEnabled: boolean;
+  externalDataSelectionMode: 'ask' | 'automatic';
+  neteaseAccessMode: 'direct' | 'selfHosted';
   neteaseExternalDataEnabled: boolean;
   loudnessNormalizationEnabled: boolean;
   showArtworkGlow: boolean;

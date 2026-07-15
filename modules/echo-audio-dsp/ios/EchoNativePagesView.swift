@@ -143,6 +143,8 @@ private struct EchoNativeLibraryPayload: Decodable {
 }
 
 private struct EchoNativeConnectionStreaming: Decodable {
+  var accessMode: String
+  let accessModeOptions: [EchoNativePageOption]
   var apiBaseUrl: String
   let busy: Bool
   let loggedIn: Bool
@@ -308,6 +310,7 @@ struct EchoNativePagesScreen: View {
         labels: model.payload?.library?.labels,
         onAction: onAction
       )
+      .echoCompactSheet(height: 250)
     }
     .sheet(item: $playlistSelection) { selection in
       EchoNativePlaylistDetailSheet(
@@ -536,15 +539,9 @@ struct EchoNativePagesScreen: View {
             Text(library.labels.playlists)
               .font(.system(size: 18, weight: .bold, design: .rounded))
             Spacer()
-            Button {
+            EchoNativeLabelButton(symbol: "plus", title: library.labels.createPlaylist) {
               playlistEditor = EchoNativePlaylistEditorState(initialName: "", playlistId: nil)
-            } label: {
-              Label(library.labels.createPlaylist, systemImage: "plus")
-                .font(.system(size: 11, weight: .bold))
             }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .tint(echoAccent)
           }
 
           if library.playlists.isEmpty {
@@ -1062,19 +1059,35 @@ struct EchoNativePagesScreen: View {
             symbol: "music.note.house",
             title: model.payload?.language == "en" ? "NetEase Cloud Music" : "网易云音乐"
           ) {
-            EchoNativeTextField(
-              placeholder: model.payload?.language == "en"
-                ? "Self-hosted API address"
-                : "自托管 NeteaseCloudMusicApi 地址",
-              text: Binding(
-                get: { model.payload?.connection?.streaming.apiBaseUrl ?? connection.streaming.apiBaseUrl },
-                set: { value in
-                  updateConnection { $0.streaming.apiBaseUrl = value }
-                  onAction(["action": "streamingApiUrl", "text": value])
-                }
-              ),
-              keyboardType: .URL
+            EchoNativeSegmentedControl(
+              options: connection.streaming.accessModeOptions,
+              selection: connection.streaming.accessMode,
+              compact: true,
+              onSelect: { onAction(["action": "streamingAccessMode", "selection": $0]) }
             )
+
+            if connection.streaming.accessMode == "selfHosted" {
+              EchoNativeTextField(
+                placeholder: "https://your-netease-api.example.com",
+                text: Binding(
+                  get: { model.payload?.connection?.streaming.apiBaseUrl ?? connection.streaming.apiBaseUrl },
+                  set: { value in
+                    updateConnection { $0.streaming.apiBaseUrl = value }
+                    onAction(["action": "streamingApiUrl", "text": value])
+                  }
+                )
+              )
+            }
+
+            Label(
+              connection.streaming.accessMode == "direct"
+                ? (model.payload?.language == "en" ? "Unofficial NetEase Web API" : "非官方网易云 Web 接口")
+                : (model.payload?.language == "en" ? "Your NeteaseCloudMusicApi service" : "你的 NeteaseCloudMusicApi 服务"),
+              systemImage: "network"
+            )
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(echoInk.opacity(0.56))
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if connection.streaming.loggedIn {
               HStack(spacing: 13) {
@@ -1097,9 +1110,12 @@ struct EchoNativePagesScreen: View {
                 } label: {
                   Text(model.payload?.language == "en" ? "Sign out" : "退出")
                     .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(echoAccent)
+                    .padding(.horizontal, 13)
+                    .frame(minHeight: 44)
+                    .echoGlass(tint: echoAccent.opacity(0.08), clear: false, in: Capsule())
                 }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.capsule)
+                .buttonStyle(.plain)
               }
               .padding(14)
               .echoGlass(tint: Color.white.opacity(0.1), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 19))
@@ -1136,9 +1152,12 @@ struct EchoNativePagesScreen: View {
                       systemImage: "arrow.up.right.square"
                     )
                     .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(echoInk.opacity(0.72))
+                    .padding(.horizontal, 13)
+                    .frame(minHeight: 44)
+                    .echoGlass(tint: Color.white.opacity(0.1), clear: false, in: Capsule())
                   }
-                  .buttonStyle(.bordered)
-                  .buttonBorderShape(.capsule)
+                  .buttonStyle(.plain)
                   .frame(maxWidth: .infinity)
                 }
               }
@@ -1153,8 +1172,8 @@ struct EchoNativePagesScreen: View {
             }
 
             Text(model.payload?.language == "en"
-              ? "Use your own NeteaseCloudMusicApi service. Session credentials stay in iOS Keychain."
-              : "使用你自己的 NeteaseCloudMusicApi 服务，登录凭据仅保存在 iOS 钥匙串。")
+              ? "Direct access may change without notice. Self-hosting is more controllable. Session credentials stay in iOS Keychain."
+              : "直连接口可能随网易云调整而变化；自托管更可控。登录凭据仅保存在 iOS 钥匙串。")
               .font(.system(size: 10, weight: .medium))
               .foregroundColor(echoInk.opacity(0.42))
               .fixedSize(horizontal: false, vertical: true)
@@ -1526,21 +1545,23 @@ private struct EchoNativePlaylistEditorSheet: View {
       Text(editorTitle)
         .font(.system(size: 24, weight: .bold, design: .rounded))
       TextField(labels?.playlistName ?? "歌单名称", text: $name)
-        .textFieldStyle(.roundedBorder)
+        .textFieldStyle(.plain)
+        .padding(.horizontal, 14)
+        .frame(minHeight: 46)
+        .echoGlass(tint: Color.white.opacity(0.12), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .submitLabel(.done)
         .onSubmit(save)
       HStack(spacing: 12) {
-        Button(labels?.cancel ?? "取消") { dismiss() }
-          .buttonStyle(.bordered)
-        Button(editorTitle) {
-          save()
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(echoAccent)
-        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        EchoNativeLabelButton(symbol: "xmark", title: labels?.cancel ?? "取消") { dismiss() }
+        EchoNativeLabelButton(
+          symbol: "checkmark",
+          title: editorTitle,
+          disabled: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ) { save() }
       }
     }
     .padding(22)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
     .preferredColorScheme(.light)
@@ -2205,9 +2226,8 @@ private struct EchoNativeSegmentedControl: View {
   let onSelect: (String) -> Void
 
   var body: some View {
-    echoGlassGroup(spacing: 5) {
-      HStack(spacing: 7) {
-        ForEach(options) { option in
+    HStack(spacing: 7) {
+      ForEach(options) { option in
           let selected = option.id == selection
           Button {
             onSelect(option.id)
@@ -2226,7 +2246,6 @@ private struct EchoNativeSegmentedControl: View {
           }
           .buttonStyle(.plain)
           .accessibilityAddTraits(selected ? [.isButton, .isSelected] : [.isButton])
-        }
       }
     }
   }

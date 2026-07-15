@@ -1,5 +1,7 @@
 import type { EchoLinkTrackPreview } from '../echoLink/types';
 
+export const neteaseDirectApiBaseUrl = 'https://music.163.com';
+
 export type NeteaseProfile = {
   avatarUrl: string;
   nickname: string;
@@ -22,8 +24,13 @@ type NeteaseSong = {
   name?: string;
 };
 
-export const normalizeNeteaseApiBaseUrl = (value: string): string => {
-  const normalized = value.trim().replace(/\/+$/u, '');
+type ApiResponse<T> = {
+  body: T;
+  cookie: string;
+};
+
+export const normalizeNeteaseApiBaseUrl = (value = ''): string => {
+  const normalized = (value.trim() || neteaseDirectApiBaseUrl).replace(/\/+$/u, '');
   let url: URL;
   try {
     url = new URL(normalized);
@@ -43,12 +50,56 @@ export const normalizeNeteaseApiBaseUrl = (value: string): string => {
   return normalized;
 };
 
-const request = async <T>(
+const isDirectApi = (apiBaseUrl: string): boolean => normalizeNeteaseApiBaseUrl(apiBaseUrl) === neteaseDirectApiBaseUrl;
+
+const cookieFromHeaders = (response: Response): string => {
+  const raw = response.headers.get('set-cookie') ?? '';
+  return raw
+    .split(/,(?=\s*[^;,=\s]+=[^;,]+)/u)
+    .map((value) => value.trim().split(';', 1)[0])
+    .filter(Boolean)
+    .join('; ');
+};
+
+const directRequest = async <T>(
+  path: string,
+  params: Record<string, string | number> = {},
+  cookie = '',
+): Promise<ApiResponse<T>> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  const body = new URLSearchParams({ timestamp: String(Date.now()) });
+  Object.entries(params).forEach(([key, value]) => body.set(key, String(value)));
+  try {
+    const response = await fetch(`${neteaseDirectApiBaseUrl}${path}`, {
+      body: body.toString(),
+      credentials: 'include',
+      headers: {
+        Accept: 'application/json,text/plain,*/*',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Referer: `${neteaseDirectApiBaseUrl}/`,
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      method: 'POST',
+      signal: controller.signal,
+    });
+    const value = await response.json() as T & { code?: number; message?: string };
+    const allowedLoginCode = value.code === 800 || value.code === 801 || value.code === 802 || value.code === 803;
+    if (!response.ok || (typeof value.code === 'number' && value.code >= 400 && !allowedLoginCode)) {
+      throw new Error(value.message || `HTTP ${response.status}`);
+    }
+    return { body: value, cookie: cookieFromHeaders(response) };
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const selfHostedRequest = async <T>(
   apiBaseUrl: string,
   path: string,
   params: Record<string, string | number> = {},
   cookie = '',
-): Promise<T> => {
+): Promise<ApiResponse<T>> => {
   const query = new URLSearchParams({ timestamp: String(Date.now()) });
   Object.entries(params).forEach(([key, value]) => query.set(key, String(value)));
   const controller = new AbortController();
@@ -59,10 +110,11 @@ const request = async <T>(
       signal: controller.signal,
     });
     const body = await response.json() as T & { code?: number; message?: string };
-    if (!response.ok || (typeof body.code === 'number' && body.code >= 400 && body.code !== 800 && body.code !== 801 && body.code !== 802 && body.code !== 803)) {
+    const allowedLoginCode = body.code === 800 || body.code === 801 || body.code === 802 || body.code === 803;
+    if (!response.ok || (typeof body.code === 'number' && body.code >= 400 && !allowedLoginCode)) {
       throw new Error(body.message || `HTTP ${response.status}`);
     }
-    return body;
+    return { body, cookie: '' };
   } finally {
     clearTimeout(timeout);
   }
@@ -83,31 +135,43 @@ const trackFromSong = (song: NeteaseSong): EchoLinkTrackPreview | null => {
   };
 };
 
-export const createNeteaseQrLogin = async (apiBaseUrl: string): Promise<{ key: string; qrUrl: string }> => {
-  const keyResponse = await request<{ data?: { unikey?: string } }>(apiBaseUrl, '/login/qr/key');
-  const key = keyResponse.data?.unikey;
+export const createNeteaseQrLogin = async (apiBaseUrl = neteaseDirectApiBaseUrl): Promise<{ key: string; qrUrl: string }> => {
+  if (isDirectApi(apiBaseUrl)) {
+    const response = await directRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 3 });
+    const key = response.body.unikey;
+    if (!key) throw new Error('无法生成登录二维码');
+    return { key, qrUrl: `${neteaseDirectApiBaseUrl}/login?codekey=${encodeURIComponent(key)}` };
+  }
+  const keyResponse = await selfHostedRequest<{ data?: { unikey?: string } }>(apiBaseUrl, '/login/qr/key');
+  const key = keyResponse.body.data?.unikey;
   if (!key) throw new Error('无法生成登录二维码');
-  const qrResponse = await request<{ data?: { qrurl?: string } }>(apiBaseUrl, '/login/qr/create', { key });
-  const qrUrl = qrResponse.data?.qrurl;
+  const qrResponse = await selfHostedRequest<{ data?: { qrurl?: string } }>(apiBaseUrl, '/login/qr/create', { key });
+  const qrUrl = qrResponse.body.data?.qrurl;
   if (!qrUrl) throw new Error('无法生成登录二维码');
   return { key, qrUrl };
 };
 
-export const checkNeteaseQrLogin = (
+export const checkNeteaseQrLogin = async (
   apiBaseUrl: string,
   key: string,
-): Promise<{ code?: number; cookie?: string; message?: string }> => (
-  request(apiBaseUrl, '/login/qr/check', { key, noCookie: 'true' })
-);
+): Promise<{ code?: number; cookie?: string; message?: string }> => {
+  if (isDirectApi(apiBaseUrl)) {
+    const response = await directRequest<{ code?: number; message?: string }>('/api/login/qrcode/client/login', { key, type: 3 });
+    return { ...response.body, cookie: response.cookie || undefined };
+  }
+  const response = await selfHostedRequest<{ code?: number; cookie?: string; message?: string }>(
+    apiBaseUrl,
+    '/login/qr/check',
+    { key, noCookie: 'true' },
+  );
+  return response.body;
+};
 
 export const getNeteaseProfile = async (apiBaseUrl: string, cookie: string): Promise<NeteaseProfile> => {
-  const response = await request<{ profile?: { avatarUrl?: string; nickname?: string; userId?: number } }>(
-    apiBaseUrl,
-    '/user/account',
-    {},
-    cookie,
-  );
-  const profile = response.profile;
+  const response = isDirectApi(apiBaseUrl)
+    ? await directRequest<{ profile?: { avatarUrl?: string; nickname?: string; userId?: number } }>('/api/nuser/account/get', {}, cookie)
+    : await selfHostedRequest<{ profile?: { avatarUrl?: string; nickname?: string; userId?: number } }>(apiBaseUrl, '/user/account', {}, cookie);
+  const profile = response.body.profile;
   if (!profile?.userId) throw new Error('登录状态已失效');
   return {
     avatarUrl: profile.avatarUrl ?? '',
@@ -126,11 +190,14 @@ export const getNeteasePlaylists = async (
   let offset = 0;
   let more = true;
   while (more) {
-    const response = await request<{
+    const response = isDirectApi(apiBaseUrl) ? await directRequest<{
+      more?: boolean;
+      playlist?: Array<{ coverImgUrl?: string; id?: number; name?: string; trackCount?: number }>;
+    }>('/api/user/playlist', { uid: userId, limit, offset, includeVideo: 'true' }, cookie) : await selfHostedRequest<{
       more?: boolean;
       playlist?: Array<{ coverImgUrl?: string; id?: number; name?: string; trackCount?: number }>;
     }>(apiBaseUrl, '/user/playlist', { uid: userId, limit, offset }, cookie);
-    const page = response.playlist ?? [];
+    const page = response.body.playlist ?? [];
     page.forEach((playlist) => {
       if (!playlist.id || !playlist.name) return;
       playlists.set(String(playlist.id), {
@@ -141,7 +208,7 @@ export const getNeteasePlaylists = async (
         trackCount: playlist.trackCount ?? 0,
       });
     });
-    more = response.more === true && page.length > 0;
+    more = response.body.more === true && page.length > 0;
     offset += page.length;
   }
   return Array.from(playlists.values());
@@ -152,24 +219,42 @@ export const getNeteasePlaylistTracks = async (
   cookie: string,
   playlistId: string,
 ): Promise<EchoLinkTrackPreview[]> => {
-  const tracks = new Map<string, EchoLinkTrackPreview>();
-  const limit = 500;
-  let offset = 0;
-  while (true) {
-    const response = await request<{ songs?: NeteaseSong[] }>(
-      apiBaseUrl,
-      '/playlist/track/all',
-      { id: playlistId, limit, offset },
+  if (!isDirectApi(apiBaseUrl)) {
+    const tracks = new Map<string, EchoLinkTrackPreview>();
+    const limit = 500;
+    let offset = 0;
+    while (true) {
+      const response = await selfHostedRequest<{ songs?: NeteaseSong[] }>(
+        apiBaseUrl,
+        '/playlist/track/all',
+        { id: playlistId, limit, offset },
+        cookie,
+      );
+      const songs = response.body.songs ?? [];
+      const previousCount = tracks.size;
+      songs.map(trackFromSong).filter((track): track is EchoLinkTrackPreview => Boolean(track)).forEach((track) => tracks.set(track.id, track));
+      if (songs.length < limit || tracks.size === previousCount) break;
+      offset += songs.length;
+    }
+    return Array.from(tracks.values());
+  }
+  const detail = await directRequest<{ playlist?: { trackIds?: Array<{ id?: number }> } }>(
+    '/api/v6/playlist/detail',
+    { id: playlistId, n: 100000, s: 8 },
+    cookie,
+  );
+  const ids = (detail.body.playlist?.trackIds ?? []).map((item) => item.id).filter((id): id is number => Boolean(id));
+  const tracks: EchoLinkTrackPreview[] = [];
+  for (let offset = 0; offset < ids.length; offset += 500) {
+    const chunk = ids.slice(offset, offset + 500);
+    const response = await directRequest<{ songs?: NeteaseSong[] }>(
+      '/api/v3/song/detail',
+      { c: JSON.stringify(chunk.map((id) => ({ id }))) },
       cookie,
     );
-    const songs = response.songs ?? [];
-    const page = songs.map(trackFromSong).filter((track): track is EchoLinkTrackPreview => Boolean(track));
-    const previousCount = tracks.size;
-    page.forEach((track) => tracks.set(track.id, track));
-    if (songs.length < limit || tracks.size === previousCount) break;
-    offset += songs.length;
+    tracks.push(...(response.body.songs ?? []).map(trackFromSong).filter((track): track is EchoLinkTrackPreview => Boolean(track)));
   }
-  return Array.from(tracks.values());
+  return tracks;
 };
 
 export const searchNeteaseTracks = async (
@@ -178,13 +263,10 @@ export const searchNeteaseTracks = async (
   keywords: string,
 ): Promise<EchoLinkTrackPreview[]> => {
   if (!keywords.trim()) return [];
-  const response = await request<{ result?: { songs?: NeteaseSong[] } }>(
-    apiBaseUrl,
-    '/cloudsearch',
-    { keywords: keywords.trim(), limit: 50, type: 1 },
-    cookie,
-  );
-  return (response.result?.songs ?? []).map(trackFromSong).filter((track): track is EchoLinkTrackPreview => Boolean(track));
+  const response = isDirectApi(apiBaseUrl)
+    ? await directRequest<{ result?: { songs?: NeteaseSong[] } }>('/api/cloudsearch/pc', { s: keywords.trim(), limit: 50, offset: 0, total: 'true', type: 1 }, cookie)
+    : await selfHostedRequest<{ result?: { songs?: NeteaseSong[] } }>(apiBaseUrl, '/cloudsearch', { keywords: keywords.trim(), limit: 50, type: 1 }, cookie);
+  return (response.body.result?.songs ?? []).map(trackFromSong).filter((track): track is EchoLinkTrackPreview => Boolean(track));
 };
 
 export const getNeteasePlaybackUrl = async (
@@ -192,13 +274,10 @@ export const getNeteasePlaybackUrl = async (
   cookie: string,
   trackId: string,
 ): Promise<string> => {
-  const response = await request<{ data?: Array<{ url?: string | null }> }>(
-    apiBaseUrl,
-    '/song/url/v1',
-    { id: trackId, level: 'exhigh' },
-    cookie,
-  );
-  const url = response.data?.[0]?.url;
+  const response = isDirectApi(apiBaseUrl)
+    ? await directRequest<{ data?: Array<{ url?: string | null }> }>('/api/song/enhance/player/url/v1', { ids: `[${trackId}]`, level: 'exhigh', encodeType: 'flac' }, cookie)
+    : await selfHostedRequest<{ data?: Array<{ url?: string | null }> }>(apiBaseUrl, '/song/url/v1', { id: trackId, level: 'exhigh' }, cookie);
+  const url = response.body.data?.[0]?.url;
   if (!url) throw new Error('该歌曲当前不可播放，可能受版权或会员权限限制');
   return url.startsWith('http://') ? `https://${url.slice('http://'.length)}` : url;
 };

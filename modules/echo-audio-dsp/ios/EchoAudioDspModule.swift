@@ -262,6 +262,7 @@ public final class EchoAudioDspModule: Module {
       Prop("activeLyricIndex") { (view: EchoNativePlayerView, value: Int) in setIfChanged(view.model, \.activeLyricIndex, value) }
       Prop("activePage") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.activePage, value) }
       Prop("artist") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.artist, value) }
+      Prop("artworkBackgroundEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.artworkBackgroundEnabled, value) }
       Prop("artworkUrl") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.artworkUrl, value) }
       Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.connectionLabel, value) }
       Prop("connectionOnline") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.connectionOnline, value) }

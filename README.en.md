@@ -33,7 +33,7 @@ Version 0.5.0 moves the main pages to SwiftUI and adds native audio DSP. Local p
 - Playback outputs: Local, Media, Control, and Stream can be switched from the playback page.
 - Local library: import, scan, favorites, recently played, local queue, and imported LRC lyrics.
 - Multiple library sources: All, ECHO, Local, and Media. The local library supports songs, albums, artists, formats, favorites, and recent views.
-- NetEase Cloud Music: custom NeteaseCloudMusicApi endpoint, QR sign-in, profile, playlists, search, and playback.
+- NetEase Cloud Music: direct Web API access or a self-hosted service, with QR sign-in, profile, playlists, search, and playback.
 - Global search across ECHO and local tracks, albums, and artists.
 - Editable playlists: create, rename, delete, favorite, pin, and add tracks from ECHO or the local library.
 - EchoLink pairing link connection: supports one-tap filling through `echo://pair?...`.
@@ -48,7 +48,8 @@ Version 0.5.0 moves the main pages to SwiftUI and adds native audio DSP. Local p
 - Native queue: play, remove, reorder, and clear tracks while showing the current playlist and track.
 - Lyrics mode: local LRC, EchoLink `/lyrics`, LRCLIB, LrcAPI, and NetEase Cloud Music with auto-scroll and current-line highlighting.
 - Tap-to-seek lyrics: lyric lines with timestamps can be tapped to seek directly.
-- External data: LRCLIB is preferred for lyrics, NetEase for artwork, and LrcAPI can supplement lyrics, artwork, and artists. When several sources match, each field can use a different source.
+- External data: LRCLIB is preferred for lyrics, NetEase for artwork, and LrcAPI can supplement lyrics, artwork, and artists. Candidates are shown by default even for one result; fields can use separate sources, automatic matching, or no external data.
+- Library artwork fallback: visible local and ECHO tracks without artwork are checked against external sources, and Library refresh retries misses.
 - Stable cover loading: keeps the previous cover before the new one is successfully loaded, reducing default-cover flickering and blank states.
 - Slider touch interruption fix: page gestures are locked while dragging the progress bar or volume slider to prevent vertical swipes from stealing touch input.
 - Playback controls: previous track, play / pause, next track, repeat one, and playlist preview.
@@ -66,7 +67,7 @@ Version 0.5.0 moves the main pages to SwiftUI and adds native audio DSP. Local p
 - The iPhone and computer must be on the same LAN.
 - Windows Firewall must allow ECHO NEXT communication.
 - Mobile streaming depends on the desktop stream interface; DSP mode caches streamed audio before playback.
-- NetEase streaming requires a reachable NeteaseCloudMusicApi service supplied by the user.
+- NetEase streaming can use the unofficial Web endpoints directly or a self-hosted NeteaseCloudMusicApi service; direct access may change upstream.
 - External data is off by default. LRCLIB, LrcAPI, and NetEase Cloud Music can be enabled separately and require internet access on the phone.
 - NetEase Cloud Music uses an unofficial public endpoint, so availability depends on the upstream service.
 - Cover art, lyrics, and audio tags prefer local files or desktop EchoLink data first.
@@ -126,12 +127,12 @@ If the connection fails, check the following first:
 ## Settings and External Data
 
 - Connection information is stored in `src/storage/connectionStore.ts`.
-- App settings are stored in local app data, including language, launch page, default library, audio tags, EQ, loudness normalization, the ECHO connection switch, the LRCLIB switch, and the NetEase Cloud Music switch.
+- App settings are stored in local app data, including language, launch page, default library, audio tags, EQ, loudness normalization, artwork backgrounds, ECHO connection, external matching behavior, and NetEase access mode.
 - Local music state is stored in `src/storage/localMusicStore.ts`, including favorites, recently played items, and the local queue.
 - LRCLIB is preferred for song lyrics and related lyric data.
 - LrcAPI can supplement lyrics, artwork, and artist information.
 - NetEase Cloud Music is used mainly for cover art and can also provide Chinese-library lyric fallback.
-- When several sources match, lyrics, artist, and artwork can each use a separately selected source.
+- Even one result is confirmed by the user. Lyrics, artist, and artwork can use separate sources, or the user can choose automatic matching or no external data.
 - NetEase credentials are stored in the iOS Keychain. Regular preferences and playlist state stay in local app data.
 
 ## EchoLink API

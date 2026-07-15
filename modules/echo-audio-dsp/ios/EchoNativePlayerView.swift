@@ -84,6 +84,36 @@ extension View {
         .overlay(shape.stroke(Color.white.opacity(0.48), lineWidth: 0.8))
     }
   }
+
+  @ViewBuilder
+  func echoCompactSheet(height: CGFloat) -> some View {
+    if #available(iOS 16.4, *) {
+      presentationDetents([.height(height)])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(echoWarmBackground)
+        .presentationCornerRadius(28)
+    } else if #available(iOS 16.0, *) {
+      presentationDetents([.height(height)])
+        .presentationDragIndicator(.visible)
+    } else {
+      self
+    }
+  }
+
+  @ViewBuilder
+  func echoMediumSheet() -> some View {
+    if #available(iOS 16.4, *) {
+      presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(echoWarmBackground)
+        .presentationCornerRadius(28)
+    } else if #available(iOS 16.0, *) {
+      presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+    } else {
+      self
+    }
+  }
 }
 
 @ViewBuilder
@@ -144,6 +174,7 @@ struct EchoNativeQueuePayload: Decodable {
 
 struct EchoNativeExternalSourceCandidate: Decodable, Identifiable {
   let albumArt: String?
+  let artist: String?
   let availableLabel: String
   let hasArtist: Bool
   let hasArtwork: Bool
@@ -160,6 +191,7 @@ struct EchoNativeExternalSourcePickerPayload: Decodable, Identifiable {
   let candidates: [EchoNativeExternalSourceCandidate]
   let doneLabel: String
   let id: String
+  let ignoreLabel: String
   let lyricsLabel: String
   let selectedLabel: String
   let subtitle: String
@@ -172,6 +204,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var activePage = "control"
   @Published var activeLyricIndex = 0
   @Published var artist = ""
+  @Published var artworkBackgroundEnabled = true
   @Published var artworkUrl = ""
   @Published var connectionLabel = "ECHO未连接"
   @Published var connectionOnline = false
@@ -339,6 +372,7 @@ private struct EchoNativeAppScreen: View {
     .preferredColorScheme(.light)
     .sheet(item: $playerModel.externalSourcePicker) { payload in
       EchoNativeExternalSourcePicker(payload: payload, onAction: onAction)
+        .echoMediumSheet()
     }
   }
 
@@ -368,10 +402,8 @@ private struct EchoNativeAppScreen: View {
         }
       }
       Tab(title("search"), systemImage: "magnifyingglass", value: "search", role: .search) {
-        NavigationStack {
-          themedTab {
-            EchoNativePagesScreen(model: pagesModel, page: "search", onAction: onAction)
-          }
+        themedTab {
+          EchoNativePagesScreen(model: pagesModel, page: "search", onAction: onAction)
         }
       }
       Tab(title("connect"), systemImage: "link", value: "connect") {
@@ -402,12 +434,9 @@ private struct EchoNativeAppScreen: View {
       }
         .tag("library")
         .tabItem { Label(title("library"), systemImage: "music.note.list") }
-      NavigationView {
-        themedTab {
-          EchoNativePagesScreen(model: pagesModel, page: "search", onAction: onAction)
-        }
+      themedTab {
+        EchoNativePagesScreen(model: pagesModel, page: "search", onAction: onAction)
       }
-        .navigationViewStyle(.stack)
         .tag("search")
         .tabItem { Label(title("search"), systemImage: "magnifyingglass") }
       themedTab {
@@ -458,10 +487,12 @@ struct EchoNativePlayerScreen: View {
   var body: some View {
     GeometryReader { geometry in
       ZStack {
-        EchoNativeArtworkBackdrop(urlString: model.artworkUrl) {
+        EchoNativeArtworkBackdrop(urlString: model.artworkBackgroundEnabled ? model.artworkUrl : "") {
           onAction(["action": "artworkError", "url": model.artworkUrl])
         }
+        .frame(width: geometry.size.width, height: geometry.size.height)
         .ignoresSafeArea()
+        .allowsHitTesting(false)
 
         if model.lyricsVisible {
           lyricsLayout(geometry: geometry)
@@ -471,7 +502,7 @@ struct EchoNativePlayerScreen: View {
             .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
       }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .frame(width: geometry.size.width, height: geometry.size.height)
       .background(Color.clear)
     }
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: model.lyricsVisible)
@@ -517,6 +548,7 @@ struct EchoNativePlayerScreen: View {
     }
     .padding(.horizontal, 16)
     .padding(.vertical, compact ? 8 : 12)
+    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
   }
 
   private func lyricsLayout(geometry: GeometryProxy) -> some View {
@@ -534,6 +566,7 @@ struct EchoNativePlayerScreen: View {
     }
     .padding(.horizontal, 16)
     .padding(.vertical, compact ? 8 : 12)
+    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
   }
 
   private func lyricsHeader(compact: Bool) -> some View {
@@ -873,6 +906,15 @@ struct EchoNativePlayerScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(model.language == "en" ? "Equalizer" : "均衡器")
+        iconButton(
+          symbol: "arrow.clockwise",
+          label: model.language == "en" ? "Refresh external metadata" : "重新获取外源数据",
+          active: false
+        ) {
+          onAction(["action": "externalMetadataRefresh"])
+        }
+        .disabled(model.metadataLoading)
+        .opacity(model.metadataLoading ? 0.42 : 1)
       }
     }
   }
@@ -992,27 +1034,32 @@ private struct EchoNativeArtworkBackdrop: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
-    ZStack {
-      echoWarmBackground
+    GeometryReader { geometry in
+      ZStack {
+        echoWarmBackground
 
-      if !urlString.isEmpty {
-        ZStack {
-          EchoNativeArtwork(urlString: urlString, onError: onError)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .scaledToFill()
-            .scaleEffect(1.28)
-            .saturation(1.12)
-            .blur(radius: 30, opaque: true)
+        if !urlString.isEmpty {
+          ZStack {
+            EchoNativeArtwork(urlString: urlString, onError: onError)
+              .frame(width: geometry.size.width, height: geometry.size.height)
+              .scaledToFill()
+              .scaleEffect(1.06)
+              .saturation(1.04)
+              .blur(radius: 18, opaque: true)
+              .clipped()
 
-          glassOverlay
-          Color.white.opacity(0.16)
+            glassOverlay
+            Color.white.opacity(0.11)
+          }
+          .frame(width: geometry.size.width, height: geometry.size.height)
+          .clipped()
+          .id(urlString)
+          .transition(.opacity)
         }
-        .id(urlString)
-        .transition(.opacity)
       }
+      .frame(width: geometry.size.width, height: geometry.size.height)
+      .clipped()
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .clipped()
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: urlString)
   }
 
@@ -1062,8 +1109,9 @@ private struct EchoNativeExternalSourcePicker: View {
         .accessibilityLabel(payload.cancelLabel)
       }
 
-      VStack(spacing: 0) {
-        ForEach(Array(payload.candidates.enumerated()), id: \.element.id) { index, candidate in
+      ScrollView(showsIndicators: false) {
+        LazyVStack(spacing: 0) {
+          ForEach(Array(payload.candidates.enumerated()), id: \.element.id) { index, candidate in
           VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 13) {
               EchoNativeArtwork(urlString: candidate.albumArt ?? "", onError: {})
@@ -1075,7 +1123,9 @@ private struct EchoNativeExternalSourcePicker: View {
                   .font(.system(size: 15, weight: .bold))
                   .foregroundColor(echoInk)
                   .lineLimit(1)
-                Text(candidate.sourceLabel)
+                Text([candidate.artist ?? "", candidate.sourceLabel]
+                  .filter { !$0.isEmpty }
+                  .joined(separator: " · "))
                   .font(.system(size: 12, weight: .semibold))
                   .foregroundColor(echoInk.opacity(0.5))
                   .lineLimit(1)
@@ -1113,31 +1163,57 @@ private struct EchoNativeExternalSourcePicker: View {
           if index < payload.candidates.count - 1 {
             Divider().opacity(0.45)
           }
+          }
         }
       }
+      .frame(maxHeight: .infinity, alignment: .top)
 
-      Button {
-        onAction([
-          "action": "externalFieldSourcesSelect",
-          "selections": selectedSources,
-        ])
-        dismiss()
-      } label: {
-        Text(payload.doneLabel)
-          .font(.system(size: 15, weight: .bold))
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, 12)
+      HStack(spacing: 10) {
+        Button {
+          onAction(["action": "externalSourcePickerIgnore"])
+          dismiss()
+        } label: {
+          Text(payload.ignoreLabel)
+            .font(.system(size: 14, weight: .bold))
+            .foregroundColor(echoInk.opacity(0.68))
+            .frame(maxWidth: .infinity)
+            .frame(height: 46)
+            .echoGlass(tint: Color.white.opacity(0.1), clear: false, in: Capsule())
+        }
+        .buttonStyle(.plain)
+
+        Button {
+          onAction([
+            "action": "externalFieldSourcesSelect",
+            "selections": selectedSources,
+          ])
+          dismiss()
+        } label: {
+          Text(payload.doneLabel)
+            .font(.system(size: 15, weight: .bold))
+            .foregroundColor(Color.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 46)
+            .echoGlass(tint: echoAccent.opacity(0.72), clear: false, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!selectionComplete)
+        .opacity(selectionComplete ? 1 : 0.38)
       }
-      .buttonStyle(.borderedProminent)
-      .buttonBorderShape(.capsule)
-      .tint(echoAccent)
-      .disabled(!selectionComplete)
     }
     .padding(22)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
     .preferredColorScheme(.light)
     .interactiveDismissDisabled()
+    .onAppear {
+      for field in requiredFields where selectedSources[field] == nil {
+        selectedSources[field] = payload.candidates.first(where: { candidate in
+          field == "lyrics" ? candidate.hasLyrics : field == "artist" ? candidate.hasArtist : candidate.hasArtwork
+        })?.id
+      }
+    }
   }
 
   private var requiredFields: [String] {
@@ -1173,8 +1249,8 @@ private struct EchoNativeExternalSourcePicker: View {
       .foregroundColor(selected ? Color.white : echoInk.opacity(available ? 0.72 : 0.28))
       .frame(maxWidth: .infinity)
       .padding(.vertical, 8)
-      .background(selected ? echoAccent : Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
-      .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.42), lineWidth: 0.7))
+      .background(selected ? echoAccent : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+      .overlay(RoundedRectangle(cornerRadius: 12).stroke(echoInk.opacity(available ? 0.14 : 0.06), lineWidth: 0.8))
     }
     .buttonStyle(.plain)
     .disabled(!available)

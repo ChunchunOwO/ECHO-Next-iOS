@@ -67,6 +67,7 @@ import {
   getNeteasePlaylistTracks,
   getNeteasePlaylists,
   getNeteaseProfile,
+  neteaseDirectApiBaseUrl,
   normalizeNeteaseApiBaseUrl,
   searchNeteaseTracks,
   type NeteasePlaylist,
@@ -114,13 +115,16 @@ type ExternalTrackMetadata = {
   status: 'error' | 'loading' | 'ready';
 };
 type ExternalMetadataSource = 'lrcapi' | 'lrclib' | 'netease';
+type ExternalDataSelectionMode = 'ask' | 'automatic';
+type NeteaseAccessMode = 'direct' | 'selfHosted';
 type ExternalMetadataField = 'albumArt' | 'artist' | 'lyrics';
 const externalMetadataFields: ExternalMetadataField[] = ['lyrics', 'artist', 'albumArt'];
 type ExternalMetadataCandidate = {
   albumArt: string | null;
   artist: string | null;
-  id: ExternalMetadataSource;
+  id: string;
   lyrics: string | null;
+  source: ExternalMetadataSource;
   sourceLabel: string;
   title: string;
 };
@@ -383,6 +387,7 @@ const defaultEqOption = eqPresetOptions[0]!;
 
 const defaultSettings: SavedSettings = {
   appLanguage: 'zh',
+  artworkBackgroundEnabled: true,
   audioTagVisibility: defaultAudioTagVisibility,
   autoOpenLyricsForLocalTracks: true,
   autoQueueImportedLocalTracks: false,
@@ -395,6 +400,8 @@ const defaultSettings: SavedSettings = {
   eqPreset: 'flat',
   lrcApiExternalDataEnabled: false,
   lrclibExternalDataEnabled: false,
+  externalDataSelectionMode: 'ask',
+  neteaseAccessMode: 'direct',
   neteaseExternalDataEnabled: false,
   loudnessNormalizationEnabled: false,
   showArtworkGlow: true,
@@ -607,6 +614,7 @@ const moveItem = <T,>(items: T[], index: number, direction: -1 | 1): T[] => {
 };
 
 const normalizedNeteaseOrigin = (value: string): string => {
+  if (!value.trim()) return '';
   try {
     return normalizeNeteaseApiBaseUrl(value);
   } catch {
@@ -700,27 +708,46 @@ const fetchJson = async <T,>(url: string, headers: Record<string, string> = {}):
 
 type LrclibSearchItem = {
   artistName?: string;
+  id?: number;
   name?: string;
   plainLyrics?: string | null;
   syncedLyrics?: string | null;
   trackName?: string;
 };
 
-const lookupLrclibMetadata = async (track: EchoLinkTrackPreview): Promise<Partial<ExternalTrackMetadata> | null> => {
+type ExternalMetadataMatch = {
+  albumArt: string | null;
+  artist: string | null;
+  candidateKey: string;
+  lyrics: string | null;
+  sourceTitle: string | null;
+};
+
+const lookupLrclibMetadata = async (track: EchoLinkTrackPreview): Promise<ExternalMetadataMatch[]> => {
   const params = new URLSearchParams({
     artist_name: track.artist ?? '',
     track_name: track.title ?? '',
   });
   const results = await fetchJson<LrclibSearchItem[]>(`https://lrclib.net/api/search?${params.toString()}`);
-  const match = results.find((item) => item.syncedLyrics || item.plainLyrics);
-  if (!match) {
-    return null;
-  }
-  return {
-    artist: match.artistName ?? null,
-    lyrics: match.syncedLyrics ?? match.plainLyrics ?? null,
-    sourceTitle: match.trackName ?? match.name ?? null,
-  };
+  const title = normalizeExternalLookupValue(track.title);
+  const artist = normalizeExternalLookupValue(track.artist);
+  return results
+    .filter((item) => item.syncedLyrics || item.plainLyrics)
+    .sort((a, b) => {
+      const score = (item: LrclibSearchItem) => (
+        (normalizeExternalLookupValue(item.trackName ?? item.name) === title ? 4 : 0)
+        + (artist && normalizeExternalLookupValue(item.artistName).includes(artist) ? 2 : 0)
+      );
+      return score(b) - score(a);
+    })
+    .slice(0, 2)
+    .map((item, index) => ({
+      albumArt: null,
+      artist: item.artistName ?? null,
+      candidateKey: String(item.id ?? index),
+      lyrics: item.syncedLyrics ?? item.plainLyrics ?? null,
+      sourceTitle: item.trackName ?? item.name ?? null,
+    }));
 };
 
 type LrcApiSearchItem = {
@@ -732,7 +759,7 @@ type LrcApiSearchItem = {
   title?: string;
 };
 
-const lookupLrcApiMetadata = async (track: EchoLinkTrackPreview): Promise<Partial<ExternalTrackMetadata> | null> => {
+const lookupLrcApiMetadata = async (track: EchoLinkTrackPreview): Promise<ExternalMetadataMatch[]> => {
   const params = new URLSearchParams({
     album: track.album ?? '',
     artist: track.artist ?? '',
@@ -742,19 +769,22 @@ const lookupLrcApiMetadata = async (track: EchoLinkTrackPreview): Promise<Partia
   const title = normalizeExternalLookupValue(track.title);
   const artist = normalizeExternalLookupValue(track.artist);
   const usable = results.filter((item) => item.cover || item.lrc || item.lyrics);
-  const match = usable.find((item) => (
-    normalizeExternalLookupValue(item.title) === title
-    && (!artist || normalizeExternalLookupValue(item.artist).includes(artist))
-  )) ?? usable[0];
-  if (!match) {
-    return null;
-  }
-  return {
-    albumArt: match.cover ?? match.cover_format?.replace('{w}', '1200').replace('{h}', '1200') ?? null,
-    artist: match.artist ?? null,
-    lyrics: match.lrc?.trim() || match.lyrics?.trim() || null,
-    sourceTitle: match.title ?? null,
-  };
+  return usable
+    .sort((a, b) => {
+      const score = (item: LrcApiSearchItem) => (
+        (normalizeExternalLookupValue(item.title) === title ? 4 : 0)
+        + (artist && normalizeExternalLookupValue(item.artist).includes(artist) ? 2 : 0)
+      );
+      return score(b) - score(a);
+    })
+    .slice(0, 2)
+    .map((item, index) => ({
+      albumArt: item.cover ?? item.cover_format?.replace('{w}', '1200').replace('{h}', '1200') ?? null,
+      artist: item.artist ?? null,
+      candidateKey: `${normalizeExternalLookupValue(item.title)}:${normalizeExternalLookupValue(item.artist)}:${index}`,
+      lyrics: item.lrc?.trim() || item.lyrics?.trim() || null,
+      sourceTitle: item.title ?? null,
+    }));
 };
 
 type NeteaseSearchResponse = {
@@ -815,10 +845,10 @@ const scoreNeteaseSong = (track: EchoLinkTrackPreview, song: NeteaseSearchSong):
 const lookupNeteaseMetadata = async (
   track: EchoLinkTrackPreview,
   options: { includeLyrics?: boolean } = {},
-): Promise<Partial<ExternalTrackMetadata> | null> => {
+): Promise<ExternalMetadataMatch[]> => {
   const query = [track.title, track.artist].filter(Boolean).join(' ');
   if (!query.trim()) {
-    return null;
+    return [];
   }
 
   const searchParams = new URLSearchParams({
@@ -830,34 +860,33 @@ const lookupNeteaseMetadata = async (
   });
   const neteaseHeaders = { Referer: 'https://music.163.com/' };
   const search = await fetchJson<NeteaseSearchResponse>(`https://music.163.com/api/search/get/web?${searchParams.toString()}`, neteaseHeaders);
-  const song = (search.result?.songs ?? [])
+  const songs = (search.result?.songs ?? [])
     .filter((item) => item.id)
-    .sort((a, b) => scoreNeteaseSong(track, b) - scoreNeteaseSong(track, a))[0];
-  if (!song?.id) {
-    return null;
-  }
+    .sort((a, b) => scoreNeteaseSong(track, b) - scoreNeteaseSong(track, a))
+    .slice(0, 2);
 
   const includeLyrics = options.includeLyrics ?? true;
-  const [detailResult, lyricResult, mediaResult] = await Promise.allSettled([
-    fetchJson<NeteaseDetailResponse>(`https://music.163.com/api/song/detail/?id=${song.id}&ids=${encodeURIComponent(`[${song.id}]`)}`, neteaseHeaders),
-    includeLyrics
-      ? fetchJson<NeteaseLyricResponse>(`https://music.163.com/api/song/lyric?id=${song.id}&lv=1&kv=1&tv=-1`, neteaseHeaders)
-      : Promise.resolve<NeteaseLyricResponse>({}),
-    includeLyrics
-      ? fetchJson<NeteaseMediaResponse>(`https://music.163.com/api/song/media?id=${song.id}`, neteaseHeaders)
-      : Promise.resolve<NeteaseMediaResponse>({}),
-  ]);
-  const detail = detailResult.status === 'fulfilled' ? detailResult.value : null;
-  const lyric = lyricResult.status === 'fulfilled' ? lyricResult.value : null;
-  const media = mediaResult.status === 'fulfilled' ? mediaResult.value : null;
-  const lyrics = lyric?.lrc?.lyric?.trim() || media?.lyric?.trim() || null;
-
-  return {
-    albumArt: detail?.songs?.[0]?.album?.picUrl ?? null,
-    artist: song.artists?.map((artist) => artist.name).filter(Boolean).join(', ') || null,
-    lyrics,
-    sourceTitle: song.name ?? detail?.songs?.[0]?.name ?? null,
-  };
+  return Promise.all(songs.map(async (song): Promise<ExternalMetadataMatch> => {
+    const [detailResult, lyricResult, mediaResult] = await Promise.allSettled([
+      fetchJson<NeteaseDetailResponse>(`https://music.163.com/api/song/detail/?id=${song.id}&ids=${encodeURIComponent(`[${song.id}]`)}`, neteaseHeaders),
+      includeLyrics
+        ? fetchJson<NeteaseLyricResponse>(`https://music.163.com/api/song/lyric?id=${song.id}&lv=1&kv=1&tv=-1`, neteaseHeaders)
+        : Promise.resolve<NeteaseLyricResponse>({}),
+      includeLyrics
+        ? fetchJson<NeteaseMediaResponse>(`https://music.163.com/api/song/media?id=${song.id}`, neteaseHeaders)
+        : Promise.resolve<NeteaseMediaResponse>({}),
+    ]);
+    const detail = detailResult.status === 'fulfilled' ? detailResult.value : null;
+    const lyric = lyricResult.status === 'fulfilled' ? lyricResult.value : null;
+    const media = mediaResult.status === 'fulfilled' ? mediaResult.value : null;
+    return {
+      albumArt: detail?.songs?.[0]?.album?.picUrl ?? null,
+      artist: song.artists?.map((artist) => artist.name).filter(Boolean).join(', ') || null,
+      candidateKey: String(song.id),
+      lyrics: lyric?.lrc?.lyric?.trim() || media?.lyric?.trim() || null,
+      sourceTitle: song.name ?? detail?.songs?.[0]?.name ?? null,
+    };
+  }));
 };
 
 const lookupExternalMetadataCandidates = async (
@@ -865,29 +894,28 @@ const lookupExternalMetadataCandidates = async (
   sources: Record<ExternalMetadataSource, boolean>,
   options: { includeNeteaseLyrics?: boolean } = {},
 ): Promise<ExternalMetadataCandidate[]> => {
-  const lookups: Array<Promise<{ source: ExternalMetadataSource; value: Partial<ExternalTrackMetadata> | null }>> = [];
+  const lookups: Array<Promise<{ source: ExternalMetadataSource; values: ExternalMetadataMatch[] }>> = [];
   if (sources.lrcapi) {
-    lookups.push(lookupLrcApiMetadata(track).then((value) => ({ source: 'lrcapi', value })));
+    lookups.push(lookupLrcApiMetadata(track).then((values) => ({ source: 'lrcapi', values })));
   }
   if (sources.lrclib) {
-    lookups.push(lookupLrclibMetadata(track).then((value) => ({ source: 'lrclib', value })));
+    lookups.push(lookupLrclibMetadata(track).then((values) => ({ source: 'lrclib', values })));
   }
   if (sources.netease) {
     lookups.push(lookupNeteaseMetadata(track, {
       includeLyrics: options.includeNeteaseLyrics ?? true,
-    }).then((value) => ({ source: 'netease', value })));
+    }).then((values) => ({ source: 'netease', values })));
   }
 
   const results = await Promise.allSettled(lookups);
   const fulfilled = results
-    .filter((result): result is PromiseFulfilledResult<{ source: ExternalMetadataSource; value: Partial<ExternalTrackMetadata> | null }> => result.status === 'fulfilled');
+    .filter((result): result is PromiseFulfilledResult<{ source: ExternalMetadataSource; values: ExternalMetadataMatch[] }> => result.status === 'fulfilled');
   if (lookups.length > 0 && fulfilled.length === 0) {
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     throw failure?.reason ?? new Error('External metadata lookup failed.');
   }
   const values = fulfilled
-    .map((result) => result.value)
-    .filter((result) => result.value);
+    .flatMap((result) => result.value.values.map((value) => ({ source: result.value.source, value })));
   if (values.length === 0) {
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failure) throw failure.reason;
@@ -901,30 +929,15 @@ const lookupExternalMetadataCandidates = async (
     .map(({ source, value }) => ({
       albumArt: value?.albumArt ?? null,
       artist: value?.artist ?? null,
-      id: source,
+      id: `${source}:${value.candidateKey}`,
       lyrics: value?.lyrics ?? null,
+      source,
       sourceLabel: sourceLabels[source],
       title: value?.sourceTitle || track.title || sourceLabels[source],
     }))
-    .filter((candidate) => Boolean(candidate.albumArt || candidate.artist || candidate.lyrics));
+    .filter((candidate) => Boolean(candidate.albumArt || candidate.artist || candidate.lyrics))
+    .slice(0, 6);
 };
-
-const metadataFromExternalCandidate = (candidate: ExternalMetadataCandidate): ExternalTrackMetadata => ({
-  albumArt: candidate.albumArt,
-  artist: candidate.artist,
-  error: null,
-  lyrics: candidate.lyrics,
-  sourceTitle: candidate.title,
-  status: 'ready',
-});
-
-const fieldSourcesFromExternalCandidate = (
-  candidate: ExternalMetadataCandidate,
-): Partial<Record<ExternalMetadataField, ExternalMetadataSource>> => ({
-  ...(candidate.albumArt ? { albumArt: candidate.id } : {}),
-  ...(candidate.artist ? { artist: candidate.id } : {}),
-  ...(candidate.lyrics ? { lyrics: candidate.id } : {}),
-});
 
 const initialConnection: EchoLinkConnection = {
   host: '',
@@ -1075,7 +1088,9 @@ function EchoLinkApp(): ReactElement {
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
   const [activePlaybackPlaylistId, setActivePlaybackPlaylistId] = useState<string | null>(null);
-  const [streamingApiBaseUrl, setStreamingApiBaseUrl] = useState('');
+  const [neteaseAccessMode, setNeteaseAccessMode] = useState<NeteaseAccessMode>(defaultSettings.neteaseAccessMode);
+  const [streamingApiInput, setStreamingApiInput] = useState('');
+  const streamingApiBaseUrl = neteaseAccessMode === 'direct' ? neteaseDirectApiBaseUrl : streamingApiInput.trim();
   const [streamingCookie, setStreamingCookie] = useState('');
   const [streamingSessionOrigin, setStreamingSessionOrigin] = useState('');
   const [streamingProfile, setStreamingProfile] = useState<NeteaseProfile | null>(null);
@@ -1110,7 +1125,9 @@ function EchoLinkApp(): ReactElement {
   const [lrcApiExternalDataEnabled, setLrcApiExternalDataEnabled] = useState(defaultSettings.lrcApiExternalDataEnabled);
   const [lrclibExternalDataEnabled, setLrclibExternalDataEnabled] = useState(defaultSettings.lrclibExternalDataEnabled);
   const [neteaseExternalDataEnabled, setNeteaseExternalDataEnabled] = useState(defaultSettings.neteaseExternalDataEnabled);
+  const [externalDataSelectionMode, setExternalDataSelectionMode] = useState<ExternalDataSelectionMode>(defaultSettings.externalDataSelectionMode);
   const [loudnessNormalizationEnabled, setLoudnessNormalizationEnabled] = useState(defaultSettings.loudnessNormalizationEnabled);
+  const [artworkBackgroundEnabled, setArtworkBackgroundEnabled] = useState(defaultSettings.artworkBackgroundEnabled);
   const [showArtworkGlow, setShowArtworkGlow] = useState(defaultSettings.showArtworkGlow);
   const [openSettingsSection, setOpenSettingsSection] = useState<SettingsSectionKey>('interface');
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -1174,6 +1191,9 @@ function EchoLinkApp(): ReactElement {
   const devicePlaybackRequestRef = useRef(0);
   const activeExternalMetadataKeyRef = useRef<string | null>(null);
   const externalMetadataLookupKeysRef = useRef<Set<string>>(new Set());
+  const ignoredExternalMetadataKeysRef = useRef<Set<string>>(new Set());
+  const libraryArtworkLookupKeysRef = useRef<Set<string>>(new Set());
+  const [externalMetadataRefreshToken, setExternalMetadataRefreshToken] = useState(0);
   const busyCountRef = useRef(0);
   const streamingBusyCountRef = useRef(0);
   const beginBusy = useCallback(() => {
@@ -1784,9 +1804,13 @@ function EchoLinkApp(): ReactElement {
         setConnection(savedConn);
         setConnectionDraft(connectionDraftFrom(savedConn));
       }
-      setStreamingApiBaseUrl(savedStreaming.apiBaseUrl);
       setFavoriteStreamingPlaylistIds(savedStreaming.favoritePlaylistIds);
       setPinnedStreamingPlaylistIds(savedStreaming.pinnedPlaylistIds);
+      setStreamingApiInput(savedStreaming.apiBaseUrl === neteaseDirectApiBaseUrl ? '' : savedStreaming.apiBaseUrl);
+      const savedAccessMode = savedSettings.neteaseAccessMode === 'direct' || savedSettings.neteaseAccessMode === 'selfHosted'
+        ? savedSettings.neteaseAccessMode
+        : savedStreaming.apiBaseUrl && savedStreaming.apiBaseUrl !== neteaseDirectApiBaseUrl ? 'selfHosted' : 'direct';
+      setNeteaseAccessMode(savedAccessMode);
       if (savedSession) {
         setStreamingCookie(savedSession.cookie);
         setStreamingSessionOrigin(savedSession.apiBaseUrl);
@@ -1841,11 +1865,17 @@ function EchoLinkApp(): ReactElement {
       if (typeof savedSettings.neteaseExternalDataEnabled === 'boolean') {
         setNeteaseExternalDataEnabled(savedSettings.neteaseExternalDataEnabled);
       }
+      if (savedSettings.externalDataSelectionMode === 'ask' || savedSettings.externalDataSelectionMode === 'automatic') {
+        setExternalDataSelectionMode(savedSettings.externalDataSelectionMode);
+      }
       if (typeof savedSettings.loudnessNormalizationEnabled === 'boolean') {
         setLoudnessNormalizationEnabled(savedSettings.loudnessNormalizationEnabled);
       }
       if (typeof savedSettings.showArtworkGlow === 'boolean') {
         setShowArtworkGlow(savedSettings.showArtworkGlow);
+      }
+      if (typeof savedSettings.artworkBackgroundEnabled === 'boolean') {
+        setArtworkBackgroundEnabled(savedSettings.artworkBackgroundEnabled);
       }
       setSettingsLoaded(true);
       setFavoriteLocalTrackIds(savedLocalMusic.favoriteTrackIds);
@@ -1904,6 +1934,7 @@ function EchoLinkApp(): ReactElement {
     }
     void saveSettings({
       appLanguage,
+      artworkBackgroundEnabled,
       audioTagVisibility,
       autoOpenLyricsForLocalTracks,
       autoQueueImportedLocalTracks,
@@ -1916,8 +1947,10 @@ function EchoLinkApp(): ReactElement {
       eqPreset,
       lrcApiExternalDataEnabled,
       lrclibExternalDataEnabled,
+      externalDataSelectionMode,
       loudnessNormalizationEnabled,
       neteaseExternalDataEnabled,
+      neteaseAccessMode,
       showArtworkGlow,
     }).catch((saveError) => {
       showErrorAlert(
@@ -1928,6 +1961,7 @@ function EchoLinkApp(): ReactElement {
     });
   }, [
     appLanguage,
+    artworkBackgroundEnabled,
     audioTagVisibility,
     autoOpenLyricsForLocalTracks,
     autoQueueImportedLocalTracks,
@@ -1940,8 +1974,10 @@ function EchoLinkApp(): ReactElement {
     eqPreset,
     lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
+    externalDataSelectionMode,
     loudnessNormalizationEnabled,
     neteaseExternalDataEnabled,
+    neteaseAccessMode,
     settingsLoaded,
     showArtworkGlow,
     showErrorAlert,
@@ -1977,7 +2013,7 @@ function EchoLinkApp(): ReactElement {
   useEffect(() => {
     if (!streamingPreferencesLoaded) return;
     void saveStreamingPreferences({
-      apiBaseUrl: streamingApiBaseUrl,
+      apiBaseUrl: streamingApiInput,
       favoritePlaylistIds: favoriteStreamingPlaylistIds,
       pinnedPlaylistIds: pinnedStreamingPlaylistIds,
     }).catch((saveError) => {
@@ -1992,7 +2028,7 @@ function EchoLinkApp(): ReactElement {
     languageIsEnglish,
     pinnedStreamingPlaylistIds,
     showErrorAlert,
-    streamingApiBaseUrl,
+    streamingApiInput,
     streamingPreferencesLoaded,
   ]);
 
@@ -2321,6 +2357,14 @@ function EchoLinkApp(): ReactElement {
           setStreamingQrKey('');
           setStreamingQrUrl('');
           setStreamingStatusText(appLanguage === 'en' ? 'Signed in.' : '登录成功');
+          return;
+        }
+        if (response.code === 803) {
+          setStreamingQrKey('');
+          setStreamingQrUrl('');
+          setStreamingStatusText(appLanguage === 'en'
+            ? 'Signed in, but iOS did not return the session cookie. Please try again.'
+            : '已确认登录，但 iOS 未返回会话凭据，请重新扫码。');
           return;
         }
         if (response.code === 800) {
@@ -2701,7 +2745,8 @@ function EchoLinkApp(): ReactElement {
     const shouldLookupLrcApi = lrcApiExternalDataEnabled;
     const shouldLookupLrclib = lrclibExternalDataEnabled;
     const shouldLookupNetease = neteaseExternalDataEnabled || shouldFetchExternalArtwork;
-    if ((!shouldLookupLrcApi && !shouldLookupLrclib && !shouldLookupNetease) || !displayTrack || !externalMetadataKey) {
+    if ((!shouldLookupLrcApi && !shouldLookupLrclib && !shouldLookupNetease) || !displayTrack || !externalMetadataKey
+      || ignoredExternalMetadataKeysRef.current.has(externalMetadataKey)) {
       return undefined;
     }
     const lookupKey = `${externalMetadataKey}::lrcapi:${shouldLookupLrcApi ? '1' : '0'}::lrclib:${shouldLookupLrclib ? '1' : '0'}::netease:${shouldLookupNetease ? '1' : '0'}`;
@@ -2731,7 +2776,7 @@ function EchoLinkApp(): ReactElement {
       includeNeteaseLyrics: neteaseExternalDataEnabled,
     })
       .then((candidates) => {
-        if (candidates.length > 1) {
+        if (candidates.length > 0 && externalDataSelectionMode === 'ask') {
           if (activeExternalMetadataKeyRef.current !== externalMetadataKey) {
             externalMetadataLookupKeysRef.current.delete(lookupKey);
             return;
@@ -2743,21 +2788,39 @@ function EchoLinkApp(): ReactElement {
           });
           return;
         }
-        const candidate = candidates[0];
-        if (candidate) {
-          const fieldSources = fieldSourcesFromExternalCandidate(candidate);
-          if (nativeArtworkVisible) delete fieldSources.albumArt;
-          setExternalMetadataFieldSourcesByKey((sources) => ({
-            ...sources,
-            [externalMetadataKey]: fieldSources,
-          }));
-        }
+        const sourcePriority: Record<ExternalMetadataField, ExternalMetadataSource[]> = {
+          albumArt: ['netease', 'lrcapi', 'lrclib'],
+          artist: ['lrcapi', 'netease', 'lrclib'],
+          lyrics: ['lrclib', 'lrcapi', 'netease'],
+        };
+        const selected = (field: ExternalMetadataField) => sourcePriority[field]
+          .map((source) => candidates.find((candidate) => candidate.source === source && Boolean(candidate[field])))
+          .find(Boolean);
+        const artworkCandidate = nativeArtworkVisible ? undefined : selected('albumArt');
+        const artistCandidate = selected('artist');
+        const lyricsCandidate = selected('lyrics');
+        const candidate = artworkCandidate ?? lyricsCandidate ?? artistCandidate;
+        const fieldSources: Partial<Record<ExternalMetadataField, ExternalMetadataSource>> = {};
+        if (artworkCandidate) fieldSources.albumArt = artworkCandidate.source;
+        if (artistCandidate) fieldSources.artist = artistCandidate.source;
+        if (lyricsCandidate) fieldSources.lyrics = lyricsCandidate.source;
+        if (candidate) setExternalMetadataFieldSourcesByKey((sources) => ({
+          ...sources,
+          [externalMetadataKey]: fieldSources,
+        }));
         setExternalMetadataByKey((current) => {
           const existing = current[externalMetadataKey];
           if (candidate) {
             return {
               ...current,
-              [externalMetadataKey]: metadataFromExternalCandidate(candidate),
+              [externalMetadataKey]: {
+                albumArt: artworkCandidate?.albumArt ?? existing?.albumArt ?? null,
+                artist: artistCandidate?.artist ?? existing?.artist ?? null,
+                error: null,
+                lyrics: lyricsCandidate?.lyrics ?? existing?.lyrics ?? null,
+                sourceTitle: candidate.title,
+                status: 'ready',
+              },
             };
           }
           const hasMetadata = Boolean(existing?.albumArt || existing?.lyrics);
@@ -2795,7 +2858,9 @@ function EchoLinkApp(): ReactElement {
     return undefined;
   }, [
     displayTrack,
+    externalDataSelectionMode,
     externalMetadataKey,
+    externalMetadataRefreshToken,
     lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     neteaseExternalDataEnabled,
@@ -2823,10 +2888,12 @@ function EchoLinkApp(): ReactElement {
 
   useEffect(() => {
     externalMetadataLookupKeysRef.current.clear();
+    ignoredExternalMetadataKeysRef.current.clear();
+    libraryArtworkLookupKeysRef.current.clear();
     setExternalMetadataByKey({});
     setExternalMetadataFieldSourcesByKey({});
     setPendingExternalMetadataSelection(null);
-  }, [lrcApiExternalDataEnabled, lrclibExternalDataEnabled, neteaseExternalDataEnabled]);
+  }, [externalDataSelectionMode, lrcApiExternalDataEnabled, lrclibExternalDataEnabled, neteaseExternalDataEnabled]);
 
   useEffect(() => {
     if (!echoAudioDsp.isAvailable) {
@@ -3000,6 +3067,58 @@ function EchoLinkApp(): ReactElement {
         : [];
   const activeLibraryTotal = activeLibraryTracks.length;
   const displayedLibraryTracks = activeLibraryTracks.slice(0, 20);
+  const libraryArtworkLookupSignature = displayedLibraryTracks
+    .map((track) => `${track.id}:${track.artworkUrl ?? ''}`)
+    .join('|');
+
+  useEffect(() => {
+    if (page !== 'library' && page !== 'search') return undefined;
+    let cancelled = false;
+    void (async () => {
+      for (const track of displayedLibraryTracks) {
+        if (cancelled || artworkUrlIsVisible(resolveArtworkUrl(track.artworkUrl))) continue;
+        const metadataKey = externalMetadataKeyForTrack(track);
+        if (!metadataKey || artworkUrlIsVisible(resolveArtworkUrl(externalMetadataByKey[metadataKey]?.albumArt))) continue;
+        const lookupKey = `library-artwork:${metadataKey}`;
+        if (libraryArtworkLookupKeysRef.current.has(lookupKey)) continue;
+        libraryArtworkLookupKeysRef.current.add(lookupKey);
+        try {
+          const candidates = await lookupExternalMetadataCandidates(track, {
+            lrcapi: lrcApiExternalDataEnabled,
+            lrclib: false,
+            netease: true,
+          }, { includeNeteaseLyrics: false });
+          if (cancelled) return;
+          const candidate = candidates.find((item) => item.source === 'netease' && item.albumArt)
+            ?? candidates.find((item) => item.albumArt);
+          if (!candidate?.albumArt) continue;
+          setExternalMetadataByKey((current) => ({
+            ...current,
+            [metadataKey]: {
+              albumArt: candidate.albumArt,
+              artist: current[metadataKey]?.artist ?? null,
+              error: null,
+              lyrics: current[metadataKey]?.lyrics ?? null,
+              sourceTitle: candidate.title,
+              status: 'ready',
+            },
+          }));
+          setExternalMetadataFieldSourcesByKey((current) => ({
+            ...current,
+            [metadataKey]: { ...current[metadataKey], albumArt: candidate.source },
+          }));
+        } catch {
+          // A library refresh clears the lookup marker and retries misses.
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [
+    externalMetadataRefreshToken,
+    libraryArtworkLookupSignature,
+    lrcApiExternalDataEnabled,
+    page,
+  ]);
   const localGroupLabel = useCallback((track: LocalMusicTrack): string | null => {
     if (localLibraryView === 'albums') {
       return track.album || '未归类专辑';
@@ -4045,6 +4164,9 @@ function EchoLinkApp(): ReactElement {
       description: text.externalDataDescription,
       key: 'externalData',
       summary: [
+        externalDataSelectionMode === 'ask'
+          ? (languageIsEnglish ? 'Ask' : '每次选择')
+          : (languageIsEnglish ? 'Auto' : '自动匹配'),
         lrcApiExternalDataEnabled ? 'LrcAPI' : null,
         lrclibExternalDataEnabled ? 'LRCLIB' : null,
         neteaseExternalDataEnabled ? (languageIsEnglish ? 'NetEase' : '网易云') : null,
@@ -4078,11 +4200,13 @@ function EchoLinkApp(): ReactElement {
     defaultPage,
     labelForLocalLibraryView,
     languageIsEnglish,
+    externalDataSelectionMode,
     localStorageBytes,
     loudnessNormalizationEnabled,
     lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     neteaseExternalDataEnabled,
+    neteaseAccessMode,
     pageSettingOptions,
     showArtworkGlow,
     text,
@@ -4173,7 +4297,7 @@ function EchoLinkApp(): ReactElement {
           if (field === 'albumArt') metadata.albumArt = candidate.albumArt;
           if (field === 'artist') metadata.artist = candidate.artist;
           if (field === 'lyrics') metadata.lyrics = candidate.lyrics;
-          appliedSources[field] = candidate.id;
+          appliedSources[field] = candidate.source;
         });
         setExternalMetadataByKey((current) => ({ ...current, [pending.metadataKey]: metadata }));
         setExternalMetadataFieldSourcesByKey((current) => ({
@@ -4201,6 +4325,48 @@ function EchoLinkApp(): ReactElement {
           };
         });
         setPendingExternalMetadataSelection(null);
+        break;
+      }
+      case 'externalSourcePickerIgnore': {
+        const pending = pendingExternalMetadataSelection;
+        if (!pending) break;
+        ignoredExternalMetadataKeysRef.current.add(pending.metadataKey);
+        setExternalMetadataByKey((current) => ({
+          ...current,
+          [pending.metadataKey]: {
+            albumArt: null,
+            artist: null,
+            error: null,
+            lyrics: null,
+            sourceTitle: null,
+            status: 'ready',
+          },
+        }));
+        setExternalMetadataFieldSourcesByKey((current) => {
+          const next = { ...current };
+          delete next[pending.metadataKey];
+          return next;
+        });
+        setPendingExternalMetadataSelection(null);
+        break;
+      }
+      case 'externalMetadataRefresh': {
+        if (!externalMetadataKey) break;
+        setFailedArtworkUrls(new Set());
+        ignoredExternalMetadataKeysRef.current.delete(externalMetadataKey);
+        externalMetadataLookupKeysRef.current.clear();
+        setExternalMetadataByKey((current) => {
+          const next = { ...current };
+          delete next[externalMetadataKey];
+          return next;
+        });
+        setExternalMetadataFieldSourcesByKey((current) => {
+          const next = { ...current };
+          delete next[externalMetadataKey];
+          return next;
+        });
+        setPendingExternalMetadataSelection(null);
+        setExternalMetadataRefreshToken((value) => value + 1);
         break;
       }
       case 'lyrics':
@@ -4264,6 +4430,9 @@ function EchoLinkApp(): ReactElement {
         setQuery(action.text ?? '');
         break;
       case 'libraryRefresh':
+        setFailedArtworkUrls(new Set());
+        libraryArtworkLookupKeysRef.current.clear();
+        setExternalMetadataRefreshToken((value) => value + 1);
         if (librarySource === 'streaming' && streamingProfile && streamingApiBaseUrl && streamingCookie && streamingSessionMatchesApi) {
           beginStreamingBusy();
           void getNeteasePlaylists(streamingApiBaseUrl, streamingCookie, streamingProfile.userId)
@@ -4425,7 +4594,15 @@ function EchoLinkApp(): ReactElement {
         }
         break;
       case 'streamingApiUrl':
-        setStreamingApiBaseUrl(action.text ?? '');
+        setStreamingApiInput(action.text ?? '');
+        break;
+      case 'streamingAccessMode':
+        if (action.selection === 'direct' || action.selection === 'selfHosted') {
+          setNeteaseAccessMode(action.selection);
+          setStreamingQrKey('');
+          setStreamingQrUrl('');
+          setStreamingStatusText('');
+        }
         break;
       case 'streamingLogin':
         void startNeteaseLogin();
@@ -4469,6 +4646,7 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'loudness') setLoudnessNormalizationEnabled(action.enabled);
         if (action.key === 'autoLyrics') setAutoOpenLyricsForLocalTracks(action.enabled);
         if (action.key === 'artworkGlow') setShowArtworkGlow(action.enabled);
+        if (action.key === 'artworkBackground') setArtworkBackgroundEnabled(action.enabled);
         if (action.key === 'lrcapi') setLrcApiExternalDataEnabled(action.enabled);
         if (action.key === 'lrclib') setLrclibExternalDataEnabled(action.enabled);
         if (action.key === 'netease') setNeteaseExternalDataEnabled(action.enabled);
@@ -4495,6 +4673,12 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'defaultLocalView' && localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
           setDefaultLocalLibraryView(action.selection as LocalLibraryView);
           setLocalLibraryView(action.selection as LocalLibraryView);
+        }
+        if (action.key === 'externalSelectionMode' && (action.selection === 'ask' || action.selection === 'automatic')) {
+          setExternalDataSelectionMode(action.selection);
+        }
+        if (action.key === 'neteaseAccessMode' && (action.selection === 'direct' || action.selection === 'selfHosted')) {
+          setNeteaseAccessMode(action.selection);
         }
         break;
       case 'settingAction':
@@ -5208,6 +5392,7 @@ function EchoLinkApp(): ReactElement {
       activeLyricIndex={activeLyricIndex}
       activePage={page}
       artist={displayArtist}
+      artworkBackgroundEnabled={artworkBackgroundEnabled}
       artworkUrl={displayArtworkUrl ?? stableArtworkUrl ?? ''}
       connectionLabel={connectedLabel}
       connectionOnline={echoConnectionOnline}
@@ -5220,6 +5405,7 @@ function EchoLinkApp(): ReactElement {
           cancelLabel: languageIsEnglish ? 'Cancel' : '取消',
           candidates: pendingExternalMetadataSelection.candidates.map((candidate) => ({
             albumArt: candidate.albumArt,
+            artist: candidate.artist,
             availableLabel: [
               candidate.lyrics ? (languageIsEnglish ? 'Lyrics' : '歌词') : null,
               candidate.artist ? (languageIsEnglish ? 'Artist' : '艺术家') : null,
@@ -5229,13 +5415,14 @@ function EchoLinkApp(): ReactElement {
             hasArtwork: Boolean(candidate.albumArt),
             hasLyrics: Boolean(candidate.lyrics),
             id: candidate.id,
-            sourceLabel: candidate.id === 'netease' && !languageIsEnglish
+            sourceLabel: candidate.source === 'netease' && !languageIsEnglish
               ? '网易云音乐'
               : candidate.sourceLabel,
             title: candidate.title,
           })),
           doneLabel: languageIsEnglish ? 'Done' : '完成',
           id: pendingExternalMetadataSelection.id,
+          ignoreLabel: languageIsEnglish ? 'Do not use' : '不使用',
           lyricsLabel: languageIsEnglish ? 'Lyrics' : '歌词',
           selectedLabel: languageIsEnglish ? 'Selected' : '已选择',
           subtitle: languageIsEnglish
@@ -5294,6 +5481,13 @@ function EchoLinkApp(): ReactElement {
     />
   );
   const buildNativePagePayload = () => {
+    const artworkForLibraryTrack = (track: EchoLinkTrackPreview): string => {
+      const nativeArtwork = resolveArtworkUrl(track.artworkUrl);
+      if (artworkUrlIsVisible(nativeArtwork)) return nativeArtwork ?? '';
+      const metadataKey = externalMetadataKeyForTrack(track);
+      const externalArtwork = metadataKey ? resolveArtworkUrl(externalMetadataByKey[metadataKey]?.albumArt) : null;
+      return artworkUrlIsVisible(externalArtwork) ? externalArtwork ?? '' : '';
+    };
     const settingToggle = (id: string, title: string, description: string, boolValue: boolean) => ({
       boolValue,
       description,
@@ -5386,11 +5580,31 @@ function EchoLinkApp(): ReactElement {
         settingToggle('loudness', text.loudness, text.loudnessDescription, loudnessNormalizationEnabled),
         settingToggle('autoLyrics', text.autoLyrics, text.autoLyricsDescription, autoOpenLyricsForLocalTracks),
         settingToggle('artworkGlow', text.glow, text.glowDescription, showArtworkGlow),
+        settingToggle(
+          'artworkBackground',
+          languageIsEnglish ? 'Artwork background' : '封面动态背景',
+          languageIsEnglish ? 'Use the current artwork as the player and lyrics background.' : '使用当前歌曲封面作为播放页与歌词页背景。',
+          artworkBackgroundEnabled,
+        ),
       ],
       externalData: [
+        settingPicker(
+          'externalSelectionMode',
+          languageIsEnglish ? 'Result selection' : '结果选择',
+          languageIsEnglish ? 'Ask for every result, or match each field automatically by source priority.' : '每次由你选择来源，或按来源优先级自动匹配各字段。',
+          externalDataSelectionMode,
+          [['ask', languageIsEnglish ? 'Ask every time' : '每次选择'], ['automatic', languageIsEnglish ? 'Automatic' : '自动匹配']],
+        ),
         settingToggle('lrcapi', text.lrcApiSource, text.lrcApiSourceHint, lrcApiExternalDataEnabled),
         settingToggle('lrclib', text.lrclibSource, text.lrclibSourceHint, lrclibExternalDataEnabled),
         settingToggle('netease', text.neteaseSource, text.neteaseSourceHint, neteaseExternalDataEnabled),
+        settingPicker(
+          'neteaseAccessMode',
+          languageIsEnglish ? 'NetEase access' : '网易云访问方式',
+          languageIsEnglish ? 'Direct uses the unofficial Web API; self-hosted uses your NeteaseCloudMusicApi service.' : '直连使用非官方 Web 接口；自托管连接你的 NeteaseCloudMusicApi 服务。',
+          neteaseAccessMode,
+          [['direct', languageIsEnglish ? 'Direct Web API' : '直连 Web 接口'], ['selfHosted', languageIsEnglish ? 'Self-hosted' : '自托管']],
+        ),
       ],
       library: [
         settingPicker(
@@ -5480,6 +5694,11 @@ function EchoLinkApp(): ReactElement {
         port: String(connectionDraft.port),
         streamableCount: String(streamableTrackCount),
         streaming: {
+          accessMode: neteaseAccessMode,
+          accessModeOptions: [
+            { id: 'direct', label: languageIsEnglish ? 'Direct Web API' : '直连 Web 接口' },
+            { id: 'selfHosted', label: languageIsEnglish ? 'Self-hosted' : '自托管' },
+          ],
           apiBaseUrl: streamingApiBaseUrl,
           busy: streamingBusy,
           loggedIn: Boolean(streamingProfile && streamingSessionMatchesApi),
@@ -5499,10 +5718,19 @@ function EchoLinkApp(): ReactElement {
           ? busy || localLibraryBusy
           : librarySource === 'local' ? localLibraryBusy : busy || !client,
         canPlayLocal: localTracks.length > 0,
-        collections: activeLibraryCollections.map((collection) => ({
-          ...collection,
-          artworkUrl: resolveArtworkUrl(collection.artworkUrl) ?? '',
-        })),
+        collections: activeLibraryCollections.map((collection) => {
+          const nativeArtwork = resolveArtworkUrl(collection.artworkUrl);
+          const representative = activeLibraryTracks.find((track) => (
+            track.album?.trim() === collection.query
+            || artistNamesForTrack(track, '').includes(collection.query)
+          ));
+          return {
+            ...collection,
+            artworkUrl: artworkUrlIsVisible(nativeArtwork)
+              ? nativeArtwork ?? ''
+              : representative ? artworkForLibraryTrack(representative) : '',
+          };
+        }),
         filter: libraryFilter,
         filterOptions: [
           { id: 'all', label: `${text.all} ${tracks.length}` },
@@ -5577,9 +5805,8 @@ function EchoLinkApp(): ReactElement {
         tracks: displayedLibraryTracks.map((item) => {
           const localItem = item as LocalMusicTrack;
           const isLocalItem = localTrackById.has(item.id);
-          const artworkUrl = resolveArtworkUrl(item.artworkUrl);
           return {
-            artworkUrl: artworkUrlIsVisible(artworkUrl) ? artworkUrl ?? '' : '',
+            artworkUrl: artworkForLibraryTrack(item),
             artist: item.artist,
             canPlayOnPhone: item.canPlayOnPhone,
             favorite: isLocalItem && favoriteLocalTrackIdSet.has(item.id),

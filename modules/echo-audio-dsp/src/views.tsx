@@ -14,6 +14,7 @@ export type EchoNativeAction = {
   enabled?: boolean;
   field?: string;
   id?: string;
+  ignore?: boolean;
   index?: number;
   key?: string;
   mode?: 'local' | 'pc' | 'phone' | 'streaming';
@@ -41,6 +42,7 @@ export type EchoNativePlayerViewProps = SharedEqProps & {
   activeLyricIndex: number;
   activePage: 'connect' | 'control' | 'library' | 'search' | 'settings';
   artist: string;
+  artworkBackgroundEnabled: boolean;
   artworkUrl: string;
   connectionLabel: string;
   connectionOnline: boolean;
