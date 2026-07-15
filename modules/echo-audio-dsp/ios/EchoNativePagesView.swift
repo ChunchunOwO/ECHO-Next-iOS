@@ -2,6 +2,7 @@ import Combine
 import AVFoundation
 import CoreImage.CIFilterBuiltins
 import Foundation
+import Photos
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -21,6 +22,7 @@ private struct EchoNativeLibraryTrack: Decodable, Identifiable {
   let artworkUrl: String
   let artist: String
   let canPlayOnPhone: Bool
+  let durationMs: Double
   let favorite: Bool
   let group: String
   let hasLyrics: Bool
@@ -59,6 +61,14 @@ private struct EchoNativeLibraryCollection: Decodable, Identifiable {
   let query: String
   let subtitle: String
   let title: String
+}
+
+private struct EchoNativeLibraryPagination: Decodable {
+  let expanded: Bool
+  let page: Int
+  let pageSize: Int
+  let totalCount: Int
+  let totalPages: Int
 }
 
 private struct EchoNativePlaylist: Decodable, Identifiable {
@@ -130,6 +140,7 @@ private struct EchoNativeLibraryPayload: Decodable {
   let filter: String
   let filterOptions: [EchoNativePageOption]
   let labels: EchoNativeLibraryLabels
+  let pagination: EchoNativeLibraryPagination
   let playlists: [EchoNativePlaylist]
   var query: String
   let source: String
@@ -254,6 +265,7 @@ struct EchoNativePagesScreen: View {
   let onAction: ([String: Any]) -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.openURL) private var openURL
+  @Environment(\.scenePhase) private var scenePhase
   @State private var expandedSection = "interface"
   @State private var showPairingScanner = false
   @State private var showEqualizer = false
@@ -261,6 +273,10 @@ struct EchoNativePagesScreen: View {
   @State private var playlistSelection: EchoNativePlaylistSelection?
   @State private var playlistPendingDeletion: EchoNativePlaylist?
   @State private var showStreamingLogoutConfirmation = false
+  @State private var showNeteaseQrSaveError = false
+  @State private var selectedAlbumId = ""
+  @State private var selectedAlbumTitle = ""
+  @AppStorage("echo.library.albumTrackSort") private var albumTrackSort = "default"
   @AppStorage("echo.library.echoDisplayMode") private var echoLibraryDisplayMode = "list"
   @AppStorage("echo.library.collectionDisplayMode") private var collectionDisplayMode = "grid"
   @AppStorage("echo.library.streamingPlaylistDisplayMode") private var streamingPlaylistDisplayMode = "grid"
@@ -353,6 +369,21 @@ struct EchoNativePagesScreen: View {
     } message: {
       Text(model.payload?.language == "en" ? "You will need to scan the QR code again to sign in." : "下次登录需要重新扫描二维码。")
     }
+    .alert(
+      model.payload?.language == "en" ? "Could not save QR code" : "无法保存二维码",
+      isPresented: $showNeteaseQrSaveError
+    ) {
+      Button(model.payload?.language == "en" ? "OK" : "好", role: .cancel) {}
+    } message: {
+      Text(model.payload?.language == "en"
+        ? "Allow photo access, then try again."
+        : "请允许添加照片权限后重试。")
+    }
+    .onChange(of: scenePhase) { phase in
+      if phase == .active, !(model.payload?.connection?.streaming.qrUrl ?? "").isEmpty {
+        onAction(["action": "streamingQrResume"])
+      }
+    }
   }
 
   private func pageHeader(_ payload: EchoNativePagePayload, title: String) -> some View {
@@ -421,6 +452,7 @@ struct EchoNativePagesScreen: View {
         ? displayedStreamingPlaylists.isEmpty
         : library.tracks.isEmpty
     )
+    let sortedTracks = sortedAlbumTracks(library.tracks)
     return ScrollView(showsIndicators: false) {
       LazyVStack(alignment: .leading, spacing: 14) {
         if !searchOnly {
@@ -512,7 +544,10 @@ struct EchoNativePagesScreen: View {
               options: library.filterOptions,
               selection: library.filter,
               compact: true,
-              onSelect: { onAction(["action": "libraryFilter", "selection": $0]) }
+              onSelect: { selection in
+                clearAlbumSelection()
+                onAction(["action": "libraryFilter", "selection": selection])
+              }
             )
           }
           ScrollView(.horizontal, showsIndicators: false) {
@@ -520,7 +555,10 @@ struct EchoNativePagesScreen: View {
               options: library.viewOptions,
               selection: library.view,
               compact: true,
-              onSelect: { onAction(["action": "libraryView", "selection": $0]) }
+              onSelect: { selection in
+                clearAlbumSelection()
+                onAction(["action": "libraryView", "selection": selection])
+              }
             )
           }
         } else if !searchOnly && library.source == "local" {
@@ -529,7 +567,10 @@ struct EchoNativePagesScreen: View {
               options: library.viewOptions,
               selection: library.view,
               compact: true,
-              onSelect: { onAction(["action": "libraryView", "selection": $0]) }
+              onSelect: { selection in
+                clearAlbumSelection()
+                onAction(["action": "libraryView", "selection": selection])
+              }
             )
           }
         }
@@ -626,6 +667,14 @@ struct EchoNativePagesScreen: View {
             .font(.system(size: 13, weight: .bold))
             .foregroundColor(echoInk.opacity(0.52))
           Spacer()
+          if !library.pagination.expanded && library.pagination.totalCount > library.pagination.pageSize {
+            EchoNativeLabelButton(
+              symbol: "arrow.up.left.and.arrow.down.right",
+              title: model.payload?.language == "en" ? "Expand" : "展开"
+            ) {
+              onAction(["action": "libraryExpand", "enabled": true])
+            }
+          }
           if library.source == "echo" && library.view == "songs" {
             EchoNativeDisplayModeButton(mode: echoLibraryDisplayMode, language: model.payload?.language ?? "zh") {
               echoLibraryDisplayMode = echoLibraryDisplayMode == "grid" ? "list" : "grid"
@@ -650,11 +699,22 @@ struct EchoNativePagesScreen: View {
         }
         .frame(minHeight: 38)
 
+        if library.pagination.expanded {
+          libraryPaginationControls(library.pagination)
+        }
+
         if !library.tracks.isEmpty {
-          Text(library.source == "streaming" && !library.streaming.selectedPlaylistName.isEmpty
-            ? library.streaming.selectedPlaylistName
-            : library.labels.songs)
-            .font(.system(size: 18, weight: .bold, design: .rounded))
+          HStack(spacing: 10) {
+            Text(!selectedAlbumTitle.isEmpty
+              ? selectedAlbumTitle
+              : library.source == "streaming" && !library.streaming.selectedPlaylistName.isEmpty
+                ? library.streaming.selectedPlaylistName
+                : library.labels.songs)
+              .font(.system(size: 18, weight: .bold, design: .rounded))
+              .lineLimit(1)
+            Spacer(minLength: 8)
+            if !selectedAlbumId.isEmpty { albumSortMenu }
+          }
         }
 
         if (library.source == "streaming"
@@ -675,14 +735,14 @@ struct EchoNativePagesScreen: View {
             columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())],
             spacing: 18
           ) {
-            ForEach(library.tracks) { track in
+            ForEach(sortedTracks) { track in
               libraryTrackGridCard(track, labels: library.labels)
             }
           }
           .transition(.opacity.combined(with: .scale(scale: 0.98)))
         } else {
-          ForEach(Array(library.tracks.enumerated()), id: \.element.id) { index, track in
-            if !track.group.isEmpty && (index == 0 || library.tracks[index - 1].group != track.group) {
+          ForEach(Array(sortedTracks.enumerated()), id: \.element.id) { index, track in
+            if !track.group.isEmpty && (index == 0 || sortedTracks[index - 1].group != track.group) {
               Text(track.group)
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(echoAccent.opacity(0.78))
@@ -691,17 +751,24 @@ struct EchoNativePagesScreen: View {
             libraryTrackRow(track, labels: library.labels)
           }
         }
+
+        if library.pagination.expanded && library.pagination.totalPages > 1 {
+          libraryPaginationControls(library.pagination)
+            .padding(.top, 8)
+        }
       }
       .padding(.horizontal, 20)
       .padding(.bottom, 24)
     }
     .refreshable { onAction(["action": "libraryRefresh"]) }
+    .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
   }
 
   private func libraryQueryBinding(_ library: EchoNativeLibraryPayload) -> Binding<String> {
     Binding(
       get: { model.payload?.library?.query ?? library.query },
       set: { value in
+        clearAlbumSelection()
         updateLibrary { $0.query = value }
         onAction(["action": "libraryQuery", "text": value])
       }
@@ -739,8 +806,118 @@ struct EchoNativePagesScreen: View {
   }
 
   private func selectCollection(_ collection: EchoNativeLibraryCollection) {
+    if collection.id.contains("-artist:") {
+      clearAlbumSelection()
+    } else {
+      selectedAlbumId = collection.id
+      selectedAlbumTitle = collection.title
+    }
     updateLibrary { $0.query = collection.query }
-    onAction(["action": "libraryQuery", "text": collection.query])
+    onAction([
+      "action": "libraryCollectionSelect",
+      "id": collection.id,
+      "selection": albumTrackSort,
+      "text": collection.query,
+    ])
+  }
+
+  private var albumSortMenu: some View {
+    Menu {
+      Picker(
+        model.payload?.language == "en" ? "Sort tracks" : "歌曲排序",
+        selection: Binding(
+          get: { albumTrackSort },
+          set: { value in
+            albumTrackSort = value
+            onAction(["action": "libraryAlbumSort", "selection": value])
+          }
+        )
+      ) {
+        Label(model.payload?.language == "en" ? "Album order" : "专辑顺序", systemImage: "list.number").tag("default")
+        Label(model.payload?.language == "en" ? "Title" : "歌名", systemImage: "textformat").tag("title")
+        Label(model.payload?.language == "en" ? "Artist" : "艺术家", systemImage: "person").tag("artist")
+        Label(model.payload?.language == "en" ? "Duration" : "时长", systemImage: "clock").tag("duration")
+      }
+    } label: {
+      Image(systemName: "arrow.up.arrow.down")
+        .font(.system(size: 13, weight: .bold))
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+    }
+    .accessibilityLabel(model.payload?.language == "en" ? "Sort album tracks" : "专辑歌曲排序")
+  }
+
+  private func sortedAlbumTracks(_ tracks: [EchoNativeLibraryTrack]) -> [EchoNativeLibraryTrack] {
+    guard !selectedAlbumId.isEmpty else { return tracks }
+    switch albumTrackSort {
+    case "title":
+      return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    case "artist":
+      return tracks.sorted {
+        let order = $0.artist.localizedStandardCompare($1.artist)
+        return order == .orderedAscending
+          || (order == .orderedSame && $0.title.localizedStandardCompare($1.title) == .orderedAscending)
+      }
+    case "duration":
+      return tracks.sorted {
+        $0.durationMs == $1.durationMs
+          ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
+          : $0.durationMs < $1.durationMs
+      }
+    default:
+      return tracks
+    }
+  }
+
+  private func clearAlbumSelection() {
+    selectedAlbumId = ""
+    selectedAlbumTitle = ""
+  }
+
+  private func libraryPaginationControls(_ pagination: EchoNativeLibraryPagination) -> some View {
+    HStack(spacing: 10) {
+      Button {
+        onAction(["action": "libraryPage", "index": pagination.page - 2])
+      } label: {
+        Image(systemName: "chevron.left")
+          .frame(width: 40, height: 40)
+      }
+      .buttonStyle(.plain)
+      .disabled(pagination.page <= 1)
+      .opacity(pagination.page <= 1 ? 0.3 : 1)
+
+      Text("\(pagination.page) / \(pagination.totalPages)")
+        .font(.system(size: 12, weight: .bold, design: .rounded))
+        .monospacedDigit()
+        .frame(minWidth: 48)
+
+      Button {
+        onAction(["action": "libraryPage", "index": pagination.page])
+      } label: {
+        Image(systemName: "chevron.right")
+          .frame(width: 40, height: 40)
+      }
+      .buttonStyle(.plain)
+      .disabled(pagination.page >= pagination.totalPages)
+      .opacity(pagination.page >= pagination.totalPages ? 0.3 : 1)
+
+      Button {
+        onAction(["action": "libraryExpand", "enabled": false])
+      } label: {
+        Label(model.payload?.language == "en" ? "Collapse" : "收起", systemImage: "arrow.down.right.and.arrow.up.left")
+          .font(.system(size: 12, weight: .bold))
+          .padding(.horizontal, 12)
+          .frame(minHeight: 40)
+      }
+      .buttonStyle(.plain)
+    }
+    .frame(maxWidth: .infinity)
+    .echoGlass(
+      tint: Color.white.opacity(0.1),
+      clear: false,
+      interactive: false,
+      in: Capsule()
+    )
   }
 
   private func libraryTrackGridCard(
@@ -1143,23 +1320,28 @@ struct EchoNativePagesScreen: View {
                   .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                   .frame(maxWidth: .infinity)
                   .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                if let loginUrl = URL(string: connection.streaming.qrUrl) {
-                  Button {
-                    openURL(loginUrl)
-                  } label: {
-                    Label(
-                      model.payload?.language == "en" ? "Open NetEase Cloud Music" : "在网易云音乐中打开",
-                      systemImage: "arrow.up.right.square"
-                    )
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(echoInk.opacity(0.72))
-                    .padding(.horizontal, 13)
-                    .frame(minHeight: 44)
-                    .echoGlass(tint: Color.white.opacity(0.1), clear: false, in: Capsule())
-                  }
-                  .buttonStyle(.plain)
-                  .frame(maxWidth: .infinity)
+                Button {
+                  saveNeteaseQrAndOpen(connection.streaming.qrUrl)
+                } label: {
+                  Label(
+                    model.payload?.language == "en" ? "Save QR and open NetEase" : "保存二维码并打开网易云",
+                    systemImage: "square.and.arrow.down"
+                  )
+                  .font(.system(size: 12, weight: .bold))
+                  .foregroundColor(echoInk.opacity(0.72))
+                  .padding(.horizontal, 13)
+                  .frame(minHeight: 44)
+                  .echoGlass(tint: Color.white.opacity(0.1), clear: false, in: Capsule())
                 }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+
+                Text(model.payload?.language == "en"
+                  ? "In NetEase, open Scan and choose the saved QR from Photos. Return here after approval."
+                  : "在网易云中打开扫一扫，从相册选择刚保存的二维码；授权后返回这里。")
+                  .font(.system(size: 10, weight: .medium))
+                  .foregroundColor(echoInk.opacity(0.44))
+                  .fixedSize(horizontal: false, vertical: true)
               }
             }
 
@@ -1302,6 +1484,31 @@ struct EchoNativePagesScreen: View {
         .font(.system(size: 14, weight: .bold))
         .foregroundColor(echoInk.opacity(0.7))
       content()
+    }
+  }
+
+  private func saveNeteaseQrAndOpen(_ value: String) {
+    guard let image = EchoNativeQRCode.makeImage(value: value) else {
+      showNeteaseQrSaveError = true
+      return
+    }
+    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+      guard status == .authorized || status == .limited else {
+        DispatchQueue.main.async { showNeteaseQrSaveError = true }
+        return
+      }
+      PHPhotoLibrary.shared().performChanges {
+        PHAssetChangeRequest.creationRequestForAsset(from: image)
+      } completionHandler: { saved, _ in
+        DispatchQueue.main.async {
+          guard saved else {
+            showNeteaseQrSaveError = true
+            return
+          }
+          onAction(["action": "streamingQrResume"])
+          if let url = URL(string: "orpheus://") { openURL(url) }
+        }
+      }
     }
   }
 
@@ -1933,7 +2140,7 @@ private struct EchoNativeQRCode: View {
 
   var body: some View {
     Group {
-      if let image = makeImage() {
+      if let image = Self.makeImage(value: value) {
         Image(uiImage: image)
           .resizable()
           .interpolation(.none)
@@ -1947,7 +2154,7 @@ private struct EchoNativeQRCode: View {
     .accessibilityLabel("QR Code")
   }
 
-  private func makeImage() -> UIImage? {
+  static func makeImage(value: String) -> UIImage? {
     let filter = CIFilter.qrCodeGenerator()
     filter.message = Data(value.utf8)
     filter.correctionLevel = "M"

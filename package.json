@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
+    "crypto-js": "^4.2.0",
     "echo-audio-dsp": "file:modules/echo-audio-dsp",
     "expo": "~56.0.12",
     "expo-audio": "~56.0.12",
@@ -24,6 +25,7 @@
     "supercons": "^0.2.0"
   },
   "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
     "@types/react": "19.2.17",
     "typescript": "6.0.3"
   }

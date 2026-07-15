@@ -15,6 +15,7 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSCameraUsageDescription": "ECHO iPhone uses the camera to scan ECHO pairing QR codes.",
+        "NSPhotoLibraryAddUsageDescription": "ECHO iPhone saves a NetEase sign-in QR code so it can be selected in the NetEase scanner.",
         "NSLocalNetworkUsageDescription": "ECHO iPhone connects to ECHO NEXT on your local network for playback control and library browsing.",
         "NSBonjourServices": [
           "_echo-link._tcp"

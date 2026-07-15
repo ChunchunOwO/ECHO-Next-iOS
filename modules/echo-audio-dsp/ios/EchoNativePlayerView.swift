@@ -1050,7 +1050,7 @@ private struct EchoNativeArtworkBackdrop: View {
 
         if !urlString.isEmpty {
           ZStack {
-            EchoNativeArtwork(urlString: urlString, onError: onError)
+            EchoNativeArtwork(urlString: urlString, squarePreview: false, onError: onError)
               .frame(width: geometry.size.width, height: geometry.size.height)
               .scaledToFill()
               .scaleEffect(1.06)
@@ -1058,8 +1058,15 @@ private struct EchoNativeArtworkBackdrop: View {
               .blur(radius: 18, opaque: true)
               .clipped()
 
-            glassOverlay
-            Color.white.opacity(0.11)
+            LinearGradient(
+              colors: [
+                Color.white.opacity(0.18),
+                Color(red: 0.98, green: 0.90, blue: 0.86).opacity(0.12),
+                Color.white.opacity(0.1),
+              ],
+              startPoint: .topLeading,
+              endPoint: .bottomTrailing
+            )
           }
           .frame(width: geometry.size.width, height: geometry.size.height)
           .clipped()
@@ -1073,20 +1080,6 @@ private struct EchoNativeArtworkBackdrop: View {
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: urlString)
   }
 
-  @ViewBuilder
-  private var glassOverlay: some View {
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      Rectangle()
-        .fill(.ultraThinMaterial)
-        .glassEffect(.clear.tint(Color.white.opacity(0.06)), in: Rectangle())
-    } else {
-      Rectangle().fill(.ultraThinMaterial)
-    }
-    #else
-    Rectangle().fill(.ultraThinMaterial)
-    #endif
-  }
 }
 
 private struct EchoNativeExternalSourcePicker: View {
@@ -1462,10 +1455,27 @@ private struct EchoNativeQueueSheet: View {
 
 struct EchoNativeArtwork: View {
   let urlString: String
+  var squarePreview = true
   let onError: () -> Void
   @StateObject private var localLoader = EchoNativeLocalArtworkLoader()
 
+  @ViewBuilder
   var body: some View {
+    if squarePreview {
+      GeometryReader { geometry in
+        artworkContent
+          .frame(width: geometry.size.width, height: geometry.size.height)
+          .clipped()
+      }
+      .aspectRatio(1, contentMode: .fit)
+      .clipped()
+    } else {
+      artworkContent
+    }
+  }
+
+  @ViewBuilder
+  private var artworkContent: some View {
     if let url = URL(string: urlString), url.isFileURL {
       Group {
         if let image = localLoader.image {

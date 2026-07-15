@@ -1,6 +1,11 @@
+import CryptoJS from 'crypto-js';
+
 import type { EchoLinkTrackPreview } from '../echoLink/types';
 
 export const neteaseDirectApiBaseUrl = 'https://music.163.com';
+const neteaseEapiBaseUrl = 'https://interface.music.163.com';
+const neteaseEapiKey = 'e82ckenh8dichen8';
+const neteaseIphoneUserAgent = 'NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)';
 
 export type NeteaseProfile = {
   avatarUrl: string;
@@ -69,6 +74,81 @@ const mergeCookies = (...values: string[]): string => {
     if (separator > 0) cookies.set(cookie.slice(0, separator), cookie);
   });
   return Array.from(cookies.values()).join('; ');
+};
+
+const cookieValues = (value: string): Record<string, string> => Object.fromEntries(
+  value.split(';').map((part) => part.trim()).filter(Boolean).map((part) => {
+    const separator = part.indexOf('=');
+    return separator > 0 ? [part.slice(0, separator), part.slice(separator + 1)] : ['', ''];
+  }).filter(([key]) => Boolean(key)),
+);
+
+const randomHex = (length: number): string => Array.from(
+  { length },
+  () => Math.floor(Math.random() * 16).toString(16).toUpperCase(),
+).join('');
+
+const eapiEncrypt = (path: string, value: object): string => {
+  const text = JSON.stringify(value);
+  const digest = CryptoJS.MD5(`nobody${path}use${text}md5forencrypt`).toString();
+  const data = `${path}-36cd479b6b5-${text}-36cd479b6b5-${digest}`;
+  return CryptoJS.AES.encrypt(
+    CryptoJS.enc.Utf8.parse(data),
+    CryptoJS.enc.Utf8.parse(neteaseEapiKey),
+    { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.Pkcs7 },
+  ).ciphertext.toString().toUpperCase();
+};
+
+const directEapiRequest = async <T>(
+  path: string,
+  params: Record<string, string | number>,
+  cookie = '',
+): Promise<ApiResponse<T>> => {
+  const now = Date.now();
+  const currentCookies = cookieValues(cookie);
+  const deviceId = currentCookies.deviceId || randomHex(52);
+  const header: Record<string, string> = {
+    __csrf: currentCookies.__csrf || '',
+    appver: '9.0.90',
+    buildver: String(Math.floor(now / 1000)),
+    channel: 'distribution',
+    deviceId,
+    mobilename: '',
+    os: 'iPhone OS',
+    osver: '16.2',
+    requestId: `${now}_${String(Math.floor(Math.random() * 1000)).padStart(4, '0')}`,
+    resolution: '1920x1080',
+    versioncode: '140',
+  };
+  if (currentCookies.MUSIC_U) header.MUSIC_U = currentCookies.MUSIC_U;
+  if (currentCookies.MUSIC_A) header.MUSIC_A = currentCookies.MUSIC_A;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(`${neteaseEapiBaseUrl}/eapi/${path.slice('/api/'.length)}`, {
+      body: new URLSearchParams({ params: eapiEncrypt(path, { ...params, e_r: false, header }) }).toString(),
+      credentials: 'include',
+      headers: {
+        Accept: 'application/json,text/plain,*/*',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: Object.entries(header).map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join('; '),
+        'User-Agent': neteaseIphoneUserAgent,
+      },
+      method: 'POST',
+      signal: controller.signal,
+    });
+    const body = await response.json() as T & { code?: number; message?: string };
+    const allowedLoginCode = body.code === 800 || body.code === 801 || body.code === 802 || body.code === 803;
+    if (!response.ok || (typeof body.code === 'number' && body.code >= 400 && !allowedLoginCode)) {
+      throw new Error(body.message || `HTTP ${response.status}`);
+    }
+    return {
+      body,
+      cookie: mergeCookies(cookie, `deviceId=${deviceId}`, cookieFromHeaders(response)),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 };
 
 const directRequest = async <T>(
@@ -149,7 +229,7 @@ export const createNeteaseQrLogin = async (
   apiBaseUrl = neteaseDirectApiBaseUrl,
 ): Promise<{ cookie: string; key: string; qrUrl: string }> => {
   if (isDirectApi(apiBaseUrl)) {
-    const response = await directRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 3 });
+    const response = await directEapiRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 3 });
     const key = response.body.unikey;
     if (!key) throw new Error('无法生成登录二维码');
     const chainId = `v1_unknown-${Math.floor(Math.random() * 1e6)}_web_login_${Date.now()}`;
@@ -174,7 +254,7 @@ export const checkNeteaseQrLogin = async (
   qrCookie = '',
 ): Promise<{ code?: number; cookie?: string; message?: string }> => {
   if (isDirectApi(apiBaseUrl)) {
-    const response = await directRequest<{ code?: number; message?: string }>(
+    const response = await directEapiRequest<{ code?: number; message?: string }>(
       '/api/login/qrcode/client/login',
       { key, type: 3 },
       qrCookie,

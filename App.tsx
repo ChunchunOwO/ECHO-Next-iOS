@@ -86,6 +86,7 @@ type ConnectPanelMode = 'echo' | 'streaming';
 type PlaybackOutputMode = 'local' | 'pc' | 'phone' | 'streaming';
 type LibraryFilter = 'all' | 'streamable' | 'local';
 type LibrarySource = 'all' | 'echo' | 'local' | 'streaming';
+type LibraryAlbumSort = 'artist' | 'default' | 'duration' | 'title';
 type StreamingLibraryMode = 'playlists' | 'search';
 type EchoLibraryView = 'albums' | 'artists' | 'songs';
 type LibraryCollectionPreview = {
@@ -1079,6 +1080,10 @@ function EchoLinkApp(): ReactElement {
   const [query, setQuery] = useState('');
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
   const [librarySource, setLibrarySource] = useState<LibrarySource>('echo');
+  const [libraryAlbumSort, setLibraryAlbumSort] = useState<LibraryAlbumSort>('default');
+  const [libraryExpanded, setLibraryExpanded] = useState(false);
+  const [libraryPageIndex, setLibraryPageIndex] = useState(0);
+  const [selectedLibraryCollectionId, setSelectedLibraryCollectionId] = useState('');
   const [echoLibraryView, setEchoLibraryView] = useState<EchoLibraryView>('songs');
   const [localLibraryView, setLocalLibraryView] = useState<LocalLibraryView>('songs');
   const [favoriteLocalTrackIds, setFavoriteLocalTrackIds] = useState<string[]>([]);
@@ -1100,6 +1105,7 @@ function EchoLinkApp(): ReactElement {
   const [streamingLibraryMode, setStreamingLibraryMode] = useState<StreamingLibraryMode>('search');
   const [streamingQrCookie, setStreamingQrCookie] = useState('');
   const [streamingQrKey, setStreamingQrKey] = useState('');
+  const [streamingQrPollToken, setStreamingQrPollToken] = useState(0);
   const [streamingQrUrl, setStreamingQrUrl] = useState('');
   const [streamingStatusText, setStreamingStatusText] = useState('');
   const [streamingBusy, setStreamingBusy] = useState(false);
@@ -2397,7 +2403,7 @@ function EchoLinkApp(): ReactElement {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [appLanguage, streamingApiBaseUrl, streamingQrCookie, streamingQrKey]);
+  }, [appLanguage, streamingApiBaseUrl, streamingQrCookie, streamingQrKey, streamingQrPollToken]);
 
   const importLocalLibrary = useCallback(async () => {
     setLocalLibraryBusy(true);
@@ -3064,11 +3070,19 @@ function EchoLinkApp(): ReactElement {
     tracks.filter((track) => formatSourceTag(track.sourceLabel) === 'Local').length
   ), [tracks]);
   const showingAllLibrary = page === 'search' || librarySource === 'all';
-  const activeLibraryTracks: EchoLinkTrackPreview[] = librarySource === 'streaming'
+  const unsortedActiveLibraryTracks: EchoLinkTrackPreview[] = librarySource === 'streaming'
     ? streamingSessionMatchesApi ? streamingTracks : []
     : showingAllLibrary
       ? [...queryFilteredEchoTracks, ...queryFilteredLocalTracks]
       : librarySource === 'local' ? visibleLocalTracks : organizedEchoTracks;
+  const activeLibraryTracks = selectedLibraryCollectionId && libraryAlbumSort !== 'default'
+    ? [...unsortedActiveLibraryTracks].sort((a, b) => {
+      if (libraryAlbumSort === 'duration') return a.durationMs - b.durationMs || a.title.localeCompare(b.title);
+      const left = libraryAlbumSort === 'artist' ? a.artist : a.title;
+      const right = libraryAlbumSort === 'artist' ? b.artist : b.title;
+      return left.localeCompare(right) || a.title.localeCompare(b.title);
+    })
+    : unsortedActiveLibraryTracks;
   const activeLibraryCollections = showingAllLibrary
     ? [...echoCollections, ...localCollections]
     : librarySource === 'echo'
@@ -3077,7 +3091,11 @@ function EchoLinkApp(): ReactElement {
         ? localLibraryView === 'albums' ? localCollections : localLibraryView === 'artists' ? localArtistCollections : []
         : [];
   const activeLibraryTotal = activeLibraryTracks.length;
-  const displayedLibraryTracks = activeLibraryTracks.slice(0, 20);
+  const libraryPageSize = 20;
+  const libraryTotalPages = Math.max(1, Math.ceil(activeLibraryTotal / libraryPageSize));
+  const effectiveLibraryPageIndex = Math.min(libraryPageIndex, libraryTotalPages - 1);
+  const libraryPageStart = libraryExpanded ? effectiveLibraryPageIndex * libraryPageSize : 0;
+  const displayedLibraryTracks = activeLibraryTracks.slice(libraryPageStart, libraryPageStart + libraryPageSize);
   const libraryArtworkLookupSignature = displayedLibraryTracks
     .map((track) => `${track.id}:${track.artworkUrl ?? ''}`)
     .join('|');
@@ -4390,6 +4408,9 @@ function EchoLinkApp(): ReactElement {
         if (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'streaming') {
           if (action.selection !== librarySource) setQuery('');
           setLibrarySource(action.selection);
+          setLibraryExpanded(false);
+          setLibraryPageIndex(0);
+          setSelectedLibraryCollectionId('');
         }
         break;
       case 'streamingLibraryMode':
@@ -4398,6 +4419,7 @@ function EchoLinkApp(): ReactElement {
           setStreamingLibraryMode(action.selection);
           setStreamingTracks([]);
           setSelectedStreamingPlaylistId(null);
+          setLibraryPageIndex(0);
         }
         break;
       case 'streamingPlaylistOpen':
@@ -4405,6 +4427,7 @@ function EchoLinkApp(): ReactElement {
           beginStreamingBusy();
           setQuery('');
           setSelectedStreamingPlaylistId(action.id);
+          setLibraryPageIndex(0);
           void getNeteasePlaylistTracks(streamingApiBaseUrl, streamingCookie, action.id)
             .then(setStreamingTracks)
             .catch((playlistError) => setStreamingStatusText(formatRequestError(playlistError)))
@@ -4431,14 +4454,45 @@ function EchoLinkApp(): ReactElement {
         } else if (localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
           setLocalLibraryView(action.selection as LocalLibraryView);
         }
+        setLibraryExpanded(false);
+        setLibraryPageIndex(0);
+        setSelectedLibraryCollectionId('');
         break;
       case 'libraryFilter':
         if (action.selection === 'all' || action.selection === 'streamable' || action.selection === 'local') {
           setLibraryFilter(action.selection);
+          setLibraryPageIndex(0);
+          setSelectedLibraryCollectionId('');
         }
         break;
       case 'libraryQuery':
         setQuery(action.text ?? '');
+        setLibraryPageIndex(0);
+        setSelectedLibraryCollectionId('');
+        break;
+      case 'libraryCollectionSelect':
+        setQuery(action.text ?? '');
+        setLibraryExpanded(false);
+        setLibraryPageIndex(0);
+        setSelectedLibraryCollectionId(action.id ?? '');
+        if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration') {
+          setLibraryAlbumSort(action.selection);
+        }
+        break;
+      case 'libraryAlbumSort':
+        if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration') {
+          setLibraryAlbumSort(action.selection);
+          setLibraryPageIndex(0);
+        }
+        break;
+      case 'libraryExpand':
+        setLibraryExpanded(action.enabled === true);
+        setLibraryPageIndex(0);
+        break;
+      case 'libraryPage':
+        if (typeof action.index === 'number') {
+          setLibraryPageIndex(Math.max(0, Math.min(libraryTotalPages - 1, action.index)));
+        }
         break;
       case 'libraryRefresh':
         setFailedArtworkUrls(new Set());
@@ -4618,6 +4672,9 @@ function EchoLinkApp(): ReactElement {
         break;
       case 'streamingLogin':
         void startNeteaseLogin();
+        break;
+      case 'streamingQrResume':
+        setStreamingQrPollToken((value) => value + 1);
         break;
       case 'streamingLogout':
         void logoutNetease();
@@ -5557,6 +5614,7 @@ function EchoLinkApp(): ReactElement {
             artworkUrl: resolveArtworkUrl(liveTrack.artworkUrl) ?? '',
             artist: liveTrack.artist,
             canPlayOnPhone: liveTrack.canPlayOnPhone,
+            durationMs: liveTrack.durationMs,
             favorite: track.source === 'local' && favoriteLocalTrackIdSet.has(track.id),
             group: '',
             hasLyrics: localLiveTrack?.hasLyrics ?? false,
@@ -5785,6 +5843,13 @@ function EchoLinkApp(): ReactElement {
           unfavorite: languageIsEnglish ? 'Remove Favorite' : '取消收藏',
         },
         query,
+        pagination: {
+          expanded: libraryExpanded,
+          page: effectiveLibraryPageIndex + 1,
+          pageSize: libraryPageSize,
+          totalCount: activeLibraryTotal,
+          totalPages: libraryTotalPages,
+        },
         playlists: sortedPlaylists.map(nativePlaylist),
         selectedPlaylist: selectedPlaylist ? nativePlaylist(selectedPlaylist) : null,
         source: page === 'search' ? 'all' : librarySource,
@@ -5811,9 +5876,13 @@ function EchoLinkApp(): ReactElement {
           selectedPlaylistName: streamingPlaylists.find((item) => item.id === selectedStreamingPlaylistId)?.name ?? '',
           status: streamingStatusText,
         },
-        totalLabel: languageIsEnglish
-          ? `${activeLibraryTotal} tracks · showing ${displayedLibraryTracks.length}`
-          : `共 ${activeLibraryTotal} 首 · 显示 ${displayedLibraryTracks.length} 首`,
+        totalLabel: libraryExpanded
+          ? (languageIsEnglish
+            ? `${activeLibraryTotal} tracks · page ${effectiveLibraryPageIndex + 1} of ${libraryTotalPages}`
+            : `共 ${activeLibraryTotal} 首 · 第 ${effectiveLibraryPageIndex + 1}/${libraryTotalPages} 页`)
+          : (languageIsEnglish
+            ? `${activeLibraryTotal} tracks · showing ${displayedLibraryTracks.length}`
+            : `共 ${activeLibraryTotal} 首 · 显示 ${displayedLibraryTracks.length} 首`),
         tracks: displayedLibraryTracks.map((item) => {
           const localItem = item as LocalMusicTrack;
           const isLocalItem = localTrackById.has(item.id);
@@ -5821,6 +5890,7 @@ function EchoLinkApp(): ReactElement {
             artworkUrl: artworkForLibraryTrack(item),
             artist: item.artist,
             canPlayOnPhone: item.canPlayOnPhone,
+            durationMs: item.durationMs,
             favorite: isLocalItem && favoriteLocalTrackIdSet.has(item.id),
             group: showingAllLibrary
               ? (isLocalItem ? text.localLibrary : text.echoLibrary)
@@ -6654,7 +6724,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#101014',
   },
   appRootNative: {
-    backgroundColor: 'transparent',
+    backgroundColor: '#f7f3ef',
   },
   safeArea: {
     flex: 1,
