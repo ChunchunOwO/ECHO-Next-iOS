@@ -137,7 +137,7 @@ const trackFromSong = (song: NeteaseSong): EchoLinkTrackPreview | null => {
 
 export const createNeteaseQrLogin = async (apiBaseUrl = neteaseDirectApiBaseUrl): Promise<{ key: string; qrUrl: string }> => {
   if (isDirectApi(apiBaseUrl)) {
-    const response = await directRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 3 });
+    const response = await directRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 1 });
     const key = response.body.unikey;
     if (!key) throw new Error('无法生成登录二维码');
     return { key, qrUrl: `${neteaseDirectApiBaseUrl}/login?codekey=${encodeURIComponent(key)}` };
@@ -156,7 +156,7 @@ export const checkNeteaseQrLogin = async (
   key: string,
 ): Promise<{ code?: number; cookie?: string; message?: string }> => {
   if (isDirectApi(apiBaseUrl)) {
-    const response = await directRequest<{ code?: number; message?: string }>('/api/login/qrcode/client/login', { key, type: 3 });
+    const response = await directRequest<{ code?: number; message?: string }>('/api/login/qrcode/client/login', { key, type: 1 });
     return { ...response.body, cookie: response.cookie || undefined };
   }
   const response = await selfHostedRequest<{ code?: number; cookie?: string; message?: string }>(

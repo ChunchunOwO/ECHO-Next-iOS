@@ -355,7 +355,16 @@ private struct EchoNativeAppScreen: View {
 
   var body: some View {
     ZStack {
-      echoWarmBackground.ignoresSafeArea()
+      EchoNativeArtworkBackdrop(
+        urlString: playerModel.activePage == "control" && playerModel.artworkBackgroundEnabled
+          ? playerModel.artworkUrl
+          : ""
+      ) {
+        onAction(["action": "artworkError", "url": playerModel.artworkUrl])
+      }
+      .ignoresSafeArea()
+      .allowsHitTesting(false)
+
       Group {
         #if compiler(>=6.0)
         if #available(iOS 18.0, *) {
@@ -392,7 +401,7 @@ private struct EchoNativeAppScreen: View {
   private var adaptiveTabView: some View {
     TabView(selection: selection) {
       Tab(title("control"), systemImage: "headphones", value: "control") {
-        themedTab {
+        themedTab(playerBackground: true) {
           EchoNativePlayerScreen(model: playerModel, onAction: onAction)
         }
       }
@@ -418,13 +427,13 @@ private struct EchoNativeAppScreen: View {
       }
     }
     .tabViewStyle(.sidebarAdaptable)
-    .background(echoWarmBackground.ignoresSafeArea())
+    .background(Color.clear)
   }
   #endif
 
   private var legacyTabView: some View {
     TabView(selection: selection) {
-      themedTab {
+      themedTab(playerBackground: true) {
         EchoNativePlayerScreen(model: playerModel, onAction: onAction)
       }
         .tag("control")
@@ -450,13 +459,22 @@ private struct EchoNativeAppScreen: View {
         .tag("settings")
         .tabItem { Label(title("settings"), systemImage: "gearshape") }
     }
-    .background(echoWarmBackground.ignoresSafeArea())
+    .background(Color.clear)
   }
 
-  private func themedTab<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+  private func themedTab<Content: View>(
+    playerBackground: Bool = false,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
     content()
       .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(echoWarmBackground.ignoresSafeArea())
+      .background {
+        if playerBackground {
+          Color.clear
+        } else {
+          echoWarmBackground.ignoresSafeArea()
+        }
+      }
   }
 
   private func title(_ page: String) -> String {
@@ -487,13 +505,6 @@ struct EchoNativePlayerScreen: View {
   var body: some View {
     GeometryReader { geometry in
       ZStack {
-        EchoNativeArtworkBackdrop(urlString: model.artworkBackgroundEnabled ? model.artworkUrl : "") {
-          onAction(["action": "artworkError", "url": model.artworkUrl])
-        }
-        .frame(width: geometry.size.width, height: geometry.size.height)
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-
         if model.lyricsVisible {
           lyricsLayout(geometry: geometry)
             .transition(.opacity.combined(with: .scale(scale: 0.98)))

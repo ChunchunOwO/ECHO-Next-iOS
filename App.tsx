@@ -6642,7 +6642,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#101014',
   },
   appRootNative: {
-    backgroundColor: '#f6d0c3',
+    backgroundColor: 'transparent',
   },
   safeArea: {
     flex: 1,
