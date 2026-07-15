@@ -1098,6 +1098,7 @@ function EchoLinkApp(): ReactElement {
   const [streamingTracks, setStreamingTracks] = useState<EchoLinkTrackPreview[]>([]);
   const [streamingTrack, setStreamingTrack] = useState<EchoLinkTrackPreview | null>(null);
   const [streamingLibraryMode, setStreamingLibraryMode] = useState<StreamingLibraryMode>('search');
+  const [streamingQrCookie, setStreamingQrCookie] = useState('');
   const [streamingQrKey, setStreamingQrKey] = useState('');
   const [streamingQrUrl, setStreamingQrUrl] = useState('');
   const [streamingStatusText, setStreamingStatusText] = useState('');
@@ -2302,9 +2303,13 @@ function EchoLinkApp(): ReactElement {
 
   const startNeteaseLogin = useCallback(async () => {
     beginStreamingBusy();
+    setStreamingQrCookie('');
+    setStreamingQrKey('');
+    setStreamingQrUrl('');
     setStreamingStatusText('');
     try {
       const login = await createNeteaseQrLogin(streamingApiBaseUrl);
+      setStreamingQrCookie(login.cookie);
       setStreamingQrKey(login.key);
       setStreamingQrUrl(login.qrUrl);
       setStreamingStatusText(appLanguage === 'en' ? 'Scan with NetEase Cloud Music.' : '请使用网易云音乐扫码登录');
@@ -2332,6 +2337,7 @@ function EchoLinkApp(): ReactElement {
     setStreamingPlaylists([]);
     setStreamingTracks([]);
     setStreamingTrack(null);
+    setStreamingQrCookie('');
     setStreamingQrKey('');
     setStreamingQrUrl('');
     setStreamingStatusText('');
@@ -2343,23 +2349,27 @@ function EchoLinkApp(): ReactElement {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       try {
-        const response = await checkNeteaseQrLogin(streamingApiBaseUrl, streamingQrKey);
+        const response = await checkNeteaseQrLogin(streamingApiBaseUrl, streamingQrKey, streamingQrCookie);
         if (cancelled) return;
-        if (response.code === 803 && response.cookie) {
+        const responseCookie = response.cookie ?? '';
+        if (responseCookie) setStreamingQrCookie(responseCookie);
+        if (response.code === 803 && /(?:^|;\s*)MUSIC_(?:U|A)=/u.test(responseCookie)) {
           const apiBaseUrl = normalizeNeteaseApiBaseUrl(streamingApiBaseUrl);
-          await saveNeteaseSession({ apiBaseUrl, cookie: response.cookie });
+          await saveNeteaseSession({ apiBaseUrl, cookie: responseCookie });
           if (cancelled) return;
           setStreamingProfile(null);
           setStreamingPlaylists([]);
           setStreamingTracks([]);
-          setStreamingCookie(response.cookie);
+          setStreamingCookie(responseCookie);
           setStreamingSessionOrigin(apiBaseUrl);
+          setStreamingQrCookie('');
           setStreamingQrKey('');
           setStreamingQrUrl('');
           setStreamingStatusText(appLanguage === 'en' ? 'Signed in.' : '登录成功');
           return;
         }
         if (response.code === 803) {
+          setStreamingQrCookie('');
           setStreamingQrKey('');
           setStreamingQrUrl('');
           setStreamingStatusText(appLanguage === 'en'
@@ -2368,6 +2378,7 @@ function EchoLinkApp(): ReactElement {
           return;
         }
         if (response.code === 800) {
+          setStreamingQrCookie('');
           setStreamingQrKey('');
           setStreamingQrUrl('');
           setStreamingStatusText(appLanguage === 'en' ? 'QR code expired.' : '二维码已过期，请重新生成');
@@ -2386,7 +2397,7 @@ function EchoLinkApp(): ReactElement {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [appLanguage, streamingApiBaseUrl, streamingQrKey]);
+  }, [appLanguage, streamingApiBaseUrl, streamingQrCookie, streamingQrKey]);
 
   const importLocalLibrary = useCallback(async () => {
     setLocalLibraryBusy(true);
@@ -4599,6 +4610,7 @@ function EchoLinkApp(): ReactElement {
       case 'streamingAccessMode':
         if (action.selection === 'direct' || action.selection === 'selfHosted') {
           setNeteaseAccessMode(action.selection);
+          setStreamingQrCookie('');
           setStreamingQrKey('');
           setStreamingQrUrl('');
           setStreamingStatusText('');

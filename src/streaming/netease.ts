@@ -61,6 +61,16 @@ const cookieFromHeaders = (response: Response): string => {
     .join('; ');
 };
 
+const mergeCookies = (...values: string[]): string => {
+  const cookies = new Map<string, string>();
+  values.flatMap((value) => value.split(';')).forEach((part) => {
+    const cookie = part.trim();
+    const separator = cookie.indexOf('=');
+    if (separator > 0) cookies.set(cookie.slice(0, separator), cookie);
+  });
+  return Array.from(cookies.values()).join('; ');
+};
+
 const directRequest = async <T>(
   path: string,
   params: Record<string, string | number> = {},
@@ -135,12 +145,19 @@ const trackFromSong = (song: NeteaseSong): EchoLinkTrackPreview | null => {
   };
 };
 
-export const createNeteaseQrLogin = async (apiBaseUrl = neteaseDirectApiBaseUrl): Promise<{ key: string; qrUrl: string }> => {
+export const createNeteaseQrLogin = async (
+  apiBaseUrl = neteaseDirectApiBaseUrl,
+): Promise<{ cookie: string; key: string; qrUrl: string }> => {
   if (isDirectApi(apiBaseUrl)) {
-    const response = await directRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 1 });
+    const response = await directRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 3 });
     const key = response.body.unikey;
     if (!key) throw new Error('无法生成登录二维码');
-    return { key, qrUrl: `${neteaseDirectApiBaseUrl}/login?codekey=${encodeURIComponent(key)}` };
+    const chainId = `v1_unknown-${Math.floor(Math.random() * 1e6)}_web_login_${Date.now()}`;
+    return {
+      cookie: response.cookie,
+      key,
+      qrUrl: `${neteaseDirectApiBaseUrl}/login?codekey=${encodeURIComponent(key)}&chainId=${encodeURIComponent(chainId)}`,
+    };
   }
   const keyResponse = await selfHostedRequest<{ data?: { unikey?: string } }>(apiBaseUrl, '/login/qr/key');
   const key = keyResponse.body.data?.unikey;
@@ -148,16 +165,21 @@ export const createNeteaseQrLogin = async (apiBaseUrl = neteaseDirectApiBaseUrl)
   const qrResponse = await selfHostedRequest<{ data?: { qrurl?: string } }>(apiBaseUrl, '/login/qr/create', { key });
   const qrUrl = qrResponse.body.data?.qrurl;
   if (!qrUrl) throw new Error('无法生成登录二维码');
-  return { key, qrUrl };
+  return { cookie: '', key, qrUrl };
 };
 
 export const checkNeteaseQrLogin = async (
   apiBaseUrl: string,
   key: string,
+  qrCookie = '',
 ): Promise<{ code?: number; cookie?: string; message?: string }> => {
   if (isDirectApi(apiBaseUrl)) {
-    const response = await directRequest<{ code?: number; message?: string }>('/api/login/qrcode/client/login', { key, type: 1 });
-    return { ...response.body, cookie: response.cookie || undefined };
+    const response = await directRequest<{ code?: number; message?: string }>(
+      '/api/login/qrcode/client/login',
+      { key, type: 3 },
+      qrCookie,
+    );
+    return { ...response.body, cookie: mergeCookies(qrCookie, response.cookie) || undefined };
   }
   const response = await selfHostedRequest<{ code?: number; cookie?: string; message?: string }>(
     apiBaseUrl,
