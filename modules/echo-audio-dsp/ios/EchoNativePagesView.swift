@@ -1,6 +1,8 @@
 import Combine
 import AVFoundation
+import CoreImage.CIFilterBuiltins
 import Foundation
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -24,37 +26,131 @@ private struct EchoNativeLibraryTrack: Decodable, Identifiable {
   let hasLyrics: Bool
   let id: String
   let isLocal: Bool
+  let source: String
   let tags: [String]
   let title: String
 }
 
+private struct EchoNativeStreamingPlaylist: Decodable, Identifiable {
+  let artworkUrl: String
+  let favorite: Bool
+  let id: String
+  let name: String
+  let pinned: Bool
+  let sourceLabel: String
+  let trackCount: Int
+}
+
+private struct EchoNativeLibraryStreaming: Decodable {
+  let libraryMode: String
+  let libraryModeOptions: [EchoNativePageOption]
+  let loggedIn: Bool
+  let playlistCount: Int
+  let playlists: [EchoNativeStreamingPlaylist]
+  let profileName: String
+  let selectedPlaylistId: String
+  let selectedPlaylistName: String
+  let status: String
+}
+
+private struct EchoNativeLibraryCollection: Decodable, Identifiable {
+  let artworkUrl: String
+  let id: String
+  let query: String
+  let subtitle: String
+  let title: String
+}
+
+private struct EchoNativePlaylist: Decodable, Identifiable {
+  let artworkUrl: String
+  let favorite: Bool
+  let id: String
+  let name: String
+  let pinned: Bool
+  let subtitle: String
+  let tracks: [EchoNativeLibraryTrack]
+}
+
+private struct EchoNativePlaylistEditorState: Identifiable {
+  let id = UUID()
+  let initialName: String
+  let playlistId: String?
+  let trackId: String?
+  let trackSource: String?
+
+  init(
+    initialName: String,
+    playlistId: String?,
+    trackId: String? = nil,
+    trackSource: String? = nil
+  ) {
+    self.initialName = initialName
+    self.playlistId = playlistId
+    self.trackId = trackId
+    self.trackSource = trackSource
+  }
+}
+
+private struct EchoNativePlaylistSelection: Identifiable {
+  let id: String
+}
+
 private struct EchoNativeLibraryLabels: Decodable {
   let addToQueue: String
+  let addToPlaylist: String
+  let cancel: String
+  let collections: String
+  let createPlaylist: String
   let deleteTrack: String
+  let deletePlaylist: String
   let empty: String
   let favorite: String
+  let favoritePlaylist: String
   let importLyrics: String
   let importMusic: String
   let localPlay: String
   let playNext: String
+  let playlistName: String
+  let playlists: String
+  let pinPlaylist: String
+  let removeFromPlaylist: String
+  let renamePlaylist: String
   let refresh: String
   let searchPlaceholder: String
+  let songs: String
+  let unFavoritePlaylist: String
+  let unpinPlaylist: String
   let unfavorite: String
 }
 
 private struct EchoNativeLibraryPayload: Decodable {
   let busy: Bool
   let canPlayLocal: Bool
+  let collections: [EchoNativeLibraryCollection]
   let filter: String
   let filterOptions: [EchoNativePageOption]
   let labels: EchoNativeLibraryLabels
+  let playlists: [EchoNativePlaylist]
   var query: String
   let source: String
   let sourceOptions: [EchoNativePageOption]
+  let streaming: EchoNativeLibraryStreaming
+  var selectedPlaylist: EchoNativePlaylist?
   let totalLabel: String
   let tracks: [EchoNativeLibraryTrack]
   let view: String
   let viewOptions: [EchoNativePageOption]
+}
+
+private struct EchoNativeConnectionStreaming: Decodable {
+  var apiBaseUrl: String
+  let busy: Bool
+  let loggedIn: Bool
+  let playlistCount: Int
+  let profileAvatarUrl: String
+  let profileName: String
+  let qrUrl: String
+  let status: String
 }
 
 private struct EchoNativeConnectionLabels: Decodable {
@@ -88,6 +184,7 @@ private struct EchoNativeConnectionPayload: Decodable {
   var pairingText: String
   var port: String
   let streamableCount: String
+  var streaming: EchoNativeConnectionStreaming
   var token: String
 }
 
@@ -130,14 +227,17 @@ private struct EchoNativePagePayload: Decodable {
 final class EchoNativePagesModel: ObservableObject {
   @Published fileprivate var payload: EchoNativePagePayload?
   let equalizer = EchoNativeEqualizerModel()
+  private var lastPayloadJSON = ""
 
   func update(payloadJSON: String) {
+    guard payloadJSON != lastPayloadJSON else { return }
     guard
       let data = payloadJSON.data(using: .utf8),
       var nextPayload = try? JSONDecoder().decode(EchoNativePagePayload.self, from: data)
     else {
       return
     }
+    lastPayloadJSON = payloadJSON
     nextPayload.connection = nextPayload.connection ?? payload?.connection
     nextPayload.library = nextPayload.library ?? payload?.library
     nextPayload.settings = nextPayload.settings ?? payload?.settings
@@ -151,9 +251,17 @@ struct EchoNativePagesScreen: View {
   let page: String
   let onAction: ([String: Any]) -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.openURL) private var openURL
   @State private var expandedSection = "interface"
   @State private var showPairingScanner = false
   @State private var showEqualizer = false
+  @State private var playlistEditor: EchoNativePlaylistEditorState?
+  @State private var playlistSelection: EchoNativePlaylistSelection?
+  @State private var playlistPendingDeletion: EchoNativePlaylist?
+  @State private var showStreamingLogoutConfirmation = false
+  @AppStorage("echo.library.echoDisplayMode") private var echoLibraryDisplayMode = "list"
+  @AppStorage("echo.library.collectionDisplayMode") private var collectionDisplayMode = "grid"
+  @AppStorage("echo.library.streamingPlaylistDisplayMode") private var streamingPlaylistDisplayMode = "grid"
 
   var body: some View {
     Group {
@@ -165,6 +273,10 @@ struct EchoNativePagesScreen: View {
             case "library":
               if let library = payload.library {
                 libraryPage(library)
+              }
+            case "search":
+              if let library = payload.library {
+                searchPage(library)
               }
             case "connect":
               if let connection = payload.connection {
@@ -190,10 +302,53 @@ struct EchoNativePagesScreen: View {
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
     }
+    .sheet(item: $playlistEditor) { editor in
+      EchoNativePlaylistEditorSheet(
+        editor: editor,
+        labels: model.payload?.library?.labels,
+        onAction: onAction
+      )
+    }
+    .sheet(item: $playlistSelection) { selection in
+      EchoNativePlaylistDetailSheet(
+        model: model,
+        playlistId: selection.id,
+        onAction: onAction
+      )
+    }
     .fullScreenCover(isPresented: $showPairingScanner) {
       EchoPairingScannerSheet(language: model.payload?.language ?? "zh") { code in
         onAction(["action": "pairScanned", "text": code])
       }
+    }
+    .confirmationDialog(
+      model.payload?.language == "en" ? "Delete this playlist?" : "删除这个歌单？",
+      isPresented: Binding(
+        get: { playlistPendingDeletion != nil },
+        set: { if !$0 { playlistPendingDeletion = nil } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button(model.payload?.library?.labels.deletePlaylist ?? "删除歌单", role: .destructive) {
+        if let playlist = playlistPendingDeletion {
+          onAction(["action": "playlistDelete", "playlistId": playlist.id])
+        }
+        playlistPendingDeletion = nil
+      }
+      Button(model.payload?.library?.labels.cancel ?? "取消", role: .cancel) {}
+    } message: {
+      Text(playlistPendingDeletion?.name ?? "")
+    }
+    .alert(
+      model.payload?.language == "en" ? "Sign out of NetEase Cloud Music?" : "退出网易云音乐？",
+      isPresented: $showStreamingLogoutConfirmation
+    ) {
+      Button(model.payload?.language == "en" ? "Sign out" : "退出", role: .destructive) {
+        onAction(["action": "streamingLogout"])
+      }
+      Button(model.payload?.language == "en" ? "Cancel" : "取消", role: .cancel) {}
+    } message: {
+      Text(model.payload?.language == "en" ? "You will need to scan the QR code again to sign in." : "下次登录需要重新扫描二维码。")
     }
   }
 
@@ -230,6 +385,7 @@ struct EchoNativePagesScreen: View {
     let english = language == "en"
     switch page {
     case "library": return english ? "Library" : "曲库"
+    case "search": return english ? "Search" : "搜索"
     case "connect": return english ? "Connect" : "连接"
     default: return english ? "Settings" : "设置"
     }
@@ -239,64 +395,233 @@ struct EchoNativePagesScreen: View {
     status.broken ? echoAccent : (status.online ? echoGold : echoInk.opacity(0.5))
   }
 
-  private func libraryPage(_ library: EchoNativeLibraryPayload) -> some View {
-    ScrollView(showsIndicators: false) {
+  private func searchPage(_ library: EchoNativeLibraryPayload) -> some View {
+    libraryPage(library, searchOnly: true)
+      .searchable(text: libraryQueryBinding(library), prompt: library.labels.searchPlaceholder)
+  }
+
+  private func libraryPage(_ library: EchoNativeLibraryPayload, searchOnly: Bool = false) -> some View {
+    let normalizedQuery = library.query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let displayedPlaylists = library.playlists.filter { playlist in
+      normalizedQuery.isEmpty
+        || playlist.name.lowercased().contains(normalizedQuery)
+        || playlist.tracks.contains { track in
+          track.title.lowercased().contains(normalizedQuery)
+            || track.artist.lowercased().contains(normalizedQuery)
+        }
+    }
+    let displayedStreamingPlaylists = library.streaming.playlists.filter { playlist in
+      normalizedQuery.isEmpty || playlist.name.lowercased().contains(normalizedQuery)
+    }
+    let streamingContentEmpty = library.streaming.loggedIn && (
+      library.streaming.libraryMode == "playlists"
+        ? displayedStreamingPlaylists.isEmpty
+        : library.tracks.isEmpty
+    )
+    return ScrollView(showsIndicators: false) {
       LazyVStack(alignment: .leading, spacing: 14) {
-        EchoNativeSegmentedControl(
-          options: library.sourceOptions,
-          selection: library.source,
-          onSelect: { onAction(["action": "librarySource", "selection": $0]) }
-        )
-
-        HStack(spacing: 10) {
-          HStack(spacing: 9) {
-            Image(systemName: "magnifyingglass")
-              .font(.system(size: 15, weight: .semibold))
-              .foregroundColor(echoInk.opacity(0.45))
-            TextField(
-              library.labels.searchPlaceholder,
-              text: Binding(
-                get: { model.payload?.library?.query ?? library.query },
-                set: { value in
-                  updateLibrary { $0.query = value }
-                  onAction(["action": "libraryQuery", "text": value])
-                }
-              )
-            )
-            .font(.system(size: 14, weight: .medium))
-            .textInputAutocapitalization(.never)
-            .disableAutocorrection(true)
-          }
-          .padding(.horizontal, 14)
-          .frame(height: 46)
-          .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-
-          Button {
-            onAction(["action": "libraryRefresh"])
-          } label: {
-            Image(systemName: "arrow.clockwise")
-              .font(.system(size: 16, weight: .bold))
-              .rotationEffect(.degrees(library.busy ? 180 : 0))
-              .frame(width: 46, height: 46)
-              .echoGlass(tint: Color.white.opacity(0.13), clear: false, in: Circle())
-          }
-          .buttonStyle(.plain)
-          .disabled(library.busy)
-          .accessibilityLabel(library.labels.refresh)
+        if !searchOnly {
+          EchoNativeSegmentedControl(
+            options: library.sourceOptions,
+            selection: library.source,
+            onSelect: { onAction(["action": "librarySource", "selection": $0]) }
+          )
         }
 
-        ScrollView(.horizontal, showsIndicators: false) {
+        if !searchOnly && library.source == "streaming" {
           EchoNativeSegmentedControl(
-            options: library.source == "local" ? library.viewOptions : library.filterOptions,
-            selection: library.source == "local" ? library.view : library.filter,
-            compact: true,
-            onSelect: { selection in
-              onAction([
-                "action": library.source == "local" ? "libraryView" : "libraryFilter",
-                "selection": selection,
-              ])
-            }
+            options: library.streaming.libraryModeOptions,
+            selection: library.streaming.libraryMode,
+            onSelect: { onAction(["action": "streamingLibraryMode", "selection": $0]) }
           )
+
+          if !library.streaming.loggedIn {
+            Button {
+              onAction(["action": "streamingConnect"])
+            } label: {
+              Label(library.labels.empty, systemImage: "person.crop.circle.badge.plus")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(echoInk.opacity(0.58))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 18)
+                .echoGlass(tint: Color.white.opacity(0.09), clear: false, in: RoundedRectangle(cornerRadius: 17))
+            }
+            .buttonStyle(.plain)
+          }
+
+          if !library.streaming.status.isEmpty {
+            Text(library.streaming.status)
+              .font(.system(size: 11, weight: .semibold))
+              .foregroundColor(echoInk.opacity(0.5))
+              .frame(maxWidth: .infinity, alignment: .center)
+              .multilineTextAlignment(.center)
+          }
+        }
+
+        if !searchOnly {
+          HStack(spacing: 10) {
+            HStack(spacing: 9) {
+              Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(echoInk.opacity(0.45))
+              TextField(
+                library.labels.searchPlaceholder,
+                text: libraryQueryBinding(library)
+              )
+              .font(.system(size: 14, weight: .medium))
+              .textInputAutocapitalization(.never)
+              .disableAutocorrection(true)
+              if !library.query.isEmpty {
+                Button {
+                  libraryQueryBinding(library).wrappedValue = ""
+                } label: {
+                  Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(echoInk.opacity(0.36))
+                    .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(model.payload?.language == "en" ? "Clear search" : "清除搜索")
+              }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+            Button {
+              onAction(["action": "libraryRefresh"])
+            } label: {
+              Image(systemName: "arrow.clockwise")
+                .font(.system(size: 16, weight: .bold))
+                .rotationEffect(.degrees(library.busy ? 180 : 0))
+                .frame(width: 46, height: 46)
+                .echoGlass(tint: Color.white.opacity(0.13), clear: false, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(library.busy)
+            .accessibilityLabel(library.labels.refresh)
+          }
+        }
+
+        if !searchOnly && library.source == "echo" {
+          ScrollView(.horizontal, showsIndicators: false) {
+            EchoNativeSegmentedControl(
+              options: library.filterOptions,
+              selection: library.filter,
+              compact: true,
+              onSelect: { onAction(["action": "libraryFilter", "selection": $0]) }
+            )
+          }
+          ScrollView(.horizontal, showsIndicators: false) {
+            EchoNativeSegmentedControl(
+              options: library.viewOptions,
+              selection: library.view,
+              compact: true,
+              onSelect: { onAction(["action": "libraryView", "selection": $0]) }
+            )
+          }
+        } else if !searchOnly && library.source == "local" {
+          ScrollView(.horizontal, showsIndicators: false) {
+            EchoNativeSegmentedControl(
+              options: library.viewOptions,
+              selection: library.view,
+              compact: true,
+              onSelect: { onAction(["action": "libraryView", "selection": $0]) }
+            )
+          }
+        }
+
+        if library.source != "streaming" {
+          HStack {
+            Text(library.labels.playlists)
+              .font(.system(size: 18, weight: .bold, design: .rounded))
+            Spacer()
+            Button {
+              playlistEditor = EchoNativePlaylistEditorState(initialName: "", playlistId: nil)
+            } label: {
+              Label(library.labels.createPlaylist, systemImage: "plus")
+                .font(.system(size: 11, weight: .bold))
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .tint(echoAccent)
+          }
+
+          if library.playlists.isEmpty {
+            Button {
+              playlistEditor = EchoNativePlaylistEditorState(initialName: "", playlistId: nil)
+            } label: {
+              Label(library.labels.createPlaylist, systemImage: "music.note.list")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(echoInk.opacity(0.52))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 18)
+                .echoGlass(tint: Color.white.opacity(0.08), clear: false, in: RoundedRectangle(cornerRadius: 16))
+            }
+            .buttonStyle(.plain)
+          } else if !displayedPlaylists.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+              LazyHStack(spacing: 12) {
+                ForEach(displayedPlaylists) { playlist in
+                  libraryPlaylistCard(playlist, labels: library.labels)
+                }
+              }
+            }
+          }
+        }
+
+        if library.source == "streaming" && library.streaming.loggedIn && library.streaming.libraryMode == "playlists" {
+          HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text(library.labels.playlists)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+              Text("\(library.streaming.profileName) · \(library.streaming.playlistCount)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(echoInk.opacity(0.48))
+            }
+            Spacer()
+            EchoNativeDisplayModeButton(mode: streamingPlaylistDisplayMode, language: model.payload?.language ?? "zh") {
+              streamingPlaylistDisplayMode = streamingPlaylistDisplayMode == "grid" ? "list" : "grid"
+            }
+          }
+
+          if streamingPlaylistDisplayMode == "grid" {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())], spacing: 18) {
+              ForEach(displayedStreamingPlaylists) { playlist in
+                streamingPlaylistGridCard(playlist, labels: library.labels)
+              }
+            }
+          } else {
+            LazyVStack(spacing: 0) {
+              ForEach(displayedStreamingPlaylists) { playlist in
+                streamingPlaylistRow(playlist, labels: library.labels)
+              }
+            }
+          }
+        }
+
+        if !library.collections.isEmpty {
+          HStack {
+            Text(library.labels.collections)
+              .font(.system(size: 18, weight: .bold, design: .rounded))
+            Spacer()
+            EchoNativeDisplayModeButton(mode: collectionDisplayMode, language: model.payload?.language ?? "zh") {
+              collectionDisplayMode = collectionDisplayMode == "grid" ? "list" : "grid"
+            }
+          }
+          if collectionDisplayMode == "grid" {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())], spacing: 18) {
+              ForEach(library.collections) { collection in
+                libraryCollectionGridCard(collection)
+              }
+            }
+          } else {
+            LazyVStack(spacing: 0) {
+              ForEach(library.collections) { collection in
+                libraryCollectionRow(collection)
+              }
+            }
+          }
         }
 
         HStack(spacing: 10) {
@@ -304,6 +629,11 @@ struct EchoNativePagesScreen: View {
             .font(.system(size: 13, weight: .bold))
             .foregroundColor(echoInk.opacity(0.52))
           Spacer()
+          if library.source == "echo" && library.view == "songs" {
+            EchoNativeDisplayModeButton(mode: echoLibraryDisplayMode, language: model.payload?.language ?? "zh") {
+              echoLibraryDisplayMode = echoLibraryDisplayMode == "grid" ? "list" : "grid"
+            }
+          }
           if library.source == "local" {
             EchoNativeLabelButton(
               symbol: "square.and.arrow.down",
@@ -323,7 +653,16 @@ struct EchoNativePagesScreen: View {
         }
         .frame(minHeight: 38)
 
-        if library.tracks.isEmpty {
+        if !library.tracks.isEmpty {
+          Text(library.source == "streaming" && !library.streaming.selectedPlaylistName.isEmpty
+            ? library.streaming.selectedPlaylistName
+            : library.labels.songs)
+            .font(.system(size: 18, weight: .bold, design: .rounded))
+        }
+
+        if (library.source == "streaming"
+          ? streamingContentEmpty
+          : (library.tracks.isEmpty && library.collections.isEmpty && displayedPlaylists.isEmpty)) {
           VStack(spacing: 12) {
             Image(systemName: "music.note.list")
               .font(.system(size: 28, weight: .medium))
@@ -334,6 +673,16 @@ struct EchoNativePagesScreen: View {
           .foregroundColor(echoInk.opacity(0.4))
           .frame(maxWidth: .infinity)
           .padding(.vertical, 54)
+        } else if library.source == "echo" && library.view == "songs" && echoLibraryDisplayMode == "grid" {
+          LazyVGrid(
+            columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())],
+            spacing: 18
+          ) {
+            ForEach(library.tracks) { track in
+              libraryTrackGridCard(track, labels: library.labels)
+            }
+          }
+          .transition(.opacity.combined(with: .scale(scale: 0.98)))
         } else {
           ForEach(Array(library.tracks.enumerated()), id: \.element.id) { index, track in
             if !track.group.isEmpty && (index == 0 || library.tracks[index - 1].group != track.group) {
@@ -352,13 +701,220 @@ struct EchoNativePagesScreen: View {
     .refreshable { onAction(["action": "libraryRefresh"]) }
   }
 
+  private func libraryQueryBinding(_ library: EchoNativeLibraryPayload) -> Binding<String> {
+    Binding(
+      get: { model.payload?.library?.query ?? library.query },
+      set: { value in
+        updateLibrary { $0.query = value }
+        onAction(["action": "libraryQuery", "text": value])
+      }
+    )
+  }
+
+  private func libraryCollectionGridCard(_ collection: EchoNativeLibraryCollection) -> some View {
+    EchoNativeMediaGridCard(
+      artworkUrl: collection.artworkUrl,
+      title: collection.title,
+      subtitle: collection.subtitle,
+      onSelect: { selectCollection(collection) },
+      accessory: { EmptyView() }
+    )
+    .accessibilityLabel("\(collection.title), \(collection.subtitle)")
+  }
+
+  private func libraryCollectionRow(_ collection: EchoNativeLibraryCollection) -> some View {
+    EchoNativeMediaRow(
+      artworkUrl: collection.artworkUrl,
+      title: collection.title,
+      subtitle: collection.subtitle,
+      onSelect: { selectCollection(collection) }
+    ) {
+      Button { selectCollection(collection) } label: {
+        Image(systemName: "chevron.right")
+          .font(.system(size: 11, weight: .bold))
+          .foregroundColor(echoInk.opacity(0.32))
+          .frame(width: 44, height: 44)
+          .contentShape(Circle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(collection.title)
+    }
+  }
+
+  private func selectCollection(_ collection: EchoNativeLibraryCollection) {
+    updateLibrary { $0.query = collection.query }
+    onAction(["action": "libraryQuery", "text": collection.query])
+  }
+
+  private func libraryTrackGridCard(
+    _ track: EchoNativeLibraryTrack,
+    labels: EchoNativeLibraryLabels
+  ) -> some View {
+    EchoNativeMediaGridCard(
+      artworkUrl: track.artworkUrl,
+      title: track.title,
+      subtitle: track.artist,
+      onArtworkError: { onAction(["action": "artworkError", "url": track.artworkUrl]) },
+      onSelect: { onAction(["action": "trackPlay", "id": track.id, "source": track.source]) }
+    ) {
+      if track.source != "streaming" {
+        libraryTrackMenu(track, labels: labels)
+      }
+    }
+  }
+
+  private func libraryPlaylistCard(
+    _ playlist: EchoNativePlaylist,
+    labels: EchoNativeLibraryLabels
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 7) {
+      Button {
+        playlistSelection = EchoNativePlaylistSelection(id: playlist.id)
+        onAction(["action": "playlistOpen", "playlistId": playlist.id])
+      } label: {
+        ZStack(alignment: .topTrailing) {
+          EchoNativeArtwork(urlString: playlist.artworkUrl, onError: {})
+            .frame(width: 126, height: 126)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+          if playlist.pinned || playlist.favorite {
+            HStack(spacing: 4) {
+              if playlist.pinned { Image(systemName: "pin.fill") }
+              if playlist.favorite { Image(systemName: "heart.fill") }
+            }
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(.white)
+            .padding(7)
+            .background(Color.black.opacity(0.24), in: Capsule())
+            .padding(7)
+          }
+        }
+      }
+      .buttonStyle(.plain)
+
+      HStack(spacing: 4) {
+        Button {
+          playlistSelection = EchoNativePlaylistSelection(id: playlist.id)
+          onAction(["action": "playlistOpen", "playlistId": playlist.id])
+        } label: {
+          VStack(alignment: .leading, spacing: 2) {
+            Text(playlist.name)
+              .font(.system(size: 13, weight: .bold))
+              .foregroundColor(echoInk)
+              .lineLimit(1)
+            Text(playlist.subtitle)
+              .font(.system(size: 10, weight: .semibold))
+              .foregroundColor(echoInk.opacity(0.48))
+          }
+          .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        Spacer(minLength: 0)
+        Menu {
+          Button {
+            onAction(["action": "playlistPin", "playlistId": playlist.id])
+          } label: {
+            Label(playlist.pinned ? labels.unpinPlaylist : labels.pinPlaylist, systemImage: "pin")
+          }
+          Button {
+            onAction(["action": "playlistFavorite", "playlistId": playlist.id])
+          } label: {
+            Label(playlist.favorite ? labels.unFavoritePlaylist : labels.favoritePlaylist, systemImage: "heart")
+          }
+          Button {
+            playlistEditor = EchoNativePlaylistEditorState(initialName: playlist.name, playlistId: playlist.id)
+          } label: {
+            Label(labels.renamePlaylist, systemImage: "pencil")
+          }
+          Button(role: .destructive) {
+            playlistPendingDeletion = playlist
+          } label: {
+            Label(labels.deletePlaylist, systemImage: "trash")
+          }
+        } label: {
+          Image(systemName: "ellipsis")
+            .font(.system(size: 12, weight: .bold))
+            .frame(width: 44, height: 44)
+        }
+      }
+      .frame(width: 126)
+    }
+    .frame(width: 126, alignment: .leading)
+    .accessibilityElement(children: .contain)
+  }
+
+  private func streamingPlaylistGridCard(
+    _ playlist: EchoNativeStreamingPlaylist,
+    labels: EchoNativeLibraryLabels
+  ) -> some View {
+    EchoNativeMediaGridCard(
+      artworkUrl: playlist.artworkUrl,
+      title: playlist.name,
+      subtitle: playlist.sourceLabel,
+      badges: playlistBadges(playlist),
+      onSelect: { onAction(["action": "streamingPlaylistOpen", "id": playlist.id]) }
+    ) {
+      streamingPlaylistMenu(playlist, labels: labels)
+    }
+  }
+
+  private func streamingPlaylistRow(
+    _ playlist: EchoNativeStreamingPlaylist,
+    labels: EchoNativeLibraryLabels
+  ) -> some View {
+    EchoNativeMediaRow(
+      artworkUrl: playlist.artworkUrl,
+      title: playlist.name,
+      subtitle: "\(playlist.sourceLabel) · \(playlist.trackCount)",
+      badges: playlistBadges(playlist),
+      onSelect: { onAction(["action": "streamingPlaylistOpen", "id": playlist.id]) }
+    ) {
+      streamingPlaylistMenu(playlist, labels: labels)
+    }
+  }
+
+  private func playlistBadges(_ playlist: EchoNativeStreamingPlaylist) -> [String] {
+    [playlist.pinned ? "pin.fill" : nil, playlist.favorite ? "heart.fill" : nil].compactMap { $0 }
+  }
+
+  private func streamingPlaylistMenu(
+    _ playlist: EchoNativeStreamingPlaylist,
+    labels: EchoNativeLibraryLabels
+  ) -> some View {
+    Menu {
+      Button {
+        onAction(["action": "streamingPlaylistPin", "id": playlist.id])
+      } label: {
+        Label(playlist.pinned ? labels.unpinPlaylist : labels.pinPlaylist, systemImage: "pin")
+      }
+      Button {
+        onAction(["action": "streamingPlaylistFavorite", "id": playlist.id])
+      } label: {
+        Label(playlist.favorite ? labels.unFavoritePlaylist : labels.favoritePlaylist, systemImage: "heart")
+      }
+    } label: {
+      ZStack {
+        Image(systemName: "ellipsis")
+          .font(.system(size: 14, weight: .bold))
+        if playlist.pinned || playlist.favorite {
+          Circle()
+            .fill(echoAccent)
+            .frame(width: 6, height: 6)
+            .offset(x: 10, y: -10)
+        }
+      }
+      .frame(width: 44, height: 44)
+      .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+    }
+  }
+
   private func libraryTrackRow(
     _ track: EchoNativeLibraryTrack,
     labels: EchoNativeLibraryLabels
   ) -> some View {
-    HStack(spacing: 11) {
+    return HStack(spacing: 11) {
       Button {
-        onAction(["action": "trackPlay", "id": track.id, "source": track.isLocal ? "local" : "echo"])
+        onAction(["action": "trackPlay", "id": track.id, "source": track.source])
       } label: {
         HStack(spacing: 11) {
           EchoNativeArtwork(urlString: track.artworkUrl) {
@@ -402,55 +958,93 @@ struct EchoNativePagesScreen: View {
       }
       .buttonStyle(.plain)
 
-      if track.isLocal {
-        Menu {
-          Button {
-            onAction(["action": "trackFavorite", "id": track.id])
-          } label: {
-            Label(track.favorite ? labels.unfavorite : labels.favorite, systemImage: track.favorite ? "heart.slash" : "heart")
-          }
-          Button {
-            onAction(["action": "trackQueue", "id": track.id])
-          } label: {
-            Label(labels.addToQueue, systemImage: "text.badge.plus")
-          }
-          Button {
-            onAction(["action": "trackNext", "id": track.id])
-          } label: {
-            Label(labels.playNext, systemImage: "text.insert")
-          }
-          Button {
-            onAction(["action": "trackLyrics", "id": track.id])
-          } label: {
-            Label(labels.importLyrics, systemImage: "doc.text")
-          }
-          Button(role: .destructive) {
-            onAction(["action": "trackDelete", "id": track.id])
-          } label: {
-            Label(labels.deleteTrack, systemImage: "trash")
-          }
-        } label: {
-          Image(systemName: "ellipsis")
-            .font(.system(size: 16, weight: .bold))
-            .frame(width: 40, height: 40)
-            .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
-        }
-      } else {
-        Button {
-          onAction(["action": "trackPlay", "id": track.id, "source": "echo"])
-        } label: {
-          Image(systemName: track.canPlayOnPhone ? "play.fill" : "desktopcomputer")
-            .font(.system(size: 14, weight: .bold))
-            .foregroundColor(echoAccent)
-            .frame(width: 40, height: 40)
-            .echoGlass(tint: echoAccent.opacity(0.08), in: Circle())
-        }
-        .buttonStyle(.plain)
+      if track.source != "streaming" {
+        libraryTrackMenu(track, labels: labels)
       }
     }
     .padding(.vertical, 8)
     .overlay(alignment: .bottom) {
       Rectangle().fill(echoInk.opacity(0.09)).frame(height: 0.7)
+    }
+  }
+
+  private func libraryTrackMenu(
+    _ track: EchoNativeLibraryTrack,
+    labels: EchoNativeLibraryLabels
+  ) -> some View {
+    let playlists = model.payload?.library?.playlists ?? []
+    return Menu {
+      if playlists.isEmpty {
+        Button {
+          playlistEditor = EchoNativePlaylistEditorState(
+            initialName: "",
+            playlistId: nil,
+            trackId: track.id,
+            trackSource: track.isLocal ? "local" : "echo"
+          )
+        } label: {
+          Label(labels.createPlaylist, systemImage: "plus")
+        }
+      } else {
+        Menu {
+          ForEach(playlists) { playlist in
+            Button(playlist.name) {
+              onAction([
+                "action": "playlistAddTrack",
+                "id": track.id,
+                "playlistId": playlist.id,
+                "source": track.isLocal ? "local" : "echo",
+              ])
+            }
+          }
+        } label: {
+          Label(labels.addToPlaylist, systemImage: "music.note.list")
+        }
+        Button {
+          playlistEditor = EchoNativePlaylistEditorState(
+            initialName: "",
+            playlistId: nil,
+            trackId: track.id,
+            trackSource: track.isLocal ? "local" : "echo"
+          )
+        } label: {
+          Label(labels.createPlaylist, systemImage: "plus")
+        }
+      }
+
+      if track.isLocal {
+        Divider()
+        Button {
+          onAction(["action": "trackFavorite", "id": track.id])
+        } label: {
+          Label(track.favorite ? labels.unfavorite : labels.favorite, systemImage: track.favorite ? "heart.slash" : "heart")
+        }
+        Button {
+          onAction(["action": "trackQueue", "id": track.id])
+        } label: {
+          Label(labels.addToQueue, systemImage: "text.badge.plus")
+        }
+        Button {
+          onAction(["action": "trackNext", "id": track.id])
+        } label: {
+          Label(labels.playNext, systemImage: "text.insert")
+        }
+        Button {
+          onAction(["action": "trackLyrics", "id": track.id])
+        } label: {
+          Label(labels.importLyrics, systemImage: "doc.text")
+        }
+        Button(role: .destructive) {
+          onAction(["action": "trackDelete", "id": track.id])
+        } label: {
+          Label(labels.deleteTrack, systemImage: "trash")
+        }
+      }
+    } label: {
+      Image(systemName: "ellipsis")
+        .font(.system(size: 16, weight: .bold))
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
     }
   }
 
@@ -464,20 +1058,107 @@ struct EchoNativePagesScreen: View {
         )
 
         if connection.mode == "streaming" {
-          VStack(spacing: 12) {
-            Image(systemName: "dot.radiowaves.left.and.right")
-              .font(.system(size: 28, weight: .medium))
-            Text(connection.labels.streamingComingSoon)
-              .font(.system(size: 20, weight: .bold))
-            Text(connection.labels.streamingReserved)
-              .font(.system(size: 13, weight: .medium))
-              .foregroundColor(echoInk.opacity(0.52))
-              .multilineTextAlignment(.center)
+          connectionSection(
+            symbol: "music.note.house",
+            title: model.payload?.language == "en" ? "NetEase Cloud Music" : "网易云音乐"
+          ) {
+            EchoNativeTextField(
+              placeholder: model.payload?.language == "en"
+                ? "Self-hosted API address"
+                : "自托管 NeteaseCloudMusicApi 地址",
+              text: Binding(
+                get: { model.payload?.connection?.streaming.apiBaseUrl ?? connection.streaming.apiBaseUrl },
+                set: { value in
+                  updateConnection { $0.streaming.apiBaseUrl = value }
+                  onAction(["action": "streamingApiUrl", "text": value])
+                }
+              ),
+              keyboardType: .URL
+            )
+
+            if connection.streaming.loggedIn {
+              HStack(spacing: 13) {
+                EchoNativeArtwork(urlString: connection.streaming.profileAvatarUrl, onError: {})
+                  .frame(width: 58, height: 58)
+                  .clipShape(Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                  Text(connection.streaming.profileName)
+                    .font(.system(size: 17, weight: .bold))
+                    .lineLimit(1)
+                  Text(model.payload?.language == "en"
+                    ? "NetEase · \(connection.streaming.playlistCount) playlists"
+                    : "网易云 · \(connection.streaming.playlistCount) 个歌单")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(echoInk.opacity(0.5))
+                }
+                Spacer(minLength: 6)
+                Button(role: .destructive) {
+                  showStreamingLogoutConfirmation = true
+                } label: {
+                  Text(model.payload?.language == "en" ? "Sign out" : "退出")
+                    .font(.system(size: 12, weight: .bold))
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+              }
+              .padding(14)
+              .echoGlass(tint: Color.white.opacity(0.1), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 19))
+            } else {
+              Button {
+                onAction(["action": "streamingLogin"])
+              } label: {
+                HStack(spacing: 8) {
+                  if connection.streaming.busy { ProgressView().controlSize(.small) }
+                  Image(systemName: "qrcode")
+                  Text(model.payload?.language == "en" ? "QR code sign in" : "扫码登录")
+                }
+                .font(.system(size: 13, weight: .bold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .echoGlass(tint: echoAccent.opacity(0.09), clear: false, in: RoundedRectangle(cornerRadius: 15))
+              }
+              .buttonStyle(.plain)
+              .disabled(connection.streaming.busy || connection.streaming.apiBaseUrl.isEmpty)
+
+              if !connection.streaming.qrUrl.isEmpty {
+                EchoNativeQRCode(value: connection.streaming.qrUrl)
+                  .frame(width: 210, height: 210)
+                  .padding(12)
+                  .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                  .frame(maxWidth: .infinity)
+                  .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                if let loginUrl = URL(string: connection.streaming.qrUrl) {
+                  Button {
+                    openURL(loginUrl)
+                  } label: {
+                    Label(
+                      model.payload?.language == "en" ? "Open NetEase Cloud Music" : "在网易云音乐中打开",
+                      systemImage: "arrow.up.right.square"
+                    )
+                    .font(.system(size: 12, weight: .bold))
+                  }
+                  .buttonStyle(.bordered)
+                  .buttonBorderShape(.capsule)
+                  .frame(maxWidth: .infinity)
+                }
+              }
+            }
+
+            if !connection.streaming.status.isEmpty {
+              Text(connection.streaming.status)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(echoInk.opacity(0.55))
+                .frame(maxWidth: .infinity, alignment: .center)
+                .multilineTextAlignment(.center)
+            }
+
+            Text(model.payload?.language == "en"
+              ? "Use your own NeteaseCloudMusicApi service. Session credentials stay in iOS Keychain."
+              : "使用你自己的 NeteaseCloudMusicApi 服务，登录凭据仅保存在 iOS 钥匙串。")
+              .font(.system(size: 10, weight: .medium))
+              .foregroundColor(echoInk.opacity(0.42))
+              .fixedSize(horizontal: false, vertical: true)
           }
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, 42)
-          .padding(.horizontal, 22)
-          .echoGlass(tint: Color.white.opacity(0.1), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         } else {
           connectionToggle(connection)
           connectionMetrics(connection)
@@ -822,11 +1503,208 @@ struct EchoNativePagesScreen: View {
   }
 }
 
+private struct EchoNativePlaylistEditorSheet: View {
+  let editor: EchoNativePlaylistEditorState
+  let labels: EchoNativeLibraryLabels?
+  let onAction: ([String: Any]) -> Void
+  @Environment(\.dismiss) private var dismiss
+  @State private var name: String
+
+  init(
+    editor: EchoNativePlaylistEditorState,
+    labels: EchoNativeLibraryLabels?,
+    onAction: @escaping ([String: Any]) -> Void
+  ) {
+    self.editor = editor
+    self.labels = labels
+    self.onAction = onAction
+    _name = State(initialValue: editor.initialName)
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      Text(editorTitle)
+        .font(.system(size: 24, weight: .bold, design: .rounded))
+      TextField(labels?.playlistName ?? "歌单名称", text: $name)
+        .textFieldStyle(.roundedBorder)
+        .submitLabel(.done)
+        .onSubmit(save)
+      HStack(spacing: 12) {
+        Button(labels?.cancel ?? "取消") { dismiss() }
+          .buttonStyle(.bordered)
+        Button(editorTitle) {
+          save()
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(echoAccent)
+        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+      }
+    }
+    .padding(22)
+    .foregroundColor(echoInk)
+    .background(echoWarmBackground.ignoresSafeArea())
+    .preferredColorScheme(.light)
+  }
+
+  private var editorTitle: String {
+    editor.playlistId == nil
+      ? (labels?.createPlaylist ?? "创建歌单")
+      : (labels?.renamePlaylist ?? "重命名歌单")
+  }
+
+  private func save() {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    if let playlistId = editor.playlistId {
+      onAction(["action": "playlistRename", "playlistId": playlistId, "text": trimmed])
+    } else {
+      var payload: [String: Any] = ["action": "playlistCreate", "text": trimmed]
+      if let trackId = editor.trackId, let source = editor.trackSource {
+        payload["id"] = trackId
+        payload["source"] = source
+      }
+      onAction(payload)
+    }
+    dismiss()
+  }
+}
+
+private struct EchoNativePlaylistDetailSheet: View {
+  @ObservedObject var model: EchoNativePagesModel
+  let playlistId: String
+  let onAction: ([String: Any]) -> Void
+  @Environment(\.dismiss) private var dismiss
+
+  private var playlist: EchoNativePlaylist? {
+    model.payload?.library?.selectedPlaylist
+      ?? model.payload?.library?.playlists.first(where: { $0.id == playlistId })
+  }
+
+  var body: some View {
+    VStack(spacing: 14) {
+      HStack {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(playlist?.name ?? "")
+            .font(.system(size: 24, weight: .bold, design: .rounded))
+          Text(playlist?.subtitle ?? "")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(echoInk.opacity(0.5))
+        }
+        Spacer()
+        if let playlist, let firstTrack = playlist.tracks.first {
+          Button {
+            dismiss()
+            onAction([
+              "action": "trackPlay",
+              "id": firstTrack.id,
+              "playlistId": playlist.id,
+              "source": firstTrack.source,
+            ])
+          } label: {
+            Image(systemName: "play.fill")
+              .font(.system(size: 14, weight: .bold))
+              .frame(width: 44, height: 44)
+              .echoGlass(tint: echoAccent.opacity(0.09), in: Circle())
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel(model.payload?.language == "en" ? "Play playlist" : "播放歌单")
+        }
+        Button {
+          onAction(["action": "playlistClose"])
+          dismiss()
+        } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 13, weight: .bold))
+            .frame(width: 44, height: 44)
+            .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+        }
+        .buttonStyle(.plain)
+      }
+
+      if let playlist, !playlist.tracks.isEmpty {
+        ScrollView(showsIndicators: false) {
+          LazyVStack(spacing: 0) {
+            ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { _, track in
+              HStack(spacing: 11) {
+                Button {
+                  dismiss()
+                  onAction([
+                    "action": "trackPlay",
+                    "id": track.id,
+                    "playlistId": playlist.id,
+                    "source": track.source,
+                  ])
+                } label: {
+                  HStack(spacing: 11) {
+                    EchoNativeArtwork(urlString: track.artworkUrl, onError: {})
+                      .frame(width: 50, height: 50)
+                      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    VStack(alignment: .leading, spacing: 3) {
+                      Text(track.title)
+                        .font(.system(size: 14, weight: .bold))
+                        .lineLimit(1)
+                      Text(track.artist)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(echoInk.opacity(0.48))
+                        .lineLimit(1)
+                    }
+                    Spacer()
+                  }
+                }
+                .buttonStyle(.plain)
+                Menu {
+                  Button(role: .destructive) {
+                    onAction([
+                      "action": "playlistRemoveTrack",
+                      "playlistId": playlist.id,
+                      "source": track.source,
+                      "trackId": track.id,
+                    ])
+                  } label: {
+                    Label(
+                      model.payload?.library?.labels.removeFromPlaylist ?? "从歌单移除",
+                      systemImage: "trash"
+                    )
+                  }
+                } label: {
+                  Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(width: 44, height: 44)
+                }
+              }
+              .padding(.vertical, 8)
+              .overlay(alignment: .bottom) {
+                Rectangle().fill(echoInk.opacity(0.08)).frame(height: 0.7)
+              }
+            }
+          }
+        }
+      } else {
+        VStack(spacing: 12) {
+          Image(systemName: "music.note.list")
+            .font(.system(size: 28, weight: .medium))
+          Text(model.payload?.language == "en" ? "Add songs from the library." : "从曲库中选择歌曲加入歌单。")
+            .font(.system(size: 13, weight: .semibold))
+        }
+        .foregroundColor(echoInk.opacity(0.42))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+    }
+    .padding(20)
+    .foregroundColor(echoInk)
+    .background(echoWarmBackground.ignoresSafeArea())
+    .preferredColorScheme(.light)
+    .onDisappear { onAction(["action": "playlistClose"]) }
+  }
+}
+
 private struct EchoPairingScannerSheet: View {
   let language: String
   let onCode: (String) -> Void
   @Environment(\.dismiss) private var dismiss
   @State private var cameraUnavailable = false
+  @State private var photoError = false
+  @State private var showPhotoPicker = false
 
   var body: some View {
     ZStack {
@@ -854,7 +1732,7 @@ private struct EchoPairingScannerSheet: View {
           } label: {
             Image(systemName: "xmark")
               .font(.system(size: 13, weight: .bold))
-              .frame(width: 38, height: 38)
+              .frame(width: 44, height: 44)
               .echoGlass(tint: Color.black.opacity(0.14), in: Circle())
           }
           .buttonStyle(.plain)
@@ -873,12 +1751,25 @@ private struct EchoPairingScannerSheet: View {
 
         Spacer()
 
-        Text(language == "en" ? "The connection is saved automatically after a successful scan." : "识别成功后会自动保存连接信息。")
-          .font(.system(size: 12, weight: .semibold))
-          .foregroundColor(.white.opacity(0.76))
-          .multilineTextAlignment(.center)
-          .padding(.horizontal, 30)
-          .padding(.bottom, 26)
+        VStack(spacing: 12) {
+          Button {
+            showPhotoPicker = true
+          } label: {
+            Label(language == "en" ? "Choose from Photos" : "从相册选择", systemImage: "photo")
+              .font(.system(size: 13, weight: .bold))
+              .padding(.horizontal, 18)
+              .frame(height: 42)
+              .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: Capsule())
+          }
+          .buttonStyle(.plain)
+
+          Text(language == "en" ? "The connection is saved automatically after a successful scan." : "识别成功后会自动保存连接信息。")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.white.opacity(0.76))
+            .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 30)
+        .padding(.bottom, 26)
       }
 
       if cameraUnavailable {
@@ -900,6 +1791,16 @@ private struct EchoPairingScannerSheet: View {
           .padding(.horizontal, 18)
           .frame(height: 42)
           .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: Capsule())
+          Button {
+            showPhotoPicker = true
+          } label: {
+            Label(language == "en" ? "Choose from Photos" : "从相册选择", systemImage: "photo")
+              .font(.system(size: 13, weight: .bold))
+              .padding(.horizontal, 18)
+              .frame(height: 42)
+              .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: Capsule())
+          }
+          .buttonStyle(.plain)
         }
         .foregroundColor(.white)
         .padding(28)
@@ -907,6 +1808,87 @@ private struct EchoPairingScannerSheet: View {
     }
     .background(Color.black.ignoresSafeArea())
     .preferredColorScheme(.dark)
+    .sheet(isPresented: $showPhotoPicker) {
+      EchoQRCodePhotoPicker(
+        onCode: { code in
+          showPhotoPicker = false
+          dismiss()
+          onCode(code)
+        },
+        onCancel: { showPhotoPicker = false },
+        onFailure: {
+          showPhotoPicker = false
+          photoError = true
+        }
+      )
+    }
+    .alert(language == "en" ? "No QR code found" : "未识别到二维码", isPresented: $photoError) {
+      Button(language == "en" ? "OK" : "好", role: .cancel) {}
+    } message: {
+      Text(language == "en" ? "Choose a clear image containing an ECHO pairing QR code." : "请选择包含清晰 ECHO 配对二维码的图片。")
+    }
+  }
+}
+
+private struct EchoQRCodePhotoPicker: UIViewControllerRepresentable {
+  let onCode: (String) -> Void
+  let onCancel: () -> Void
+  let onFailure: () -> Void
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(onCode: onCode, onCancel: onCancel, onFailure: onFailure)
+  }
+
+  func makeUIViewController(context: Context) -> PHPickerViewController {
+    var configuration = PHPickerConfiguration(photoLibrary: .shared())
+    configuration.filter = .images
+    configuration.selectionLimit = 1
+    let picker = PHPickerViewController(configuration: configuration)
+    picker.delegate = context.coordinator
+    return picker
+  }
+
+  func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+  final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+    private let onCode: (String) -> Void
+    private let onCancel: () -> Void
+    private let onFailure: () -> Void
+
+    init(onCode: @escaping (String) -> Void, onCancel: @escaping () -> Void, onFailure: @escaping () -> Void) {
+      self.onCode = onCode
+      self.onCancel = onCancel
+      self.onFailure = onFailure
+    }
+
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+      guard let provider = results.first?.itemProvider else {
+        picker.dismiss(animated: true, completion: onCancel)
+        return
+      }
+      let handleCode = onCode
+      let handleFailure = onFailure
+      provider.loadObject(ofClass: UIImage.self) { object, _ in
+        let code = (object as? UIImage).flatMap(Self.qrCode)
+        DispatchQueue.main.async {
+          picker.dismiss(animated: true) {
+            if let code { handleCode(code) } else { handleFailure() }
+          }
+        }
+      }
+    }
+
+    private static func qrCode(in image: UIImage) -> String? {
+      guard let ciImage = CIImage(image: image) else { return nil }
+      let detector = CIDetector(
+        ofType: CIDetectorTypeQRCode,
+        context: nil,
+        options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
+      )
+      return detector?.features(in: ciImage)
+        .compactMap { ($0 as? CIQRCodeFeature)?.messageString }
+        .first
+    }
   }
 }
 
@@ -922,6 +1904,39 @@ private struct EchoQRCodeScannerView: UIViewControllerRepresentable {
 
   static func dismantleUIViewController(_ uiViewController: EchoQRCodeScannerViewController, coordinator: ()) {
     uiViewController.stopScanning()
+  }
+}
+
+private struct EchoNativeQRCode: View {
+  let value: String
+
+  var body: some View {
+    Group {
+      if let image = makeImage() {
+        Image(uiImage: image)
+          .resizable()
+          .interpolation(.none)
+          .scaledToFit()
+      } else {
+        Image(systemName: "qrcode")
+          .font(.system(size: 48, weight: .medium))
+          .foregroundColor(echoInk.opacity(0.35))
+      }
+    }
+    .accessibilityLabel("QR Code")
+  }
+
+  private func makeImage() -> UIImage? {
+    let filter = CIFilter.qrCodeGenerator()
+    filter.message = Data(value.utf8)
+    filter.correctionLevel = "M"
+    guard
+      let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
+      let cgImage = CIContext().createCGImage(output, from: output.extent)
+    else {
+      return nil
+    }
+    return UIImage(cgImage: cgImage)
   }
 }
 
@@ -1038,6 +2053,151 @@ private final class EchoQRCodeScannerViewController: UIViewController, AVCapture
   }
 }
 
+private struct EchoNativeMediaGridCard<Accessory: View>: View {
+  let artworkUrl: String
+  let badges: [String]
+  let onArtworkError: () -> Void
+  let onSelect: () -> Void
+  let subtitle: String
+  let title: String
+  let accessory: Accessory
+
+  init(
+    artworkUrl: String,
+    title: String,
+    subtitle: String,
+    badges: [String] = [],
+    onArtworkError: @escaping () -> Void = {},
+    onSelect: @escaping () -> Void,
+    @ViewBuilder accessory: () -> Accessory
+  ) {
+    self.artworkUrl = artworkUrl
+    self.badges = badges
+    self.onArtworkError = onArtworkError
+    self.onSelect = onSelect
+    self.subtitle = subtitle
+    self.title = title
+    self.accessory = accessory()
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      ZStack(alignment: .topTrailing) {
+        Button(action: onSelect) {
+          EchoNativeArtwork(urlString: artworkUrl, onError: onArtworkError)
+            .frame(maxWidth: .infinity)
+            .aspectRatio(1, contentMode: .fill)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        accessory.padding(7)
+      }
+      Button(action: onSelect) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(title)
+            .font(.system(size: 14, weight: .bold))
+            .foregroundColor(echoInk)
+            .lineLimit(1)
+          HStack(spacing: 5) {
+            Text(subtitle).lineLimit(1)
+            Spacer(minLength: 2)
+            ForEach(badges, id: \.self) { Image(systemName: $0) }
+          }
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundColor(echoInk.opacity(0.48))
+        }
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+    }
+  }
+}
+
+private struct EchoNativeMediaRow<Accessory: View>: View {
+  let artworkUrl: String
+  let badges: [String]
+  let onSelect: () -> Void
+  let subtitle: String
+  let title: String
+  let accessory: Accessory
+
+  init(
+    artworkUrl: String,
+    title: String,
+    subtitle: String,
+    badges: [String] = [],
+    onSelect: @escaping () -> Void,
+    @ViewBuilder accessory: () -> Accessory
+  ) {
+    self.artworkUrl = artworkUrl
+    self.badges = badges
+    self.onSelect = onSelect
+    self.subtitle = subtitle
+    self.title = title
+    self.accessory = accessory()
+  }
+
+  var body: some View {
+    HStack(spacing: 11) {
+      Button(action: onSelect) {
+        HStack(spacing: 11) {
+          EchoNativeArtwork(urlString: artworkUrl, onError: {})
+            .frame(width: 58, height: 58)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+          VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+              .font(.system(size: 15, weight: .bold))
+              .foregroundColor(echoInk)
+              .lineLimit(1)
+            HStack(spacing: 5) {
+              Text(subtitle).lineLimit(1)
+              ForEach(badges, id: \.self) { Image(systemName: $0) }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(echoInk.opacity(0.48))
+          }
+          Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      accessory
+    }
+    .padding(.vertical, 8)
+    .overlay(alignment: .bottom) {
+      Rectangle().fill(echoInk.opacity(0.09)).frame(height: 0.7)
+    }
+  }
+}
+
+private struct EchoNativeDisplayModeButton: View {
+  let mode: String
+  let language: String
+  let onToggle: () -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  var body: some View {
+    Button {
+      if reduceMotion {
+        onToggle()
+      } else {
+        withAnimation(.easeInOut(duration: 0.22)) { onToggle() }
+      }
+    } label: {
+      Image(systemName: mode == "grid" ? "list.bullet" : "square.grid.2x2")
+        .font(.system(size: 14, weight: .bold))
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(language == "en"
+      ? (mode == "grid" ? "Use list view" : "Use large artwork view")
+      : (mode == "grid" ? "切换列表视图" : "切换大图视图"))
+  }
+}
+
 private struct EchoNativeSegmentedControl: View {
   let options: [EchoNativePageOption]
   let selection: String
@@ -1057,7 +2217,7 @@ private struct EchoNativeSegmentedControl: View {
               .foregroundColor(selected ? echoAccent : echoInk.opacity(0.54))
               .lineLimit(1)
               .padding(.horizontal, compact ? 12 : 16)
-              .frame(maxWidth: compact ? nil : .infinity, minHeight: compact ? 34 : 40)
+              .frame(maxWidth: compact ? nil : .infinity, minHeight: 44)
               .echoGlass(
                 tint: selected ? Color.black.opacity(0.1) : Color.white.opacity(0.08),
                 clear: !selected,
@@ -1089,7 +2249,7 @@ private struct EchoNativeLabelButton: View {
       }
       .foregroundColor(echoInk.opacity(disabled ? 0.34 : 0.72))
       .padding(.horizontal, 13)
-      .frame(height: 38)
+      .frame(minHeight: 44)
       .echoGlass(tint: Color.white.opacity(0.11), clear: false, in: Capsule())
     }
     .buttonStyle(.plain)

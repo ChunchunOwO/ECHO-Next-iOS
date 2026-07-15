@@ -16,12 +16,15 @@ export type EchoNativeAction = {
   id?: string;
   index?: number;
   key?: string;
-  mode?: 'local' | 'pc' | 'phone';
-  page?: 'connect' | 'control' | 'library' | 'settings';
+  mode?: 'local' | 'pc' | 'phone' | 'streaming';
+  page?: 'connect' | 'control' | 'library' | 'search' | 'settings';
+  playlistId?: string;
   preset?: string;
   selection?: string;
-  source?: 'echo' | 'local';
+  selections?: Record<string, string>;
+  source?: 'echo' | 'local' | 'streaming';
   text?: string;
+  trackId?: string;
   url?: string;
   value?: number;
 };
@@ -36,19 +39,21 @@ type SharedEqProps = {
 
 export type EchoNativePlayerViewProps = SharedEqProps & {
   activeLyricIndex: number;
-  activePage: 'connect' | 'control' | 'library' | 'settings';
+  activePage: 'connect' | 'control' | 'library' | 'search' | 'settings';
   artist: string;
   artworkUrl: string;
   connectionLabel: string;
   connectionOnline: boolean;
   controlsEnabled: boolean;
   durationMs: number;
+  externalSourcePickerPayload: string;
   isPlaying: boolean;
   lyricTexts: string[];
   lyricTimesMs: number[];
   lyricsVisible: boolean;
+  metadataLoading: boolean;
   modeLabel: string;
-  outputMode: 'local' | 'pc' | 'phone';
+  outputMode: 'local' | 'pc' | 'phone' | 'streaming';
   pagePayload: string;
   positionMs: number;
   queueCount: number;

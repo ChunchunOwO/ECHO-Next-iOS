@@ -52,7 +52,12 @@ const ensureLocalMusicDirectory = async (): Promise<void> => {
   if (!FileSystem.documentDirectory) {
     throw new Error('无法访问 App 本地文件目录。');
   }
-  await FileSystem.makeDirectoryAsync(localMusicDirectory, { intermediates: true }).catch(() => undefined);
+  const info = await FileSystem.getInfoAsync(localMusicDirectory);
+  if (info.exists) {
+    if (!info.isDirectory) throw new Error('本地音乐目录不可用。');
+    return;
+  }
+  await FileSystem.makeDirectoryAsync(localMusicDirectory, { intermediates: true });
 };
 
 const uniqueFileName = async (fileName: string): Promise<string> => {
@@ -105,7 +110,7 @@ const trackFromFileName = async (fileName: string): Promise<LocalMusicTrack> => 
 
 export const scanLocalMusic = async (): Promise<LocalMusicTrack[]> => {
   await ensureLocalMusicDirectory();
-  const fileNames = await FileSystem.readDirectoryAsync(localMusicDirectory).catch(() => []);
+  const fileNames = await FileSystem.readDirectoryAsync(localMusicDirectory);
 
   return fileNames
     .filter((fileName) => audioExtensions.has(extensionOf(fileName)))
@@ -192,7 +197,7 @@ export const readLocalLyrics = async (track: LocalMusicTrack): Promise<string | 
 
 export const getLocalMusicStorageUsage = async (): Promise<number> => {
   await ensureLocalMusicDirectory();
-  const fileNames = await FileSystem.readDirectoryAsync(localMusicDirectory).catch(() => []);
+  const fileNames = await FileSystem.readDirectoryAsync(localMusicDirectory);
   const sizes = await Promise.all(fileNames.map(async (fileName) => {
     const info = await FileSystem.getInfoAsync(fileUriForName(fileName)).catch(() => null);
     return info?.exists ? info.size : 0;

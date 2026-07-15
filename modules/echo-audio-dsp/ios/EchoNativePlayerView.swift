@@ -4,6 +4,16 @@ import Foundation
 import SwiftUI
 import UIKit
 
+func setIfChanged<Root: AnyObject, Value: Equatable>(
+  _ root: Root,
+  _ keyPath: ReferenceWritableKeyPath<Root, Value>,
+  _ value: Value
+) {
+  if root[keyPath: keyPath] != value {
+    root[keyPath: keyPath] = value
+  }
+}
+
 extension UIView {
   func findHostingViewController() -> UIViewController? {
     var responder: UIResponder? = self
@@ -113,19 +123,49 @@ struct EchoNativeQueueItem: Decodable, Identifiable {
   let current: Bool
   let id: String
   let meta: String
+  let source: String
   let title: String
   let trackId: String
 }
 
 struct EchoNativeQueuePayload: Decodable {
+  let canEdit: Bool
   let clearLabel: String
   let emptyLabel: String
-  let isLocal: Bool
   let items: [EchoNativeQueueItem]
   let moveDownLabel: String
   let moveUpLabel: String
+  let playlistId: String
   let removeLabel: String
+  let source: String
+  let subtitle: String
   let title: String
+}
+
+struct EchoNativeExternalSourceCandidate: Decodable, Identifiable {
+  let albumArt: String?
+  let availableLabel: String
+  let hasArtist: Bool
+  let hasArtwork: Bool
+  let hasLyrics: Bool
+  let id: String
+  let sourceLabel: String
+  let title: String
+}
+
+struct EchoNativeExternalSourcePickerPayload: Decodable, Identifiable {
+  let artworkLabel: String
+  let artistLabel: String
+  let cancelLabel: String
+  let candidates: [EchoNativeExternalSourceCandidate]
+  let doneLabel: String
+  let id: String
+  let lyricsLabel: String
+  let selectedLabel: String
+  let subtitle: String
+  let title: String
+  let unavailableLabel: String
+  let useSourceLabel: String
 }
 
 final class EchoNativePlayerModel: ObservableObject {
@@ -137,11 +177,13 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var connectionOnline = false
   @Published var controlsEnabled = false
   @Published var durationMs = 0.0
+  @Published var externalSourcePicker: EchoNativeExternalSourcePickerPayload?
   @Published var isPlaying = false
   @Published var language = "zh"
   @Published var lyricTexts: [String] = []
   @Published var lyricTimesMs: [Double] = []
   @Published var lyricsVisible = false
+  @Published var metadataLoading = false
   @Published var modeLabel = "Controlling Mode"
   @Published var outputMode = "pc"
   @Published var positionMs = 0.0
@@ -153,15 +195,39 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var title = ""
   @Published var volume = 1.0
   let equalizer = EchoNativeEqualizerModel()
+  private var lastExternalSourcePickerJSON = ""
+  private var lastQueuePayloadJSON = ""
 
   func updateQueue(payloadJSON: String) {
+    guard payloadJSON != lastQueuePayloadJSON else { return }
     guard
       let data = payloadJSON.data(using: .utf8),
       let payload = try? JSONDecoder().decode(EchoNativeQueuePayload.self, from: data)
     else {
       return
     }
+    lastQueuePayloadJSON = payloadJSON
     queuePayload = payload
+  }
+
+  func updateExternalSourcePicker(payloadJSON: String) {
+    guard payloadJSON != lastExternalSourcePickerJSON else { return }
+    lastExternalSourcePickerJSON = payloadJSON
+    guard !payloadJSON.isEmpty else {
+      externalSourcePicker = nil
+      return
+    }
+    guard
+      let data = payloadJSON.data(using: .utf8),
+      let payload = try? JSONDecoder().decode(EchoNativeExternalSourcePickerPayload.self, from: data),
+      !payload.candidates.isEmpty
+    else {
+      externalSourcePicker = nil
+      return
+    }
+    if externalSourcePicker?.id != payload.id {
+      externalSourcePicker = payload
+    }
   }
 }
 
@@ -271,6 +337,9 @@ private struct EchoNativeAppScreen: View {
       .tint(echoAccent)
     }
     .preferredColorScheme(.light)
+    .sheet(item: $playerModel.externalSourcePicker) { payload in
+      EchoNativeExternalSourcePicker(payload: payload, onAction: onAction)
+    }
   }
 
   private var selection: Binding<String> {
@@ -296,6 +365,13 @@ private struct EchoNativeAppScreen: View {
       Tab(title("library"), systemImage: "music.note.list", value: "library") {
         themedTab {
           EchoNativePagesScreen(model: pagesModel, page: "library", onAction: onAction)
+        }
+      }
+      Tab(title("search"), systemImage: "magnifyingglass", value: "search", role: .search) {
+        NavigationStack {
+          themedTab {
+            EchoNativePagesScreen(model: pagesModel, page: "search", onAction: onAction)
+          }
         }
       }
       Tab(title("connect"), systemImage: "link", value: "connect") {
@@ -326,6 +402,14 @@ private struct EchoNativeAppScreen: View {
       }
         .tag("library")
         .tabItem { Label(title("library"), systemImage: "music.note.list") }
+      NavigationView {
+        themedTab {
+          EchoNativePagesScreen(model: pagesModel, page: "search", onAction: onAction)
+        }
+      }
+        .navigationViewStyle(.stack)
+        .tag("search")
+        .tabItem { Label(title("search"), systemImage: "magnifyingglass") }
       themedTab {
         EchoNativePagesScreen(model: pagesModel, page: "connect", onAction: onAction)
       }
@@ -351,6 +435,7 @@ private struct EchoNativeAppScreen: View {
     switch page {
     case "control": return english ? "Playback" : "播放"
     case "library": return english ? "Library" : "曲库"
+    case "search": return english ? "Search" : "搜索"
     case "connect": return english ? "Connect" : "连接"
     default: return english ? "Settings" : "设置"
     }
@@ -373,6 +458,11 @@ struct EchoNativePlayerScreen: View {
   var body: some View {
     GeometryReader { geometry in
       ZStack {
+        EchoNativeArtworkBackdrop(urlString: model.artworkUrl) {
+          onAction(["action": "artworkError", "url": model.artworkUrl])
+        }
+        .ignoresSafeArea()
+
         if model.lyricsVisible {
           lyricsLayout(geometry: geometry)
             .transition(.opacity.combined(with: .scale(scale: 0.98)))
@@ -450,15 +540,27 @@ struct EchoNativePlayerScreen: View {
     let artworkSize: CGFloat = compact ? 68 : 84
 
     return HStack(alignment: .top, spacing: 12) {
-      EchoNativeArtwork(urlString: model.artworkUrl) {
-        onAction(["action": "artworkError", "url": model.artworkUrl])
+      VStack(spacing: 5) {
+        ZStack {
+          EchoNativeArtwork(urlString: model.artworkUrl) {
+            onAction(["action": "artworkError", "url": model.artworkUrl])
+          }
+          if model.metadataLoading {
+            EchoNativeArtworkLoadingBadge(language: model.language, compact: true)
+              .transition(.opacity)
+          }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.metadataLoading)
+        .frame(width: artworkSize, height: artworkSize)
+        .clipShape(RoundedRectangle(cornerRadius: compact ? 17 : 21, style: .continuous))
+        .overlay {
+          RoundedRectangle(cornerRadius: compact ? 17 : 21, style: .continuous)
+            .stroke(Color.white.opacity(0.58), lineWidth: 1)
+        }
+
+        connectionStatus(compact: true)
       }
-      .frame(width: artworkSize, height: artworkSize)
-      .clipShape(RoundedRectangle(cornerRadius: compact ? 17 : 21, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: compact ? 17 : 21, style: .continuous)
-          .stroke(Color.white.opacity(0.58), lineWidth: 1)
-      }
+      .frame(width: artworkSize)
 
       VStack(alignment: .leading, spacing: compact ? 3 : 5) {
         Text(model.title)
@@ -466,12 +568,10 @@ struct EchoNativePlayerScreen: View {
           .foregroundColor(echoInk)
           .lineLimit(2)
           .minimumScaleFactor(0.82)
-        if !model.artist.isEmpty {
-          Text(model.artist)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundColor(echoInk.opacity(0.56))
-            .lineLimit(1)
-        }
+        Text(artistLabel)
+          .font(.system(size: 11, weight: .medium))
+          .foregroundColor(echoInk.opacity(0.56))
+          .lineLimit(1)
         HStack(spacing: 5) {
           ForEach(Array(model.tags.prefix(compact ? 2 : 3)), id: \.self) { tag in
             Text(tag)
@@ -483,15 +583,6 @@ struct EchoNativePlayerScreen: View {
               .frame(height: 20)
               .overlay(Capsule().stroke(echoInk.opacity(0.14), lineWidth: 1))
           }
-        }
-        HStack(spacing: 5) {
-          Circle()
-            .fill(model.connectionOnline ? echoGold : echoAccent)
-            .frame(width: 6, height: 6)
-          Text(model.connectionLabel)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(model.connectionOnline ? echoInk.opacity(0.62) : echoAccent)
-            .lineLimit(1)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -586,52 +677,65 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var statusHeader: some View {
-    HStack(spacing: 12) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text(model.language == "en" ? "NOW PLAYING" : "正在播放")
-          .font(.system(size: 10, weight: .bold))
-          .foregroundColor(echoInk.opacity(0.48))
-        Text(model.modeLabel)
-          .font(.system(size: 13, weight: .semibold))
-          .foregroundColor(echoInk)
-      }
-      Spacer()
-      HStack(spacing: 6) {
-        Circle()
-          .fill(model.connectionOnline ? echoGold : echoAccent)
-          .frame(width: 7, height: 7)
-        Text(model.connectionLabel)
-          .font(.system(size: 11, weight: .semibold))
-          .lineLimit(1)
-      }
-      .foregroundColor(model.connectionOnline ? echoInk.opacity(0.74) : echoAccent)
-      .padding(.horizontal, 10)
-      .frame(height: 30)
-      .echoGlass(tint: Color.white.opacity(0.12), interactive: false, in: Capsule())
+    VStack(alignment: .leading, spacing: 2) {
+      Text(model.language == "en" ? "NOW PLAYING" : "正在播放")
+        .font(.system(size: 10, weight: .bold))
+        .foregroundColor(echoInk.opacity(0.48))
+      Text(model.modeLabel)
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundColor(echoInk)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   @ViewBuilder
   private func artwork(size: CGFloat, compact: Bool) -> some View {
     let cornerRadius: CGFloat = compact ? 20 : 28
-    ZStack {
-      if model.showArtworkGlow {
-        RoundedRectangle(cornerRadius: 32, style: .continuous)
-          .fill(echoGold.opacity(0.22))
-          .frame(width: size * 0.94, height: size * 0.94)
-          .blur(radius: 30)
+    VStack(spacing: compact ? 4 : 6) {
+      ZStack {
+        if model.showArtworkGlow {
+          RoundedRectangle(cornerRadius: 32, style: .continuous)
+            .fill(echoGold.opacity(0.22))
+            .frame(width: size * 0.94, height: size * 0.94)
+            .blur(radius: 30)
+        }
+        EchoNativeArtwork(urlString: model.artworkUrl) {
+          onAction(["action": "artworkError", "url": model.artworkUrl])
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay {
+          RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(Color.white.opacity(0.58), lineWidth: 1)
+        }
+        if model.metadataLoading {
+          EchoNativeArtworkLoadingBadge(language: model.language, compact: compact)
+            .transition(.opacity)
+        }
       }
-      EchoNativeArtwork(urlString: model.artworkUrl) {
-        onAction(["action": "artworkError", "url": model.artworkUrl])
-      }
-      .frame(width: size, height: size)
-      .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-          .stroke(Color.white.opacity(0.58), lineWidth: 1)
-      }
+      .frame(height: size)
+      .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.metadataLoading)
+
+      connectionStatus(compact: compact)
     }
-    .frame(height: size)
+    .frame(width: size)
+  }
+
+  private func connectionStatus(compact: Bool) -> some View {
+    HStack(spacing: 5) {
+      Circle()
+        .fill(model.connectionOnline ? echoGold : echoAccent)
+        .frame(width: compact ? 5 : 6, height: compact ? 5 : 6)
+      Text(model.connectionLabel)
+        .font(.system(size: compact ? 9 : 10, weight: .semibold))
+        .foregroundColor(model.connectionOnline ? echoInk.opacity(0.66) : echoAccent)
+        .lineLimit(1)
+        .minimumScaleFactor(0.72)
+    }
+    .padding(.horizontal, compact ? 7 : 9)
+    .frame(maxWidth: .infinity, minHeight: compact ? 22 : 25)
+    .echoGlass(tint: Color.white.opacity(0.12), interactive: false, in: Capsule())
+    .accessibilityLabel(model.connectionLabel)
   }
 
   private func trackDetails(compact: Bool) -> some View {
@@ -642,12 +746,10 @@ struct EchoNativePlayerScreen: View {
         .lineLimit(compact ? 1 : 2)
         .minimumScaleFactor(0.8)
         .multilineTextAlignment(.center)
-      if !model.artist.isEmpty {
-        Text(model.artist)
-          .font(.system(size: 12, weight: .medium))
-          .foregroundColor(echoInk.opacity(0.58))
-          .lineLimit(1)
-      }
+      Text(artistLabel)
+        .font(.system(size: 12, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.58))
+        .lineLimit(1)
       if !model.tags.isEmpty {
         LazyVGrid(
           columns: [GridItem(.adaptive(minimum: compact ? 54 : 64), spacing: 5)],
@@ -808,11 +910,11 @@ struct EchoNativePlayerScreen: View {
     Picker("", selection: Binding(
       get: { model.outputMode },
       set: { value in
-        model.outputMode = value
         onAction(["action": "output", "mode": value])
       }
     )) {
       Text(model.language == "en" ? "Local" : "本地").tag("local")
+      Text(model.language == "en" ? "Media" : "流媒体").tag("streaming")
       Text(model.language == "en" ? "Control" : "控制").tag("pc")
       Text(model.language == "en" ? "Stream" : "串流").tag("phone")
     }
@@ -856,32 +958,272 @@ struct EchoNativePlayerScreen: View {
     let seconds = max(0, Int(milliseconds / 1000))
     return String(format: "%d:%02d", seconds / 60, seconds % 60)
   }
+
+  private var artistLabel: String {
+    let artist = model.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+    return artist.isEmpty ? (model.language == "en" ? "Unknown Artist" : "未知艺术家") : artist
+  }
+}
+
+private struct EchoNativeArtworkLoadingBadge: View {
+  let language: String
+  let compact: Bool
+
+  var body: some View {
+    ProgressView()
+      .progressViewStyle(.circular)
+      .tint(echoInk)
+      .scaleEffect(compact ? 0.82 : 1)
+      .frame(width: compact ? 36 : 46, height: compact ? 36 : 46)
+      .echoGlass(
+        tint: Color.white.opacity(0.18),
+        clear: false,
+        interactive: false,
+        in: Circle()
+      )
+      .shadow(color: Color.black.opacity(0.1), radius: 10, y: 4)
+      .accessibilityLabel(language == "en" ? "Loading artwork and lyrics" : "正在加载封面和歌词")
+  }
+}
+
+private struct EchoNativeArtworkBackdrop: View {
+  let urlString: String
+  let onError: () -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  var body: some View {
+    ZStack {
+      echoWarmBackground
+
+      if !urlString.isEmpty {
+        ZStack {
+          EchoNativeArtwork(urlString: urlString, onError: onError)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .scaledToFill()
+            .scaleEffect(1.28)
+            .saturation(1.12)
+            .blur(radius: 30, opaque: true)
+
+          glassOverlay
+          Color.white.opacity(0.16)
+        }
+        .id(urlString)
+        .transition(.opacity)
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .clipped()
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: urlString)
+  }
+
+  @ViewBuilder
+  private var glassOverlay: some View {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      Rectangle()
+        .fill(.ultraThinMaterial)
+        .glassEffect(.clear.tint(Color.white.opacity(0.06)), in: Rectangle())
+    } else {
+      Rectangle().fill(.ultraThinMaterial)
+    }
+    #else
+    Rectangle().fill(.ultraThinMaterial)
+    #endif
+  }
+}
+
+private struct EchoNativeExternalSourcePicker: View {
+  let payload: EchoNativeExternalSourcePickerPayload
+  let onAction: ([String: Any]) -> Void
+  @Environment(\.dismiss) private var dismiss
+  @State private var selectedSources: [String: String] = [:]
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
+          Text(payload.title)
+            .font(.system(size: 24, weight: .bold, design: .rounded))
+          Text(payload.subtitle)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.56))
+        }
+        Spacer(minLength: 8)
+        Button {
+          onAction(["action": "externalSourcePickerDismiss"])
+          dismiss()
+        } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 13, weight: .bold))
+            .frame(width: 44, height: 44)
+            .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(payload.cancelLabel)
+      }
+
+      VStack(spacing: 0) {
+        ForEach(Array(payload.candidates.enumerated()), id: \.element.id) { index, candidate in
+          VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 13) {
+              EchoNativeArtwork(urlString: candidate.albumArt ?? "", onError: {})
+                .frame(width: 58, height: 58)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+              VStack(alignment: .leading, spacing: 5) {
+                Text(candidate.title)
+                  .font(.system(size: 15, weight: .bold))
+                  .foregroundColor(echoInk)
+                  .lineLimit(1)
+                Text(candidate.sourceLabel)
+                  .font(.system(size: 12, weight: .semibold))
+                  .foregroundColor(echoInk.opacity(0.5))
+                  .lineLimit(1)
+              }
+              Spacer(minLength: 8)
+              Text(candidate.availableLabel)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(echoInk.opacity(0.46))
+                .multilineTextAlignment(.trailing)
+            }
+
+            HStack(spacing: 8) {
+              fieldButton(
+                field: "lyrics",
+                label: payload.lyricsLabel,
+                available: candidate.hasLyrics,
+                candidate: candidate
+              )
+              fieldButton(
+                field: "artist",
+                label: payload.artistLabel,
+                available: candidate.hasArtist,
+                candidate: candidate
+              )
+              fieldButton(
+                field: "albumArt",
+                label: payload.artworkLabel,
+                available: candidate.hasArtwork,
+                candidate: candidate
+              )
+            }
+          }
+          .padding(.vertical, 12)
+
+          if index < payload.candidates.count - 1 {
+            Divider().opacity(0.45)
+          }
+        }
+      }
+
+      Button {
+        onAction([
+          "action": "externalFieldSourcesSelect",
+          "selections": selectedSources,
+        ])
+        dismiss()
+      } label: {
+        Text(payload.doneLabel)
+          .font(.system(size: 15, weight: .bold))
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 12)
+      }
+      .buttonStyle(.borderedProminent)
+      .buttonBorderShape(.capsule)
+      .tint(echoAccent)
+      .disabled(!selectionComplete)
+    }
+    .padding(22)
+    .foregroundColor(echoInk)
+    .background(echoWarmBackground.ignoresSafeArea())
+    .preferredColorScheme(.light)
+    .interactiveDismissDisabled()
+  }
+
+  private var requiredFields: [String] {
+    var fields: [String] = []
+    if payload.candidates.contains(where: { $0.hasLyrics }) { fields.append("lyrics") }
+    if payload.candidates.contains(where: { $0.hasArtist }) { fields.append("artist") }
+    if payload.candidates.contains(where: { $0.hasArtwork }) { fields.append("albumArt") }
+    return fields
+  }
+
+  private var selectionComplete: Bool {
+    requiredFields.allSatisfy { selectedSources[$0] != nil }
+  }
+
+  private func fieldButton(
+    field: String,
+    label: String,
+    available: Bool,
+    candidate: EchoNativeExternalSourceCandidate
+  ) -> some View {
+    let selected = selectedSources[field] == candidate.id
+    return Button {
+      selectedSources[field] = candidate.id
+    } label: {
+      VStack(spacing: 3) {
+        Text(label)
+          .font(.system(size: 12, weight: .bold))
+        Text(available ? (selected ? payload.selectedLabel : payload.useSourceLabel) : payload.unavailableLabel)
+          .font(.system(size: 9, weight: .semibold))
+          .lineLimit(1)
+          .minimumScaleFactor(0.75)
+      }
+      .foregroundColor(selected ? Color.white : echoInk.opacity(available ? 0.72 : 0.28))
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 8)
+      .background(selected ? echoAccent : Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
+      .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.42), lineWidth: 0.7))
+    }
+    .buttonStyle(.plain)
+    .disabled(!available)
+    .accessibilityLabel("\(label), \(available ? payload.useSourceLabel : payload.unavailableLabel), \(candidate.sourceLabel)")
+  }
 }
 
 private struct EchoNativeQueueSheet: View {
   @ObservedObject var model: EchoNativePlayerModel
   let onAction: ([String: Any]) -> Void
   @Environment(\.dismiss) private var dismiss
+  @State private var showClearConfirmation = false
 
   var body: some View {
     VStack(spacing: 14) {
       HStack {
-        Text(model.queuePayload?.title ?? (model.language == "en" ? "Queue" : "播放列表"))
-          .font(.system(size: 24, weight: .bold, design: .rounded))
+        VStack(alignment: .leading, spacing: 3) {
+          Text(model.queuePayload?.title ?? (model.language == "en" ? "Queue" : "播放列表"))
+            .font(.system(size: 24, weight: .bold, design: .rounded))
+          if let subtitle = model.queuePayload?.subtitle, !subtitle.isEmpty {
+            Text(subtitle)
+              .font(.system(size: 11, weight: .semibold))
+              .foregroundColor(echoInk.opacity(0.5))
+              .lineLimit(1)
+          }
+        }
         Spacer()
-        if model.queuePayload?.isLocal == true, !(model.queuePayload?.items.isEmpty ?? true) {
+        if model.queuePayload?.canEdit == true, !(model.queuePayload?.items.isEmpty ?? true) {
           Button(model.queuePayload?.clearLabel ?? (model.language == "en" ? "Clear" : "清空")) {
-            onAction(["action": "queueClear"])
+            if model.queuePayload?.playlistId.isEmpty == false {
+              showClearConfirmation = true
+            } else {
+              clearQueue()
+            }
           }
           .font(.system(size: 12, weight: .bold))
           .foregroundColor(echoAccent)
+          .padding(.horizontal, 12)
+          .frame(minHeight: 44)
+          .contentShape(Capsule())
+          .echoGlass(tint: Color.white.opacity(0.1), in: Capsule())
+          .buttonStyle(.plain)
         }
         Button {
           dismiss()
         } label: {
           Image(systemName: "xmark")
             .font(.system(size: 13, weight: .bold))
-            .frame(width: 34, height: 34)
+            .frame(width: 44, height: 44)
             .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
         }
         .buttonStyle(.plain)
@@ -897,14 +1239,22 @@ private struct EchoNativeQueueSheet: View {
                   onAction([
                     "action": "queuePlay",
                     "id": item.trackId,
-                    "source": payload.isLocal ? "local" : "echo",
+                    "playlistId": payload.playlistId,
+                    "source": item.source,
                   ])
                 } label: {
                   HStack(spacing: 11) {
-                    Text(String(format: "%02d", index + 1))
-                      .font(.system(size: 11, weight: .bold, design: .monospaced))
-                      .foregroundColor(item.current ? echoAccent : echoInk.opacity(0.36))
-                      .frame(width: 24)
+                    Group {
+                      if item.current {
+                        Image(systemName: "play.circle.fill")
+                          .font(.system(size: 19, weight: .bold))
+                      } else {
+                        Text(String(format: "%02d", index + 1))
+                          .font(.system(size: 11, weight: .bold, design: .monospaced))
+                      }
+                    }
+                    .foregroundColor(item.current ? echoAccent : echoInk.opacity(0.36))
+                    .frame(width: 26)
                     VStack(alignment: .leading, spacing: 3) {
                       Text(item.title)
                         .font(.system(size: 14, weight: .bold))
@@ -921,27 +1271,46 @@ private struct EchoNativeQueueSheet: View {
                 }
                 .buttonStyle(.plain)
 
-                if payload.isLocal {
+                if payload.canEdit {
                   queueButton(
                     symbol: "chevron.up",
                     label: payload.moveUpLabel,
                     disabled: index == 0
                   ) {
-                    onAction(["action": "queueMove", "id": item.trackId, "value": -1])
+                    onAction([
+                      "action": "queueMove",
+                      "id": item.trackId,
+                      "playlistId": payload.playlistId,
+                      "source": item.source,
+                      "value": -1,
+                    ])
                   }
                   queueButton(
                     symbol: "chevron.down",
                     label: payload.moveDownLabel,
                     disabled: index == payload.items.count - 1
                   ) {
-                    onAction(["action": "queueMove", "id": item.trackId, "value": 1])
+                    onAction([
+                      "action": "queueMove",
+                      "id": item.trackId,
+                      "playlistId": payload.playlistId,
+                      "source": item.source,
+                      "value": 1,
+                    ])
                   }
                   queueButton(symbol: "xmark", label: payload.removeLabel) {
-                    onAction(["action": "queueRemove", "id": item.trackId])
+                    onAction([
+                      "action": "queueRemove",
+                      "id": item.trackId,
+                      "playlistId": payload.playlistId,
+                      "source": item.source,
+                    ])
                   }
                 }
               }
               .padding(.vertical, 11)
+              .padding(.horizontal, 7)
+              .background(item.current ? echoAccent.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 13))
               .overlay(alignment: .bottom) {
                 Rectangle().fill(echoInk.opacity(0.08)).frame(height: 0.7)
               }
@@ -963,6 +1332,26 @@ private struct EchoNativeQueueSheet: View {
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
     .preferredColorScheme(.light)
+    .confirmationDialog(
+      model.language == "en" ? "Clear this playlist?" : "清空这个歌单？",
+      isPresented: $showClearConfirmation,
+      titleVisibility: .visible
+    ) {
+      Button(model.queuePayload?.clearLabel ?? (model.language == "en" ? "Clear" : "清空"), role: .destructive) {
+        clearQueue()
+      }
+      Button(model.language == "en" ? "Cancel" : "取消", role: .cancel) {}
+    } message: {
+      Text(model.language == "en" ? "This removes every track from the saved playlist." : "这会从已保存歌单中移除全部歌曲。")
+    }
+  }
+
+  private func clearQueue() {
+    onAction([
+      "action": "queueClear",
+      "playlistId": model.queuePayload?.playlistId ?? "",
+      "source": model.queuePayload?.source ?? "echo",
+    ])
   }
 
   private func queueButton(
@@ -973,9 +1362,10 @@ private struct EchoNativeQueueSheet: View {
   ) -> some View {
     Button(action: action) {
       Image(systemName: symbol)
-        .font(.system(size: 10, weight: .bold))
-        .frame(width: 28, height: 28)
+        .font(.system(size: 12, weight: .bold))
+        .frame(width: 44, height: 44)
         .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+        .contentShape(Circle())
     }
     .buttonStyle(.plain)
     .disabled(disabled)
@@ -987,12 +1377,22 @@ private struct EchoNativeQueueSheet: View {
 struct EchoNativeArtwork: View {
   let urlString: String
   let onError: () -> Void
+  @StateObject private var localLoader = EchoNativeLocalArtworkLoader()
 
   var body: some View {
-    if let url = URL(string: urlString), url.isFileURL, let image = UIImage(contentsOfFile: url.path) {
-      Image(uiImage: image)
-        .resizable()
-        .scaledToFill()
+    if let url = URL(string: urlString), url.isFileURL {
+      Group {
+        if let image = localLoader.image {
+          Image(uiImage: image).resizable().scaledToFill()
+        } else {
+          placeholder
+        }
+      }
+      .onAppear { localLoader.load(url) }
+      .onChange(of: urlString) { _ in localLoader.load(url) }
+      .onChange(of: localLoader.failed) { failed in
+        if failed { onError() }
+      }
     } else if let url = URL(string: urlString), !urlString.isEmpty {
       AsyncImage(url: url) { phase in
         switch phase {
@@ -1019,6 +1419,41 @@ struct EchoNativeArtwork: View {
       Image(systemName: "waveform")
         .font(.system(size: 34, weight: .medium))
         .foregroundColor(echoInk.opacity(0.3))
+    }
+  }
+}
+
+private final class EchoNativeLocalArtworkLoader: ObservableObject {
+  private static let cache: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.countLimit = 80
+    return cache
+  }()
+  @Published var failed = false
+  @Published var image: UIImage?
+  private var requestedPath = ""
+
+  func load(_ url: URL) {
+    let path = url.path
+    guard path != requestedPath || image == nil else { return }
+    requestedPath = path
+    failed = false
+    if let cached = Self.cache.object(forKey: path as NSString) {
+      image = cached
+      return
+    }
+    image = nil
+    DispatchQueue.global(qos: .userInitiated).async {
+      let decoded = UIImage(contentsOfFile: path)
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.requestedPath == path else { return }
+        if let decoded {
+          Self.cache.setObject(decoded, forKey: path as NSString)
+          self.image = decoded
+        } else {
+          self.failed = true
+        }
+      }
     }
   }
 }
@@ -1097,7 +1532,7 @@ struct EchoNativeEqualizerSheet: View {
         } label: {
           Image(systemName: "xmark")
             .font(.system(size: 13, weight: .bold))
-            .frame(width: 34, height: 34)
+            .frame(width: 44, height: 44)
             .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
         }
         .buttonStyle(.plain)

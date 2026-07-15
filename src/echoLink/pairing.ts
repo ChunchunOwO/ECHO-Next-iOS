@@ -17,10 +17,13 @@ export const parsePairingUri = (input: string): EchoLinkConnection => {
     if (!host || !token) {
       throw new Error('配对链接缺少 host 或 token。');
     }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error('配对链接中的端口无效。');
+    }
 
     return {
       host,
-      port: Number.isFinite(port) && port > 0 ? port : 26789,
+      port,
       token,
       name: url.searchParams.get('name')?.trim() || 'PC ECHO',
       scheme: normalizeScheme(url.searchParams.get('scheme')),

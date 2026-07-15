@@ -37,9 +37,10 @@ import {
   EchoLinkNetworkError,
   normalizeEchoLinkHost,
   normalizeEchoLinkToken,
+  type EchoLinkClient,
   type EchoLinkConnection,
 } from './src/echoLink/client';
-import type { EchoLinkStatusResponse, EchoLinkTrackPreview } from './src/echoLink/types';
+import type { EchoLinkAlbumPreview, EchoLinkStatusResponse, EchoLinkTrackPreview } from './src/echoLink/types';
 import { parsePairingUri } from './src/echoLink/pairing';
 import {
   deleteLocalMusicTrack,
@@ -51,15 +52,48 @@ import {
   type LocalMusicTrack,
 } from './src/localMusic/library';
 import { loadSavedConnection, saveConnection } from './src/storage/connectionStore';
-import { loadSavedLocalMusicState, saveLocalMusicState } from './src/storage/localMusicStore';
+import {
+  loadSavedLocalMusicState,
+  saveLocalMusicState,
+  type SavedPlaylist,
+  type SavedPlaylistTrack,
+} from './src/storage/localMusicStore';
 import { loadSavedSettings, saveSettings, type SavedSettings } from './src/storage/settingsStore';
 import { SuperconIcon } from './src/components/SuperconIcon';
+import {
+  checkNeteaseQrLogin,
+  createNeteaseQrLogin,
+  getNeteasePlaybackUrl,
+  getNeteasePlaylistTracks,
+  getNeteasePlaylists,
+  getNeteaseProfile,
+  normalizeNeteaseApiBaseUrl,
+  searchNeteaseTracks,
+  type NeteasePlaylist,
+  type NeteaseProfile,
+} from './src/streaming/netease';
+import {
+  clearNeteaseSession,
+  loadNeteaseSession,
+  loadStreamingPreferences,
+  saveNeteaseSession,
+  saveStreamingPreferences,
+} from './src/storage/streamingStore';
 
-type AppPage = 'control' | 'library' | 'connect' | 'settings';
+type AppPage = 'control' | 'library' | 'search' | 'connect' | 'settings';
 type ConnectPanelMode = 'echo' | 'streaming';
-type PlaybackOutputMode = 'local' | 'pc' | 'phone';
+type PlaybackOutputMode = 'local' | 'pc' | 'phone' | 'streaming';
 type LibraryFilter = 'all' | 'streamable' | 'local';
-type LibrarySource = 'echo' | 'local';
+type LibrarySource = 'all' | 'echo' | 'local' | 'streaming';
+type StreamingLibraryMode = 'playlists' | 'search';
+type EchoLibraryView = 'albums' | 'artists' | 'songs';
+type LibraryCollectionPreview = {
+  artworkUrl: string | null;
+  id: string;
+  query: string;
+  subtitle: string;
+  title: string;
+};
 type LocalLibraryView = 'albums' | 'artists' | 'favorites' | 'formats' | 'recent' | 'songs';
 type SettingsSectionKey = 'audioTags' | 'externalData' | 'interface' | 'library' | 'playback' | 'storage';
 type EqPreset = 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
@@ -73,12 +107,29 @@ type PendingPcSeek = {
 };
 type ExternalTrackMetadata = {
   albumArt: string | null;
+  artist: string | null;
   error: string | null;
   lyrics: string | null;
   sourceTitle: string | null;
   status: 'error' | 'loading' | 'ready';
 };
-type ExternalMetadataSource = 'lrclib' | 'netease';
+type ExternalMetadataSource = 'lrcapi' | 'lrclib' | 'netease';
+type ExternalMetadataField = 'albumArt' | 'artist' | 'lyrics';
+const externalMetadataFields: ExternalMetadataField[] = ['lyrics', 'artist', 'albumArt'];
+type ExternalMetadataCandidate = {
+  albumArt: string | null;
+  artist: string | null;
+  id: ExternalMetadataSource;
+  lyrics: string | null;
+  sourceLabel: string;
+  title: string;
+};
+type PendingExternalMetadataSelection = {
+  candidates: ExternalMetadataCandidate[];
+  id: string;
+  metadataKey: string;
+};
+type PlaybackListTrack = EchoLinkTrackPreview & { source?: 'echo' | 'local' | 'streaming' };
 type MotionKey = boolean | number | string | null | undefined;
 type AnimatedButtonContentProps = {
   children: ReactNode;
@@ -312,6 +363,7 @@ const localLibraryViewOptions: LocalLibraryView[] = [
   'favorites',
   'recent',
 ];
+const echoLibraryViewOptions: EchoLibraryView[] = ['songs', 'albums', 'artists'];
 const eqPresetOptions: Array<{
   descriptionEn: string;
   descriptionZh: string;
@@ -341,6 +393,7 @@ const defaultSettings: SavedSettings = {
   echoConnectionEnabled: false,
   eqGains: [...defaultEqOption.gains],
   eqPreset: 'flat',
+  lrcApiExternalDataEnabled: false,
   lrclibExternalDataEnabled: false,
   neteaseExternalDataEnabled: false,
   loudnessNormalizationEnabled: false,
@@ -462,7 +515,7 @@ const formatBitDepthTag = (bitDepth: number | null | undefined): string | null =
   if (!Number.isFinite(bitDepth) || !bitDepth || bitDepth <= 0) {
     return null;
   }
-  return `${Math.round(bitDepth)}bit`;
+  return `${Math.round(bitDepth)}Bit`;
 };
 
 const formatBitrateTag = (bitrate: number | null | undefined): string | null => {
@@ -504,7 +557,7 @@ const tagsForTrack = (
     visibleTags.output ? formatOutputTag(options.outputMode) : null,
     visibleTags.source ? formatSourceTag(track?.sourceLabel) : null,
     visibleTags.streamability && track ? (track.canPlayOnPhone ? '可串流' : '仅控制') : null,
-    visibleTags.quality ? formatAudioQualityTag(track) : null,
+    ...(visibleTags.quality ? [formatCodecTag(track?.codec), formatQualityTag(track)] : []),
     visibleTags.bitrate ? formatBitrateTag(track?.bitrate) : null,
     visibleTags.duration && options.includeDuration && track ? formatTime(track.durationMs) : null,
   ];
@@ -526,6 +579,110 @@ const externalMetadataKeyForTrack = (track: EchoLinkTrackPreview | null | undefi
   }
   return `${title}::${normalizeExternalLookupValue(track?.artist)}`;
 };
+
+const playlistTrackFromPreview = (
+  track: EchoLinkTrackPreview,
+  source: 'echo' | 'local',
+): SavedPlaylistTrack => ({
+  album: track.album,
+  albumArtist: track.albumArtist,
+  artist: track.artist,
+  artworkUrl: track.artworkUrl,
+  canPlayOnPhone: track.canPlayOnPhone,
+  durationMs: track.durationMs,
+  id: track.id,
+  source,
+  sourceLabel: track.sourceLabel,
+  title: track.title,
+});
+
+const moveItem = <T,>(items: T[], index: number, direction: -1 | 1): T[] => {
+  const targetIndex = index + direction;
+  if (index < 0 || targetIndex < 0 || targetIndex >= items.length) return items;
+  const next = [...items];
+  const [item] = next.splice(index, 1);
+  if (item === undefined) return items;
+  next.splice(targetIndex, 0, item);
+  return next;
+};
+
+const normalizedNeteaseOrigin = (value: string): string => {
+  try {
+    return normalizeNeteaseApiBaseUrl(value);
+  } catch {
+    return '';
+  }
+};
+
+const sortTracksBy = <T extends EchoLinkTrackPreview>(
+  tracks: T[],
+  label: (track: T) => string,
+): T[] => [...tracks].sort((a, b) => label(a).localeCompare(label(b)) || a.title.localeCompare(b.title));
+
+const buildTrackCollections = <T extends EchoLinkTrackPreview>(
+  tracks: T[],
+  titleForTrack: (track: T) => string | string[],
+  idForTitle: (title: string) => string,
+  subtitleForCount: (count: number) => string,
+  artworkForTitle?: (title: string) => string | null,
+): LibraryCollectionPreview[] => {
+  const groups = new Map<string, T[]>();
+  tracks.forEach((track) => {
+    const titles = titleForTrack(track);
+    (Array.isArray(titles) ? titles : [titles]).forEach((title) => {
+      const group = groups.get(title);
+      if (group) group.push(track);
+      else groups.set(title, [track]);
+    });
+  });
+  return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([title, items]) => ({
+    artworkUrl: artworkForTitle?.(title) ?? items.find((item) => item.artworkUrl)?.artworkUrl ?? null,
+    id: idForTitle(title),
+    query: title,
+    subtitle: subtitleForCount(items.length),
+    title,
+  }));
+};
+
+const artistNamesForTrack = (track: EchoLinkTrackPreview, fallback: string): string[] => {
+  const names = track.artist
+    ?.split(/\s*(?:,|;|，|；|、)\s*|\s+\/\s+/)
+    .map((name) => name.trim())
+    .filter(Boolean) ?? [];
+  return names.length > 0 ? [...new Set(names)] : [fallback];
+};
+
+const fetchAllPages = async <T extends { id: string }>(
+  fetchPage: (page: number, pageSize: number) => Promise<{ items: T[]; totalCount: number }>,
+): Promise<T[]> => {
+  const items = new Map<string, T>();
+  const pageSize = 100;
+  let page = 1;
+  let totalCount = Number.POSITIVE_INFINITY;
+  while (items.size < totalCount) {
+    const response = await fetchPage(page, pageSize);
+    totalCount = response.totalCount;
+    const previousSize = items.size;
+    response.items.forEach((item) => items.set(item.id, item));
+    if (response.items.length === 0 || items.size === previousSize) break;
+    page += 1;
+  }
+  return Array.from(items.values());
+};
+
+const fetchAllEchoTracks = (client: EchoLinkClient): Promise<EchoLinkTrackPreview[]> => (
+  fetchAllPages(async (page, pageSize) => {
+    const response = await client.getLibraryTracks({ page, pageSize });
+    return { items: response.tracks, totalCount: response.totalCount };
+  })
+);
+
+const fetchAllEchoAlbums = (client: EchoLinkClient): Promise<EchoLinkAlbumPreview[]> => (
+  fetchAllPages(async (page, pageSize) => {
+    const response = await client.getLibraryAlbums({ page, pageSize });
+    return { items: response.albums, totalCount: response.totalCount };
+  })
+);
 
 const fetchJson = async <T,>(url: string, headers: Record<string, string> = {}): Promise<T> => {
   const response = await fetch(url, {
@@ -560,8 +717,43 @@ const lookupLrclibMetadata = async (track: EchoLinkTrackPreview): Promise<Partia
     return null;
   }
   return {
+    artist: match.artistName ?? null,
     lyrics: match.syncedLyrics ?? match.plainLyrics ?? null,
     sourceTitle: match.trackName ?? match.name ?? null,
+  };
+};
+
+type LrcApiSearchItem = {
+  artist?: string;
+  cover?: string;
+  cover_format?: string;
+  lrc?: string;
+  lyrics?: string;
+  title?: string;
+};
+
+const lookupLrcApiMetadata = async (track: EchoLinkTrackPreview): Promise<Partial<ExternalTrackMetadata> | null> => {
+  const params = new URLSearchParams({
+    album: track.album ?? '',
+    artist: track.artist ?? '',
+    title: track.title ?? '',
+  });
+  const results = await fetchJson<LrcApiSearchItem[]>(`https://api.lrc.cx/jsonapi?${params.toString()}`);
+  const title = normalizeExternalLookupValue(track.title);
+  const artist = normalizeExternalLookupValue(track.artist);
+  const usable = results.filter((item) => item.cover || item.lrc || item.lyrics);
+  const match = usable.find((item) => (
+    normalizeExternalLookupValue(item.title) === title
+    && (!artist || normalizeExternalLookupValue(item.artist).includes(artist))
+  )) ?? usable[0];
+  if (!match) {
+    return null;
+  }
+  return {
+    albumArt: match.cover ?? match.cover_format?.replace('{w}', '1200').replace('{h}', '1200') ?? null,
+    artist: match.artist ?? null,
+    lyrics: match.lrc?.trim() || match.lyrics?.trim() || null,
+    sourceTitle: match.title ?? null,
   };
 };
 
@@ -662,17 +854,21 @@ const lookupNeteaseMetadata = async (
 
   return {
     albumArt: detail?.songs?.[0]?.album?.picUrl ?? null,
+    artist: song.artists?.map((artist) => artist.name).filter(Boolean).join(', ') || null,
     lyrics,
     sourceTitle: song.name ?? detail?.songs?.[0]?.name ?? null,
   };
 };
 
-const lookupExternalTrackMetadata = async (
+const lookupExternalMetadataCandidates = async (
   track: EchoLinkTrackPreview,
   sources: Record<ExternalMetadataSource, boolean>,
   options: { includeNeteaseLyrics?: boolean } = {},
-): Promise<ExternalTrackMetadata> => {
+): Promise<ExternalMetadataCandidate[]> => {
   const lookups: Array<Promise<{ source: ExternalMetadataSource; value: Partial<ExternalTrackMetadata> | null }>> = [];
+  if (sources.lrcapi) {
+    lookups.push(lookupLrcApiMetadata(track).then((value) => ({ source: 'lrcapi', value })));
+  }
   if (sources.lrclib) {
     lookups.push(lookupLrclibMetadata(track).then((value) => ({ source: 'lrclib', value })));
   }
@@ -683,34 +879,52 @@ const lookupExternalTrackMetadata = async (
   }
 
   const results = await Promise.allSettled(lookups);
-  const values = results
-    .filter((result): result is PromiseFulfilledResult<{ source: ExternalMetadataSource; value: Partial<ExternalTrackMetadata> | null }> => result.status === 'fulfilled')
+  const fulfilled = results
+    .filter((result): result is PromiseFulfilledResult<{ source: ExternalMetadataSource; value: Partial<ExternalTrackMetadata> | null }> => result.status === 'fulfilled');
+  if (lookups.length > 0 && fulfilled.length === 0) {
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    throw failure?.reason ?? new Error('External metadata lookup failed.');
+  }
+  const values = fulfilled
     .map((result) => result.value)
     .filter((result) => result.value);
-  const lrclib = values.find((result) => result.source === 'lrclib')?.value;
-  const netease = values.find((result) => result.source === 'netease')?.value;
-  // Lyrics prefer LRCLIB; NetEase supplements cover art and lyric fallback.
-  const lyrics = lrclib?.lyrics ?? netease?.lyrics ?? null;
-  const albumArt = netease?.albumArt ?? null;
-
-  if (!lyrics && !albumArt) {
-    return {
-      albumArt: null,
-      error: 'No external metadata found.',
-      lyrics: null,
-      sourceTitle: null,
-      status: 'error',
-    };
+  if (values.length === 0) {
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) throw failure.reason;
   }
-
-  return {
-    albumArt,
-    error: null,
-    lyrics,
-    sourceTitle: lrclib?.sourceTitle ?? netease?.sourceTitle ?? null,
-    status: 'ready',
+  const sourceLabels: Record<ExternalMetadataSource, string> = {
+    lrcapi: 'LrcAPI',
+    lrclib: 'LRCLIB',
+    netease: 'NetEase Cloud Music',
   };
+  return values
+    .map(({ source, value }) => ({
+      albumArt: value?.albumArt ?? null,
+      artist: value?.artist ?? null,
+      id: source,
+      lyrics: value?.lyrics ?? null,
+      sourceLabel: sourceLabels[source],
+      title: value?.sourceTitle || track.title || sourceLabels[source],
+    }))
+    .filter((candidate) => Boolean(candidate.albumArt || candidate.artist || candidate.lyrics));
 };
+
+const metadataFromExternalCandidate = (candidate: ExternalMetadataCandidate): ExternalTrackMetadata => ({
+  albumArt: candidate.albumArt,
+  artist: candidate.artist,
+  error: null,
+  lyrics: candidate.lyrics,
+  sourceTitle: candidate.title,
+  status: 'ready',
+});
+
+const fieldSourcesFromExternalCandidate = (
+  candidate: ExternalMetadataCandidate,
+): Partial<Record<ExternalMetadataField, ExternalMetadataSource>> => ({
+  ...(candidate.albumArt ? { albumArt: candidate.id } : {}),
+  ...(candidate.artist ? { artist: candidate.id } : {}),
+  ...(candidate.lyrics ? { lyrics: candidate.id } : {}),
+});
 
 const initialConnection: EchoLinkConnection = {
   host: '',
@@ -719,6 +933,12 @@ const initialConnection: EchoLinkConnection = {
   name: 'PC ECHO',
   scheme: 'http',
 };
+
+type EchoLinkConnectionDraft = Omit<EchoLinkConnection, 'port'> & { port: string };
+const connectionDraftFrom = (connection: EchoLinkConnection): EchoLinkConnectionDraft => ({
+  ...connection,
+  port: String(connection.port),
+});
 
 const formatRequestError = (error: unknown): string => {
   if (error instanceof EchoLinkNetworkError) {
@@ -745,7 +965,7 @@ const formatPhoneAudioError = (error: unknown): string => {
 
 const dspStreamCacheDirectory = `${FileSystem.cacheDirectory ?? ''}echo-dsp-streams/`;
 
-const extensionForDspCache = (track: EchoLinkTrackPreview): string => {
+const extensionForDspCache = (track: EchoLinkTrackPreview, streamUrl = ''): string => {
   const codec = track.codec?.trim().toLowerCase();
   if (codec === 'mp3' || codec === 'flac' || codec === 'wav' || codec === 'aac') {
     return codec;
@@ -753,6 +973,8 @@ const extensionForDspCache = (track: EchoLinkTrackPreview): string => {
   if (codec === 'alac' || codec === 'm4a' || codec === 'mp4') {
     return 'm4a';
   }
+  const urlExtension = streamUrl.split(/[?#]/u, 1)[0]?.split('.').pop()?.toLowerCase();
+  if (urlExtension && ['aac', 'flac', 'm4a', 'mp3', 'wav'].includes(urlExtension)) return urlExtension;
   return 'm4a';
 };
 
@@ -760,15 +982,29 @@ const safeCacheToken = (value: string): string => (
   value.replace(/[^a-z0-9._-]/giu, '_').slice(0, 72) || `track-${Date.now()}`
 );
 
-const downloadStreamForDsp = async (streamUrl: string, track: EchoLinkTrackPreview): Promise<string> => {
+const downloadStreamForDsp = async (
+  streamUrl: string,
+  track: EchoLinkTrackPreview,
+  namespace: string,
+): Promise<string> => {
   if (!FileSystem.cacheDirectory) {
     throw new Error('无法访问临时音频缓存目录。');
   }
   await FileSystem.makeDirectoryAsync(dspStreamCacheDirectory, { intermediates: true }).catch(() => undefined);
-  const extension = extensionForDspCache(track);
-  const uri = `${dspStreamCacheDirectory}${safeCacheToken(track.id)}-${Date.now()}.${extension}`;
-  const result = await FileSystem.downloadAsync(streamUrl, uri);
-  return result.uri;
+  const extension = extensionForDspCache(track, streamUrl);
+  const uri = `${dspStreamCacheDirectory}${safeCacheToken(`${namespace}-${track.id}`)}.${extension}`;
+  const markerUri = `${uri}.complete`;
+  const temporaryUri = `${uri}.download`;
+  const cached = await FileSystem.getInfoAsync(uri);
+  const marker = await FileSystem.getInfoAsync(markerUri);
+  if (cached.exists && marker.exists && (cached.size ?? 0) > 0) return uri;
+  await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
+  await FileSystem.deleteAsync(markerUri, { idempotent: true }).catch(() => undefined);
+  await FileSystem.deleteAsync(temporaryUri, { idempotent: true }).catch(() => undefined);
+  const result = await FileSystem.downloadAsync(streamUrl, temporaryUri);
+  await FileSystem.moveAsync({ from: result.uri, to: uri });
+  await FileSystem.writeAsStringAsync(markerUri, 'ok');
+  return uri;
 };
 
 type ErrorBoundaryState = {
@@ -817,25 +1053,46 @@ function EchoLinkApp(): ReactElement {
   const [page, setPage] = useState<AppPage>('control');
   const [pageSlideDirection, setPageSlideDirection] = useState(1);
   const [connection, setConnection] = useState<EchoLinkConnection>(initialConnection);
+  const [connectionDraft, setConnectionDraft] = useState<EchoLinkConnectionDraft>(() => connectionDraftFrom(initialConnection));
   const [connectPanelMode, setConnectPanelMode] = useState<ConnectPanelMode>('echo');
   const [pairingText, setPairingText] = useState('');
   const [status, setStatus] = useState<EchoLinkStatusResponse | null>(null);
   const [statusReceivedAtMs, setStatusReceivedAtMs] = useState(() => Date.now());
   const [clockMs, setClockMs] = useState(() => Date.now());
   const [tracks, setTracks] = useState<EchoLinkTrackPreview[]>([]);
+  const [albums, setAlbums] = useState<EchoLinkAlbumPreview[]>([]);
   const [localTracks, setLocalTracks] = useState<LocalMusicTrack[]>([]);
   const [localStorageBytes, setLocalStorageBytes] = useState(0);
   const [query, setQuery] = useState('');
-  const queryRef = useRef(query);
-  queryRef.current = query;
-  const prevQueryRef = useRef(query);
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
   const [librarySource, setLibrarySource] = useState<LibrarySource>('echo');
+  const [echoLibraryView, setEchoLibraryView] = useState<EchoLibraryView>('songs');
   const [localLibraryView, setLocalLibraryView] = useState<LocalLibraryView>('songs');
   const [favoriteLocalTrackIds, setFavoriteLocalTrackIds] = useState<string[]>([]);
   const [recentLocalTrackIds, setRecentLocalTrackIds] = useState<string[]>([]);
   const [localQueueTrackIds, setLocalQueueTrackIds] = useState<string[]>([]);
+  const [localQueueActive, setLocalQueueActive] = useState(false);
+  const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
+  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+  const [activePlaybackPlaylistId, setActivePlaybackPlaylistId] = useState<string | null>(null);
+  const [streamingApiBaseUrl, setStreamingApiBaseUrl] = useState('');
+  const [streamingCookie, setStreamingCookie] = useState('');
+  const [streamingSessionOrigin, setStreamingSessionOrigin] = useState('');
+  const [streamingProfile, setStreamingProfile] = useState<NeteaseProfile | null>(null);
+  const [streamingPlaylists, setStreamingPlaylists] = useState<NeteasePlaylist[]>([]);
+  const [streamingTracks, setStreamingTracks] = useState<EchoLinkTrackPreview[]>([]);
+  const [streamingTrack, setStreamingTrack] = useState<EchoLinkTrackPreview | null>(null);
+  const [streamingLibraryMode, setStreamingLibraryMode] = useState<StreamingLibraryMode>('search');
+  const [streamingQrKey, setStreamingQrKey] = useState('');
+  const [streamingQrUrl, setStreamingQrUrl] = useState('');
+  const [streamingStatusText, setStreamingStatusText] = useState('');
+  const [streamingBusy, setStreamingBusy] = useState(false);
+  const [favoriteStreamingPlaylistIds, setFavoriteStreamingPlaylistIds] = useState<string[]>([]);
+  const [pinnedStreamingPlaylistIds, setPinnedStreamingPlaylistIds] = useState<string[]>([]);
+  const [selectedStreamingPlaylistId, setSelectedStreamingPlaylistId] = useState<string | null>(null);
+  const [streamingPreferencesLoaded, setStreamingPreferencesLoaded] = useState(false);
   const [localMusicStateLoaded, setLocalMusicStateLoaded] = useState(false);
+  const [localLibraryLoaded, setLocalLibraryLoaded] = useState(false);
   const [appLanguage, setAppLanguage] = useState<AppLanguage>('zh');
   const [audioTagVisibility, setAudioTagVisibility] = useState<AudioTagVisibility>(defaultAudioTagVisibility);
   const [defaultPage, setDefaultPage] = useState<AppPage>(defaultSettings.defaultPage);
@@ -850,6 +1107,7 @@ function EchoLinkApp(): ReactElement {
   const [eqPanelOpen, setEqPanelOpen] = useState(false);
   const [eqPanelVisible, setEqPanelVisible] = useState(false);
   const [activeEqBand, setActiveEqBand] = useState(4);
+  const [lrcApiExternalDataEnabled, setLrcApiExternalDataEnabled] = useState(defaultSettings.lrcApiExternalDataEnabled);
   const [lrclibExternalDataEnabled, setLrclibExternalDataEnabled] = useState(defaultSettings.lrclibExternalDataEnabled);
   const [neteaseExternalDataEnabled, setNeteaseExternalDataEnabled] = useState(defaultSettings.neteaseExternalDataEnabled);
   const [loudnessNormalizationEnabled, setLoudnessNormalizationEnabled] = useState(defaultSettings.loudnessNormalizationEnabled);
@@ -884,6 +1142,11 @@ function EchoLinkApp(): ReactElement {
     volume: 1,
   });
   const [externalMetadataByKey, setExternalMetadataByKey] = useState<Record<string, ExternalTrackMetadata>>({});
+  const [externalMetadataFieldSourcesByKey, setExternalMetadataFieldSourcesByKey] = useState<Record<
+    string,
+    Partial<Record<ExternalMetadataField, ExternalMetadataSource>>
+  >>({});
+  const [pendingExternalMetadataSelection, setPendingExternalMetadataSelection] = useState<PendingExternalMetadataSelection | null>(null);
   const [phoneVolume, setPhoneVolume] = useState(1);
   const [phoneSeekPreviewMs, setPhoneSeekPreviewMs] = useState<number | null>(null);
   const [progressTrackWidth, setProgressTrackWidth] = useState(0);
@@ -902,16 +1165,49 @@ function EchoLinkApp(): ReactElement {
   const statusPollInFlight = useRef(false);
   const sliderInteractionInFlight = useRef(false);
   const latestStatusRef = useRef<EchoLinkStatusResponse | null>(null);
+  const lastRemotePlaybackUpdatedAtRef = useRef(0);
   const pendingPcSeekRef = useRef<PendingPcSeek | null>(null);
+  const pcAutoAdvanceArmedRef = useRef(true);
   const pcRepeatArmedRef = useRef(true);
+  const phoneAutoAdvanceArmedRef = useRef(true);
   const phoneRepeatArmedRef = useRef(true);
+  const devicePlaybackRequestRef = useRef(0);
+  const activeExternalMetadataKeyRef = useRef<string | null>(null);
   const externalMetadataLookupKeysRef = useRef<Set<string>>(new Set());
+  const busyCountRef = useRef(0);
+  const streamingBusyCountRef = useRef(0);
+  const beginBusy = useCallback(() => {
+    busyCountRef.current += 1;
+    setBusy(true);
+  }, []);
+  const endBusy = useCallback(() => {
+    busyCountRef.current = Math.max(0, busyCountRef.current - 1);
+    setBusy(busyCountRef.current > 0);
+  }, []);
+  const beginStreamingBusy = useCallback(() => {
+    streamingBusyCountRef.current += 1;
+    setStreamingBusy(true);
+  }, []);
+  const endStreamingBusy = useCallback(() => {
+    streamingBusyCountRef.current = Math.max(0, streamingBusyCountRef.current - 1);
+    setStreamingBusy(streamingBusyCountRef.current > 0);
+  }, []);
 
   const client = useMemo(() => (
     echoConnectionEnabled && connection.host.trim() && connection.token.trim()
       ? createEchoLinkClient(connection)
       : null
   ), [connection, echoConnectionEnabled]);
+  const activeClientRef = useRef<EchoLinkClient | null>(client);
+  activeClientRef.current = client;
+  const connectionDraftDirty = normalizeEchoLinkHost(connectionDraft.host) !== connection.host
+    || normalizeEchoLinkToken(connectionDraft.token) !== connection.token
+    || Number(connectionDraft.port) !== connection.port;
+  const streamingSessionMatchesApi = Boolean(
+    streamingCookie
+    && streamingSessionOrigin
+    && normalizedNeteaseOrigin(streamingApiBaseUrl) === streamingSessionOrigin
+  );
 
   const markArtworkUrlFailed = useCallback((url: string | null | undefined) => {
     if (!url) {
@@ -1009,7 +1305,7 @@ function EchoLinkApp(): ReactElement {
     controllingMode: 'Controlling Mode',
     customEq: 'Custom',
     defaultLibrarySource: 'Default library source',
-    defaultLibrarySourceHint: 'Choose whether the library page starts with ECHO or local songs.',
+    defaultLibrarySourceHint: 'Choose whether the library starts with all, ECHO, or local content.',
     defaultLocalView: 'Default local view',
     defaultLocalViewHint: 'Choose the default grouping for local music.',
     defaultPage: 'Launch page',
@@ -1059,6 +1355,8 @@ function EchoLinkApp(): ReactElement {
     localPlayback: 'Local',
     localPlaybackA11y: 'Local playback',
     localMode: 'Local Mode',
+    lrcApiSource: 'LrcAPI',
+    lrcApiSourceHint: 'Fetches artwork, lyrics, artist, and other song metadata.\nRequires the phone to reach the internet.',
     lrclibSource: 'LRCLIB',
     lrclibSourceHint: 'Can fetch song lyrics and related lyric data.\nRequires the phone to reach the internet.',
     loudness: 'Loudness normalization',
@@ -1107,6 +1405,7 @@ function EchoLinkApp(): ReactElement {
     scan: 'Scan',
     scanning: 'Scanning',
     searchPlaceholder: 'Search tracks, artists, or albums',
+    search: 'Search',
     settings: 'Settings',
     settingsCenter: 'Settings Center',
     settingsDescription: 'Open a category, then tune only the settings under it.',
@@ -1181,7 +1480,7 @@ function EchoLinkApp(): ReactElement {
     controllingMode: 'Controlling Mode',
     customEq: '手动',
     defaultLibrarySource: '默认曲库源',
-    defaultLibrarySourceHint: '选择曲库页默认显示 ECHO 曲库还是手机本地曲库。',
+    defaultLibrarySourceHint: '选择曲库页默认显示全部、ECHO 或手机本地内容。',
     defaultLocalView: '默认本地视图',
     defaultLocalViewHint: '选择本地曲库默认按歌曲、专辑、艺术家或格式展示。',
     defaultPage: '启动页面',
@@ -1231,6 +1530,8 @@ function EchoLinkApp(): ReactElement {
     localPlayback: '本地',
     localPlaybackA11y: '本地播放',
     localMode: 'Local Mode',
+    lrcApiSource: 'LrcAPI',
+    lrcApiSourceHint: '可获取封面、歌词、艺术家等歌曲信息\n需要保证手机能连接到外网才可获取',
     lrclibSource: 'LRCLIB',
     lrclibSourceHint: '可获取歌曲歌词等\n需要保证手机能连接到外网才可获取',
     loudness: '响度归一化',
@@ -1279,6 +1580,7 @@ function EchoLinkApp(): ReactElement {
     scan: '扫描',
     scanning: '扫描中',
     searchPlaceholder: '搜索歌曲、艺术家或专辑',
+    search: '搜索',
     settings: '设置',
     settingsCenter: '设置中心',
     settingsDescription: '按类型展开设置，只调整当前需要的那一组。',
@@ -1350,6 +1652,8 @@ function EchoLinkApp(): ReactElement {
   }), [page, switchPage]);
 
   const applyStatus = useCallback((nextStatus: EchoLinkStatusResponse, options: { force?: boolean } = {}) => {
+    const nextUpdatedAt = nextStatus.playback.updatedAtEpochMs;
+    if (!options.force && nextUpdatedAt > 0 && nextUpdatedAt < lastRemotePlaybackUpdatedAtRef.current) return;
     const pendingSeek = pendingPcSeekRef.current;
     if (pendingSeek && !options.force) {
       const nextTrackId = nextStatus.playback.track?.id ?? null;
@@ -1364,6 +1668,7 @@ function EchoLinkApp(): ReactElement {
       }
       pendingPcSeekRef.current = null;
     }
+    if (nextUpdatedAt > 0) lastRemotePlaybackUpdatedAtRef.current = nextUpdatedAt;
     latestStatusRef.current = nextStatus;
     setStatus(nextStatus);
     setStatusReceivedAtMs(Date.now());
@@ -1402,27 +1707,37 @@ function EchoLinkApp(): ReactElement {
     if (!client) {
       return;
     }
-    setBusy(true);
+    beginBusy();
     setError(null);
     setLibraryError(null);
     try {
       const nextStatus = await client.getStatus();
+      if (activeClientRef.current !== client) {
+        endBusy();
+        return;
+      }
       applyStatus(nextStatus);
     } catch (refreshError) {
-      setError(formatRequestError(refreshError));
-      setBusy(false);
+      if (activeClientRef.current === client) setError(formatRequestError(refreshError));
+      endBusy();
       return;
     }
 
     try {
-      const library = await client.getLibraryTracks({ page: 1, pageSize: 20, query: queryRef.current });
-      setTracks(library.tracks);
+      const [libraryResult, albumsResult] = await Promise.allSettled([
+        fetchAllEchoTracks(client),
+        fetchAllEchoAlbums(client),
+      ]);
+      if (activeClientRef.current !== client) return;
+      if (libraryResult.status === 'rejected') throw libraryResult.reason;
+      setTracks(libraryResult.value);
+      if (albumsResult.status === 'fulfilled') setAlbums(albumsResult.value);
     } catch (libraryLoadError) {
       setLibraryError(`已连接电脑端，但曲库加载失败：${formatRequestError(libraryLoadError)}`);
     } finally {
-      setBusy(false);
+      endBusy();
     }
-  }, [applyStatus, client]);
+  }, [applyStatus, beginBusy, client, endBusy]);
 
   const refreshLocalLibrary = useCallback(async () => {
     setLocalLibraryBusy(true);
@@ -1430,6 +1745,7 @@ function EchoLinkApp(): ReactElement {
     try {
       setLocalTracks(await scanLocalMusic());
       setLocalStorageBytes(await getLocalMusicStorageUsage());
+      setLocalLibraryLoaded(true);
     } catch (scanError) {
       setLocalLibraryError(formatRequestError(scanError));
     } finally {
@@ -1442,6 +1758,8 @@ function EchoLinkApp(): ReactElement {
     try {
       if (page === 'library' && librarySource === 'local') {
         await refreshLocalLibrary();
+      } else if ((page === 'library' && librarySource === 'all') || page === 'search') {
+        await Promise.all([refresh(), refreshLocalLibrary()]);
       } else {
         await refresh();
       }
@@ -1452,28 +1770,43 @@ function EchoLinkApp(): ReactElement {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.all([loadSavedConnection(), loadSavedSettings(), loadSavedLocalMusicState()]).then(([savedConn, savedSettings, savedLocalMusic]) => {
+    void Promise.all([
+      loadSavedConnection(),
+      loadSavedSettings(),
+      loadSavedLocalMusicState(),
+      loadStreamingPreferences(),
+      loadNeteaseSession(),
+    ]).then(([savedConn, savedSettings, savedLocalMusic, savedStreaming, savedSession]) => {
       if (!mounted) {
         return;
       }
       if (savedConn) {
         setConnection(savedConn);
+        setConnectionDraft(connectionDraftFrom(savedConn));
       }
-      if (savedSettings.appLanguage) {
+      setStreamingApiBaseUrl(savedStreaming.apiBaseUrl);
+      setFavoriteStreamingPlaylistIds(savedStreaming.favoritePlaylistIds);
+      setPinnedStreamingPlaylistIds(savedStreaming.pinnedPlaylistIds);
+      if (savedSession) {
+        setStreamingCookie(savedSession.cookie);
+        setStreamingSessionOrigin(savedSession.apiBaseUrl);
+      }
+      setStreamingPreferencesLoaded(true);
+      if (savedSettings.appLanguage === 'zh' || savedSettings.appLanguage === 'en') {
         setAppLanguage(savedSettings.appLanguage);
       }
-      if (savedSettings.audioTagVisibility) {
+      if (savedSettings.audioTagVisibility && typeof savedSettings.audioTagVisibility === 'object') {
         setAudioTagVisibility((current) => ({ ...current, ...savedSettings.audioTagVisibility }));
       }
-      if (savedSettings.defaultPage) {
+      if (savedSettings.defaultPage && appPages.includes(savedSettings.defaultPage)) {
         setDefaultPage(savedSettings.defaultPage);
         setPage(savedSettings.defaultPage);
       }
-      if (savedSettings.defaultLibrarySource) {
+      if (savedSettings.defaultLibrarySource && ['all', 'echo', 'local', 'streaming'].includes(savedSettings.defaultLibrarySource)) {
         setDefaultLibrarySource(savedSettings.defaultLibrarySource);
         setLibrarySource(savedSettings.defaultLibrarySource);
       }
-      if (savedSettings.defaultLocalLibraryView) {
+      if (savedSettings.defaultLocalLibraryView && localLibraryViewOptions.includes(savedSettings.defaultLocalLibraryView)) {
         setDefaultLocalLibraryView(savedSettings.defaultLocalLibraryView);
         setLocalLibraryView(savedSettings.defaultLocalLibraryView);
       }
@@ -1499,6 +1832,9 @@ function EchoLinkApp(): ReactElement {
           setEqGains([...savedEqOption.gains]);
         }
       }
+      if (typeof savedSettings.lrcApiExternalDataEnabled === 'boolean') {
+        setLrcApiExternalDataEnabled(savedSettings.lrcApiExternalDataEnabled);
+      }
       if (typeof savedSettings.lrclibExternalDataEnabled === 'boolean') {
         setLrclibExternalDataEnabled(savedSettings.lrclibExternalDataEnabled);
       }
@@ -1513,7 +1849,9 @@ function EchoLinkApp(): ReactElement {
       }
       setSettingsLoaded(true);
       setFavoriteLocalTrackIds(savedLocalMusic.favoriteTrackIds);
+      setLocalQueueActive(savedLocalMusic.queueActive);
       setLocalQueueTrackIds(savedLocalMusic.queueTrackIds);
+      setPlaylists(savedLocalMusic.playlists);
       setRecentLocalTrackIds(savedLocalMusic.recentTrackIds);
       setLocalMusicStateLoaded(true);
     });
@@ -1529,6 +1867,7 @@ function EchoLinkApp(): ReactElement {
         if (mounted) {
           setLocalTracks(nextTracks);
           setLocalStorageBytes(nextStorageBytes);
+          setLocalLibraryLoaded(true);
         }
       })
       .catch((scanError) => {
@@ -1543,6 +1882,7 @@ function EchoLinkApp(): ReactElement {
   }, []);
 
   useEffect(() => {
+    lastRemotePlaybackUpdatedAtRef.current = 0;
     if (client) {
       void refresh();
     }
@@ -1557,23 +1897,6 @@ function EchoLinkApp(): ReactElement {
     setLibraryError(null);
     setStatus(null);
   }, [echoConnectionEnabled]);
-
-  useEffect(() => {
-    if (librarySource !== 'echo' || !client || prevQueryRef.current === query) {
-      prevQueryRef.current = query;
-      return;
-    }
-    prevQueryRef.current = query;
-    const timer = setTimeout(async () => {
-      try {
-        const lib = await client.getLibraryTracks({ page: 1, pageSize: 20, query });
-        setTracks(lib.tracks);
-      } catch (searchError) {
-        setLibraryError(`已连接电脑端，但曲库加载失败：${formatRequestError(searchError)}`);
-      }
-    }, 350);
-    return () => clearTimeout(timer);
-  }, [client, librarySource, query]);
 
   useEffect(() => {
     if (!settingsLoaded) {
@@ -1591,10 +1914,17 @@ function EchoLinkApp(): ReactElement {
       echoConnectionEnabled,
       eqGains,
       eqPreset,
+      lrcApiExternalDataEnabled,
       lrclibExternalDataEnabled,
       loudnessNormalizationEnabled,
       neteaseExternalDataEnabled,
       showArtworkGlow,
+    }).catch((saveError) => {
+      showErrorAlert(
+        languageIsEnglish ? 'Settings not saved' : '设置未保存',
+        formatRequestError(saveError),
+        'settings-save-error',
+      );
     });
   }, [
     appLanguage,
@@ -1608,11 +1938,13 @@ function EchoLinkApp(): ReactElement {
     echoConnectionEnabled,
     eqGains,
     eqPreset,
+    lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     loudnessNormalizationEnabled,
     neteaseExternalDataEnabled,
     settingsLoaded,
     showArtworkGlow,
+    showErrorAlert,
   ]);
 
   useEffect(() => {
@@ -1621,17 +1953,104 @@ function EchoLinkApp(): ReactElement {
     }
     void saveLocalMusicState({
       favoriteTrackIds: favoriteLocalTrackIds,
+      playlists,
+      queueActive: localQueueActive,
       queueTrackIds: localQueueTrackIds,
       recentTrackIds: recentLocalTrackIds,
+    }).catch((saveError) => {
+      showErrorAlert(
+        languageIsEnglish ? 'Library changes not saved' : '曲库更改未保存',
+        formatRequestError(saveError),
+        'local-library-save-error',
+      );
     });
-  }, [favoriteLocalTrackIds, localMusicStateLoaded, localQueueTrackIds, recentLocalTrackIds]);
+  }, [favoriteLocalTrackIds, languageIsEnglish, localMusicStateLoaded, localQueueActive, localQueueTrackIds, playlists, recentLocalTrackIds, showErrorAlert]);
 
   useEffect(() => {
+    if (!localLibraryLoaded || !localMusicStateLoaded) return;
     const validIds = new Set(localTracks.map((track) => track.id));
     setFavoriteLocalTrackIds((current) => current.filter((id) => validIds.has(id)));
     setLocalQueueTrackIds((current) => current.filter((id) => validIds.has(id)));
     setRecentLocalTrackIds((current) => current.filter((id) => validIds.has(id)));
-  }, [localTracks]);
+  }, [localLibraryLoaded, localMusicStateLoaded, localTracks]);
+
+  useEffect(() => {
+    if (!streamingPreferencesLoaded) return;
+    void saveStreamingPreferences({
+      apiBaseUrl: streamingApiBaseUrl,
+      favoritePlaylistIds: favoriteStreamingPlaylistIds,
+      pinnedPlaylistIds: pinnedStreamingPlaylistIds,
+    }).catch((saveError) => {
+      showErrorAlert(
+        languageIsEnglish ? 'Streaming settings not saved' : '流媒体设置未保存',
+        formatRequestError(saveError),
+        'streaming-settings-save-error',
+      );
+    });
+  }, [
+    favoriteStreamingPlaylistIds,
+    languageIsEnglish,
+    pinnedStreamingPlaylistIds,
+    showErrorAlert,
+    streamingApiBaseUrl,
+    streamingPreferencesLoaded,
+  ]);
+
+  useEffect(() => {
+    if (!streamingSessionMatchesApi) return;
+    let cancelled = false;
+    beginStreamingBusy();
+    void getNeteaseProfile(streamingApiBaseUrl, streamingCookie)
+      .then(async (profile) => {
+        const nextPlaylists = await getNeteasePlaylists(streamingApiBaseUrl, streamingCookie, profile.userId);
+        if (cancelled) return;
+        setStreamingProfile(profile);
+        setStreamingPlaylists(nextPlaylists);
+        setStreamingStatusText('');
+      })
+      .catch((streamingError) => {
+        if (!cancelled) {
+          setStreamingProfile(null);
+          setStreamingPlaylists([]);
+          setStreamingTracks([]);
+          setStreamingStatusText(formatRequestError(streamingError));
+        }
+      })
+      .finally(endStreamingBusy);
+    return () => {
+      cancelled = true;
+    };
+  }, [beginStreamingBusy, endStreamingBusy, streamingApiBaseUrl, streamingCookie, streamingSessionMatchesApi]);
+
+  useEffect(() => {
+    if (
+      librarySource !== 'streaming'
+      || streamingLibraryMode !== 'search'
+      || !streamingApiBaseUrl
+      || !streamingCookie
+      || !streamingSessionMatchesApi
+    ) return;
+    if (!query.trim()) {
+      setStreamingTracks([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      beginStreamingBusy();
+      void searchNeteaseTracks(streamingApiBaseUrl, streamingCookie, query)
+        .then((results) => {
+          if (!cancelled) setStreamingTracks(results);
+        })
+        .catch((searchError) => {
+          if (!cancelled) setStreamingStatusText(formatRequestError(searchError));
+        })
+        .finally(endStreamingBusy);
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [beginStreamingBusy, endStreamingBusy, librarySource, query, streamingApiBaseUrl, streamingCookie, streamingLibraryMode, streamingSessionMatchesApi]);
 
   useEffect(() => {
     pageTransition.setValue(0);
@@ -1734,12 +2153,15 @@ function EchoLinkApp(): ReactElement {
   }, [phoneAudioError, showErrorAlert, text.phoneAudioErrorTitle]);
 
   useEffect(() => {
+    if (playbackOutputMode !== 'pc' || status?.playback.state !== 'playing') {
+      return undefined;
+    }
     const interval = setInterval(() => {
       setClockMs(Date.now());
     }, 500);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [playbackOutputMode, status?.playback.state]);
 
   useEffect(() => {
     void setAudioModeAsync({
@@ -1794,6 +2216,7 @@ function EchoLinkApp(): ReactElement {
       parsed.host = normalizeEchoLinkHost(parsed.host);
       setEchoConnectionEnabled(true);
       setConnection(parsed);
+      setConnectionDraft(connectionDraftFrom(parsed));
       await saveConnection(parsed);
       setPairingText('');
       setError(null);
@@ -1807,18 +2230,119 @@ function EchoLinkApp(): ReactElement {
   }, [applyPairingValue, pairingText]);
 
   const saveManualConnection = useCallback(async () => {
+    const host = normalizeEchoLinkHost(connectionDraft.host);
+    const token = normalizeEchoLinkToken(connectionDraft.token);
+    const port = Number(connectionDraft.port);
+    if (!host || !token || !Number.isInteger(port) || port < 1 || port > 65535) {
+      Alert.alert(
+        text.connectionErrorTitle,
+        languageIsEnglish
+          ? 'Enter a valid computer address, port (1-65535), and pairing token.'
+          : '请输入有效的电脑地址、端口（1-65535）和配对 Token。',
+      );
+      return;
+    }
     const nextConnection = {
-      ...connection,
-      host: normalizeEchoLinkHost(connection.host),
-      token: normalizeEchoLinkToken(connection.token),
-      port: Number(connection.port) || 26789,
+      ...connectionDraft,
+      host,
+      token,
+      port,
       scheme: connection.scheme || 'http',
     };
-    setEchoConnectionEnabled(true);
-    setConnection(nextConnection);
-    await saveConnection(nextConnection);
-    switchPage('control');
-  }, [connection, switchPage]);
+    try {
+      await saveConnection(nextConnection);
+      setEchoConnectionEnabled(true);
+      setConnection(nextConnection);
+      setConnectionDraft(connectionDraftFrom(nextConnection));
+      setError(null);
+      switchPage('control');
+    } catch (saveError) {
+      Alert.alert(
+        languageIsEnglish ? 'Connection not saved' : '连接未保存',
+        formatRequestError(saveError),
+      );
+    }
+  }, [connectionDraft, languageIsEnglish, switchPage, text.connectionErrorTitle]);
+
+  const startNeteaseLogin = useCallback(async () => {
+    beginStreamingBusy();
+    setStreamingStatusText('');
+    try {
+      const login = await createNeteaseQrLogin(streamingApiBaseUrl);
+      setStreamingQrKey(login.key);
+      setStreamingQrUrl(login.qrUrl);
+      setStreamingStatusText(appLanguage === 'en' ? 'Scan with NetEase Cloud Music.' : '请使用网易云音乐扫码登录');
+    } catch (loginError) {
+      setStreamingStatusText(formatRequestError(loginError));
+    } finally {
+      endStreamingBusy();
+    }
+  }, [appLanguage, beginStreamingBusy, endStreamingBusy, streamingApiBaseUrl]);
+
+  const logoutNetease = useCallback(async () => {
+    await clearNeteaseSession();
+    if (playbackOutputMode === 'streaming') {
+      devicePlaybackRequestRef.current += 1;
+      setPhoneAudioBusy(false);
+      phonePlayer.pause();
+      phonePlayer.clearLockScreenControls();
+      if (echoAudioDsp.isAvailable) await echoAudioDsp.stop().catch(() => undefined);
+      setDspStatus((current) => ({ ...current, currentTime: 0, didJustFinish: false, playing: false }));
+      setPlaybackOutputMode('local');
+    }
+    setStreamingCookie('');
+    setStreamingSessionOrigin('');
+    setStreamingProfile(null);
+    setStreamingPlaylists([]);
+    setStreamingTracks([]);
+    setStreamingTrack(null);
+    setStreamingQrKey('');
+    setStreamingQrUrl('');
+    setStreamingStatusText('');
+  }, [phonePlayer, playbackOutputMode]);
+
+  useEffect(() => {
+    if (!streamingApiBaseUrl || !streamingQrKey) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const response = await checkNeteaseQrLogin(streamingApiBaseUrl, streamingQrKey);
+        if (cancelled) return;
+        if (response.code === 803 && response.cookie) {
+          const apiBaseUrl = normalizeNeteaseApiBaseUrl(streamingApiBaseUrl);
+          await saveNeteaseSession({ apiBaseUrl, cookie: response.cookie });
+          if (cancelled) return;
+          setStreamingProfile(null);
+          setStreamingPlaylists([]);
+          setStreamingTracks([]);
+          setStreamingCookie(response.cookie);
+          setStreamingSessionOrigin(apiBaseUrl);
+          setStreamingQrKey('');
+          setStreamingQrUrl('');
+          setStreamingStatusText(appLanguage === 'en' ? 'Signed in.' : '登录成功');
+          return;
+        }
+        if (response.code === 800) {
+          setStreamingQrKey('');
+          setStreamingQrUrl('');
+          setStreamingStatusText(appLanguage === 'en' ? 'QR code expired.' : '二维码已过期，请重新生成');
+          return;
+        }
+        setStreamingStatusText(response.code === 802
+          ? (appLanguage === 'en' ? 'Confirm sign-in on your phone.' : '请在手机上确认登录')
+          : (appLanguage === 'en' ? 'Waiting for scan.' : '等待扫码'));
+      } catch (pollError) {
+        if (!cancelled) setStreamingStatusText(formatRequestError(pollError));
+      }
+      if (!cancelled) timer = setTimeout(poll, 2000);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [appLanguage, streamingApiBaseUrl, streamingQrKey]);
 
   const importLocalLibrary = useCallback(async () => {
     setLocalLibraryBusy(true);
@@ -1831,12 +2355,14 @@ function EchoLinkApp(): ReactElement {
       }
       setLocalTracks(result.tracks);
       setLocalStorageBytes(await getLocalMusicStorageUsage());
+      setLocalLibraryLoaded(true);
       setLibrarySource('local');
       if (autoQueueImportedLocalTracks) {
         const importedIds = result.tracks
           .map((track) => track.id)
           .filter((id) => !previousIds.has(id));
         if (importedIds.length > 0) {
+          setLocalQueueActive(true);
           setLocalQueueTrackIds((current) => [...current, ...importedIds.filter((id) => !current.includes(id))]);
         }
       }
@@ -1863,53 +2389,56 @@ function EchoLinkApp(): ReactElement {
   }, []);
 
   const addLocalTrackToQueue = useCallback((track: LocalMusicTrack) => {
+    setLocalQueueActive(true);
     setLocalQueueTrackIds((current) => [...current.filter((id) => id !== track.id), track.id]);
     setLibrarySource('local');
   }, []);
 
   const playLocalTrackNext = useCallback((track: LocalMusicTrack) => {
+    setLocalQueueActive(true);
     setLocalQueueTrackIds((current) => {
-      const currentId = localTrack?.id;
-      const currentIndex = currentId ? current.indexOf(currentId) : -1;
+      const queue = localQueueActive || current.length > 0 ? current : localTracks.map((item) => item.id);
+      const next = queue.filter((id) => id !== track.id);
+      const currentIndex = localTrack?.id ? next.indexOf(localTrack.id) : -1;
       const insertIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
-      const next = current.filter((id) => id !== track.id);
       next.splice(insertIndex, 0, track.id);
       return next;
     });
     setLibrarySource('local');
-  }, [localTrack?.id]);
+  }, [localQueueActive, localTrack?.id, localTracks]);
 
   const moveLocalQueueTrack = useCallback((track: LocalMusicTrack, direction: -1 | 1) => {
+    setLocalQueueActive(true);
     setLocalQueueTrackIds((current) => {
-      const index = current.indexOf(track.id);
-      const targetIndex = index + direction;
-      if (index < 0 || targetIndex < 0 || targetIndex >= current.length) {
-        return current;
-      }
-      const next = [...current];
-      const [id] = next.splice(index, 1);
-      if (!id) {
-        return current;
-      }
-      next.splice(targetIndex, 0, id);
-      return next;
+      const queue = localQueueActive || current.length > 0 ? current : localTracks.map((item) => item.id);
+      const index = queue.indexOf(track.id);
+      return moveItem(queue, index, direction);
     });
-  }, []);
+  }, [localQueueActive, localTracks]);
 
   const performDeleteLocalTrack = useCallback(async (track: LocalMusicTrack) => {
     setLocalLibraryBusy(true);
     try {
+      if (localTrack?.id === track.id) {
+        devicePlaybackRequestRef.current += 1;
+        phonePlayer.pause();
+        phonePlayer.clearLockScreenControls();
+        if (echoAudioDsp.isAvailable) await echoAudioDsp.stop().catch(() => undefined);
+      }
       const nextTracks = await deleteLocalMusicTrack(track);
       setLocalTracks(nextTracks);
       setLocalStorageBytes(await getLocalMusicStorageUsage());
       setFavoriteLocalTrackIds((current) => current.filter((id) => id !== track.id));
       setLocalQueueTrackIds((current) => current.filter((id) => id !== track.id));
+      setPlaylists((current) => current.map((playlist) => ({
+        ...playlist,
+        tracks: playlist.tracks.filter((item) => !(item.source === 'local' && item.id === track.id)),
+      })));
       setRecentLocalTrackIds((current) => current.filter((id) => id !== track.id));
       if (localTrack?.id === track.id) {
-        phonePlayer.pause();
-        phonePlayer.clearLockScreenControls();
         setLocalTrack(null);
         setPhoneSeekPreviewMs(null);
+        setDspStatus((current) => ({ ...current, currentTime: 0, didJustFinish: false, playing: false }));
       }
     } catch (deleteError) {
       setLocalLibraryError(formatRequestError(deleteError));
@@ -1963,36 +2492,49 @@ function EchoLinkApp(): ReactElement {
 
   const sendCommand = useCallback(async (command: Parameters<NonNullable<typeof client>['sendPlaybackCommand']>[0]) => {
     if (!client) {
-      return;
+      return null;
     }
-    setBusy(true);
+    beginBusy();
     setError(null);
     try {
-      applyStatus(await client.sendPlaybackCommand(command));
+      const nextStatus = await client.sendPlaybackCommand(command);
+      if (activeClientRef.current !== client) return null;
+      applyStatus(nextStatus);
+      return nextStatus;
     } catch (commandError) {
-      setError(formatRequestError(commandError));
+      if (activeClientRef.current === client) setError(formatRequestError(commandError));
+      return null;
     } finally {
-      setBusy(false);
+      endBusy();
     }
-  }, [applyStatus, client]);
+  }, [applyStatus, beginBusy, client, endBusy]);
 
   const playTrackOnPc = useCallback((track: EchoLinkTrackPreview) => {
-    phonePlayer.pause();
-    phonePlayer.clearLockScreenControls();
-    if (echoAudioDsp.isAvailable) {
-      void echoAudioDsp.stop().catch(() => undefined);
+    if (!client) {
+      setConnectPanelMode('echo');
+      switchPage('connect');
+      return;
     }
-    setPhoneSeekPreviewMs(null);
-    setPlaybackOutputMode('pc');
-    void sendCommand({ command: 'playTrack', trackId: track.id, output: 'pc' });
-  }, [phonePlayer, sendCommand]);
+    const requestId = ++devicePlaybackRequestRef.current;
+    setPhoneAudioBusy(false);
+    void sendCommand({ command: 'playTrack', trackId: track.id, output: 'pc' }).then((nextStatus) => {
+      if (!nextStatus || devicePlaybackRequestRef.current !== requestId) return;
+      phonePlayer.pause();
+      phonePlayer.clearLockScreenControls();
+      if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+      setPhoneSeekPreviewMs(null);
+      setPhoneAudioError(null);
+      setPlaybackOutputMode('pc');
+    });
+  }, [client, phonePlayer, sendCommand, switchPage]);
 
   const nowPlaying = status?.playback.track;
   const playbackQueue = status?.playback.queue;
   const isLocalOutput = playbackOutputMode === 'local';
   const isPhoneOutput = playbackOutputMode === 'phone';
-  const isDeviceOutput = isLocalOutput || isPhoneOutput;
-  const useDspPlayback = echoAudioDsp.isAvailable && isDeviceOutput;
+  const isStreamingOutput = playbackOutputMode === 'streaming';
+  const isDeviceOutput = isLocalOutput || isPhoneOutput || isStreamingOutput;
+  const useDspPlayback = echoAudioDsp.isAvailable && (isLocalOutput || isPhoneOutput || isStreamingOutput);
   const nativePlayerEnabled = Platform.OS === 'ios' && echoAudioDsp.isAvailable;
   const currentEqOption = useMemo(() => (
     eqPresetOptions.find((option) => option.key === eqPreset) ?? defaultEqOption
@@ -2001,23 +2543,112 @@ function EchoLinkApp(): ReactElement {
     ? text.customEq
     : languageIsEnglish ? currentEqOption.labelEn : currentEqOption.labelZh;
   const localTrackById = useMemo(() => new Map(localTracks.map((track) => [track.id, track])), [localTracks]);
+  const echoTrackById = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
   const localQueueTracks = useMemo(() => (
     localQueueTrackIds
       .map((id) => localTrackById.get(id))
       .filter((track): track is LocalMusicTrack => Boolean(track))
   ), [localQueueTrackIds, localTrackById]);
-  const localPlaybackItems = localQueueTracks.length > 0 ? localQueueTracks : localTracks;
-  const playlistItems: EchoLinkTrackPreview[] = isLocalOutput ? localPlaybackItems : playbackQueue?.items ?? [];
+  const localPlaybackItems = localQueueActive ? localQueueTracks : localTracks;
+  const activePlaybackPlaylist = activePlaybackPlaylistId
+    ? playlists.find((playlist) => playlist.id === activePlaybackPlaylistId) ?? null
+    : null;
+  const playlistItems: PlaybackListTrack[] = activePlaybackPlaylist
+    ? activePlaybackPlaylist.tracks
+    : isLocalOutput
+      ? localPlaybackItems
+      : isStreamingOutput ? streamingTracks : playbackQueue?.items ?? [];
+  const activeStreamingPlaylist = selectedStreamingPlaylistId
+    ? streamingPlaylists.find((playlist) => playlist.id === selectedStreamingPlaylistId) ?? null
+    : null;
+  const queueCanEdit = Boolean(
+    activePlaybackPlaylist
+    || isLocalOutput
+    || isStreamingOutput
+    || (playbackOutputMode === 'pc' && client && playlistItems.length > 0)
+  );
+  const queueSource: 'echo' | 'local' | 'streaming' = isStreamingOutput
+    ? 'streaming'
+    : isLocalOutput ? 'local' : 'echo';
+  const queueSubtitle = activePlaybackPlaylist
+    ? `${languageIsEnglish ? 'Playlist' : '歌单'} · ${activePlaybackPlaylist.name}`
+    : isStreamingOutput && activeStreamingPlaylist
+      ? `${languageIsEnglish ? 'NetEase' : '网易云'} · ${activeStreamingPlaylist.name}`
+      : isLocalOutput
+        ? (localQueueActive
+          ? (languageIsEnglish ? 'Local queue' : '本地播放队列')
+          : (languageIsEnglish ? 'Local library' : '本地曲库'))
+        : status?.device.name
+          ? `ECHO · ${status.device.name}`
+          : 'ECHO';
   const visiblePlaylistItems = playlistItems.slice(0, 8);
   const hiddenPlaylistItemCount = Math.max(0, playlistItems.length - visiblePlaylistItems.length);
-  const displayTrack = isLocalOutput ? localTrack : isPhoneOutput ? phoneTrack ?? nowPlaying : nowPlaying;
-  const deviceTrack = isLocalOutput ? localTrack : isPhoneOutput ? phoneTrack : null;
+  const displayTrack = isLocalOutput
+    ? localTrack
+    : isStreamingOutput ? streamingTrack : isPhoneOutput ? phoneTrack ?? nowPlaying : nowPlaying;
+  const replaceEchoQueue = useCallback((items: PlaybackListTrack[], startTrackId: string | null = displayTrack?.id ?? null) => {
+    if (!client) return;
+    const requestId = ++devicePlaybackRequestRef.current;
+    setPhoneAudioBusy(false);
+    void sendCommand({
+      command: 'queueReplace',
+      output: 'pc',
+      ...(startTrackId ? { startTrackId } : {}),
+      trackIds: items.map((track) => track.id),
+    }).then((nextStatus) => {
+      if (!nextStatus || devicePlaybackRequestRef.current !== requestId) return;
+      phonePlayer.pause();
+      phonePlayer.clearLockScreenControls();
+      if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+      setPhoneSeekPreviewMs(null);
+      setPhoneAudioError(null);
+      setPlaybackOutputMode('pc');
+    });
+  }, [client, displayTrack?.id, phonePlayer, sendCommand]);
+  const reorderEchoQueue = useCallback((items: PlaybackListTrack[], startTrackId: string | null = displayTrack?.id ?? null) => {
+    if (items.length === 0) {
+      void sendCommand({ command: 'queueClear', output: 'pc' });
+      return;
+    }
+    void sendCommand({
+      command: 'queueReorder',
+      output: 'pc',
+      ...(startTrackId ? { startTrackId } : {}),
+      trackIds: items.map((track) => track.id),
+    });
+  }, [displayTrack?.id, sendCommand]);
+  const playEchoTrackOnPc = useCallback((track: EchoLinkTrackPreview, playlistId?: string) => {
+    if (!client) {
+      playTrackOnPc(track);
+      return;
+    }
+    const playlist = playlistId ? playlists.find((item) => item.id === playlistId) : null;
+    const echoTracks = playlist?.tracks.filter((item) => item.source === 'echo') ?? [];
+    if (echoTracks.some((item) => item.id === track.id)) {
+      replaceEchoQueue(echoTracks, track.id);
+    } else {
+      playTrackOnPc(track);
+    }
+  }, [client, playTrackOnPc, playlists, replaceEchoQueue]);
+  const deviceTrack = isLocalOutput ? localTrack : isStreamingOutput ? streamingTrack : isPhoneOutput ? phoneTrack : null;
   const externalMetadataKey = externalMetadataKeyForTrack(displayTrack);
+  activeExternalMetadataKeyRef.current = externalMetadataKey;
   const currentExternalMetadata = externalMetadataKey ? externalMetadataByKey[externalMetadataKey] : undefined;
+  const currentExternalFieldSources = externalMetadataKey
+    ? externalMetadataFieldSourcesByKey[externalMetadataKey]
+    : undefined;
+  const displayArtist = currentExternalFieldSources?.artist
+    ? currentExternalMetadata?.artist?.trim() || displayTrack?.artist?.trim() || ''
+    : displayTrack?.artist?.trim() || currentExternalMetadata?.artist?.trim() || '';
   const nativeArtworkUrl = resolveArtworkUrl(displayTrack?.artworkUrl);
   const nativeArtworkVisible = artworkUrlIsVisible(nativeArtworkUrl);
   const externalArtworkUrl = resolveArtworkUrl(currentExternalMetadata?.albumArt);
-  const displayArtworkUrl = nativeArtworkVisible ? nativeArtworkUrl : externalArtworkUrl;
+  const externalArtworkVisible = artworkUrlIsVisible(externalArtworkUrl);
+  const displayArtworkUrl = currentExternalFieldSources?.albumArt && externalArtworkVisible
+    ? externalArtworkUrl
+    : nativeArtworkVisible
+      ? nativeArtworkUrl
+      : externalArtworkVisible ? externalArtworkUrl : null;
   const shouldFetchExternalArtwork = Boolean(displayTrack && externalMetadataKey && !nativeArtworkVisible);
   const echoConnectionBroken = echoConnectionEnabled && Boolean(error);
   const echoConnectionOnline = echoConnectionEnabled && Boolean(status && !echoConnectionBroken);
@@ -2054,18 +2685,26 @@ function EchoLinkApp(): ReactElement {
   const isPlaybackActive = isDeviceOutput
     ? (useDspPlayback ? dspStatus.playing : phonePlayerStatus.playing)
     : status?.playback.state === 'playing';
+  const playbackControlsEnabled = !phoneAudioBusy && (isLocalOutput
+    ? Boolean(localTrack || localTracks.length > 0)
+    : isPhoneOutput
+      ? Boolean(phoneTrack)
+      : isStreamingOutput
+        ? Boolean(streamingTrack)
+        : Boolean(client));
   const playbackTags = tagsForTrack(displayTrack, {
-    outputMode: isLocalOutput ? '本地' : isPhoneOutput ? '串流' : status?.playback.outputMode,
+    outputMode: isLocalOutput ? '本地' : isStreamingOutput ? '网易云' : isPhoneOutput ? '串流' : status?.playback.outputMode,
     visibleAudioTags: audioTagVisibility,
   });
 
   useEffect(() => {
+    const shouldLookupLrcApi = lrcApiExternalDataEnabled;
     const shouldLookupLrclib = lrclibExternalDataEnabled;
     const shouldLookupNetease = neteaseExternalDataEnabled || shouldFetchExternalArtwork;
-    if ((!shouldLookupLrclib && !shouldLookupNetease) || !displayTrack || !externalMetadataKey) {
+    if ((!shouldLookupLrcApi && !shouldLookupLrclib && !shouldLookupNetease) || !displayTrack || !externalMetadataKey) {
       return undefined;
     }
-    const lookupKey = `${externalMetadataKey}::lrclib:${shouldLookupLrclib ? '1' : '0'}::netease:${shouldLookupNetease ? '1' : '0'}`;
+    const lookupKey = `${externalMetadataKey}::lrcapi:${shouldLookupLrcApi ? '1' : '0'}::lrclib:${shouldLookupLrclib ? '1' : '0'}::netease:${shouldLookupNetease ? '1' : '0'}`;
     if (externalMetadataLookupKeysRef.current.has(lookupKey)) {
       return undefined;
     }
@@ -2075,6 +2714,7 @@ function EchoLinkApp(): ReactElement {
       ...current,
       [externalMetadataKey]: {
         albumArt: current[externalMetadataKey]?.albumArt ?? null,
+        artist: current[externalMetadataKey]?.artist ?? null,
         error: null,
         lyrics: current[externalMetadataKey]?.lyrics ?? null,
         sourceTitle: current[externalMetadataKey]?.sourceTitle ?? null,
@@ -2083,32 +2723,59 @@ function EchoLinkApp(): ReactElement {
     }));
 
     const lookupTrack = displayTrack;
-    void lookupExternalTrackMetadata(lookupTrack, {
+    void lookupExternalMetadataCandidates(lookupTrack, {
+      lrcapi: shouldLookupLrcApi,
       lrclib: shouldLookupLrclib,
       netease: shouldLookupNetease,
     }, {
       includeNeteaseLyrics: neteaseExternalDataEnabled,
     })
-      .then((metadata) => {
+      .then((candidates) => {
+        if (candidates.length > 1) {
+          if (activeExternalMetadataKeyRef.current !== externalMetadataKey) {
+            externalMetadataLookupKeysRef.current.delete(lookupKey);
+            return;
+          }
+          setPendingExternalMetadataSelection({
+            candidates,
+            id: lookupKey,
+            metadataKey: externalMetadataKey,
+          });
+          return;
+        }
+        const candidate = candidates[0];
+        if (candidate) {
+          const fieldSources = fieldSourcesFromExternalCandidate(candidate);
+          if (nativeArtworkVisible) delete fieldSources.albumArt;
+          setExternalMetadataFieldSourcesByKey((sources) => ({
+            ...sources,
+            [externalMetadataKey]: fieldSources,
+          }));
+        }
         setExternalMetadataByKey((current) => {
           const existing = current[externalMetadataKey];
-          const albumArt = metadata.albumArt ?? existing?.albumArt ?? null;
-          const lyrics = metadata.lyrics ?? existing?.lyrics ?? null;
-          const sourceTitle = metadata.sourceTitle ?? existing?.sourceTitle ?? null;
-          const hasMetadata = Boolean(albumArt || lyrics);
+          if (candidate) {
+            return {
+              ...current,
+              [externalMetadataKey]: metadataFromExternalCandidate(candidate),
+            };
+          }
+          const hasMetadata = Boolean(existing?.albumArt || existing?.lyrics);
           return {
             ...current,
             [externalMetadataKey]: {
-              albumArt,
-              error: hasMetadata ? null : metadata.error,
-              lyrics,
-              sourceTitle,
-              status: hasMetadata ? 'ready' : metadata.status,
+              albumArt: existing?.albumArt ?? null,
+              artist: existing?.artist ?? null,
+              error: hasMetadata ? null : 'No external metadata found.',
+              lyrics: existing?.lyrics ?? null,
+              sourceTitle: existing?.sourceTitle ?? null,
+              status: hasMetadata ? 'ready' : 'error',
             },
           };
         });
       })
       .catch((externalError) => {
+        externalMetadataLookupKeysRef.current.delete(lookupKey);
         setExternalMetadataByKey((current) => {
           const existing = current[externalMetadataKey];
           const hasMetadata = Boolean(existing?.albumArt || existing?.lyrics);
@@ -2116,6 +2783,7 @@ function EchoLinkApp(): ReactElement {
             ...current,
             [externalMetadataKey]: {
               albumArt: existing?.albumArt ?? null,
+              artist: existing?.artist ?? null,
               error: hasMetadata ? null : formatRequestError(externalError),
               lyrics: existing?.lyrics ?? null,
               sourceTitle: existing?.sourceTitle ?? null,
@@ -2128,15 +2796,37 @@ function EchoLinkApp(): ReactElement {
   }, [
     displayTrack,
     externalMetadataKey,
+    lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     neteaseExternalDataEnabled,
+    nativeArtworkVisible,
     shouldFetchExternalArtwork,
   ]);
 
   useEffect(() => {
+    const pending = pendingExternalMetadataSelection;
+    if (!pending || pending.metadataKey === externalMetadataKey) return;
+    externalMetadataLookupKeysRef.current.delete(pending.id);
+    setExternalMetadataByKey((current) => {
+      const existing = current[pending.metadataKey];
+      if (!existing || existing.status !== 'loading') return current;
+      return {
+        ...current,
+        [pending.metadataKey]: {
+          ...existing,
+          status: existing.albumArt || existing.artist || existing.lyrics ? 'ready' : 'error',
+        },
+      };
+    });
+    setPendingExternalMetadataSelection(null);
+  }, [externalMetadataKey, pendingExternalMetadataSelection]);
+
+  useEffect(() => {
     externalMetadataLookupKeysRef.current.clear();
     setExternalMetadataByKey({});
-  }, [lrclibExternalDataEnabled, neteaseExternalDataEnabled]);
+    setExternalMetadataFieldSourcesByKey({});
+    setPendingExternalMetadataSelection(null);
+  }, [lrcApiExternalDataEnabled, lrclibExternalDataEnabled, neteaseExternalDataEnabled]);
 
   useEffect(() => {
     if (!echoAudioDsp.isAvailable) {
@@ -2187,7 +2877,16 @@ function EchoLinkApp(): ReactElement {
     };
   }, [useDspPlayback]);
 
-  const visibleTracks = useMemo(() => tracks.filter((track) => {
+  const queryFilteredEchoTracks = useMemo(() => tracks.filter((track) => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return !normalizedQuery || (
+      track.title.toLowerCase().includes(normalizedQuery)
+      || track.artist.toLowerCase().includes(normalizedQuery)
+      || track.album.toLowerCase().includes(normalizedQuery)
+      || track.albumArtist.toLowerCase().includes(normalizedQuery)
+    );
+  }), [query, tracks]);
+  const visibleTracks = useMemo(() => queryFilteredEchoTracks.filter((track) => {
     if (libraryFilter === 'streamable') {
       return track.canPlayOnPhone;
     }
@@ -2195,7 +2894,16 @@ function EchoLinkApp(): ReactElement {
       return formatSourceTag(track.sourceLabel) === 'Local';
     }
     return true;
-  }), [libraryFilter, tracks]);
+  }), [libraryFilter, queryFilteredEchoTracks]);
+  const organizedEchoTracks = useMemo(() => {
+    if (echoLibraryView === 'albums') {
+      return sortTracksBy(visibleTracks, (track) => track.album || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'));
+    }
+    if (echoLibraryView === 'artists') {
+      return sortTracksBy(visibleTracks, (track) => track.artist || (languageIsEnglish ? 'Unknown Artist' : '未知艺术家'));
+    }
+    return visibleTracks;
+  }, [echoLibraryView, languageIsEnglish, visibleTracks]);
   const favoriteLocalTrackIdSet = useMemo(() => new Set(favoriteLocalTrackIds), [favoriteLocalTrackIds]);
   const recentLocalTrackIdSet = useMemo(() => new Set(recentLocalTrackIds), [recentLocalTrackIds]);
   const queryFilteredLocalTracks = useMemo(() => {
@@ -2220,14 +2928,10 @@ function EchoLinkApp(): ReactElement {
         .filter((track): track is LocalMusicTrack => Boolean(track));
     }
     if (localLibraryView === 'albums') {
-      return [...queryFilteredLocalTracks].sort((a, b) => (
-        (a.album || '未归类专辑').localeCompare(b.album || '未归类专辑') || a.title.localeCompare(b.title)
-      ));
+      return sortTracksBy(queryFilteredLocalTracks, (track) => track.album || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'));
     }
     if (localLibraryView === 'artists') {
-      return [...queryFilteredLocalTracks].sort((a, b) => (
-        (a.artist || '未知艺术家').localeCompare(b.artist || '未知艺术家') || a.title.localeCompare(b.title)
-      ));
+      return sortTracksBy(queryFilteredLocalTracks, (track) => track.artist || (languageIsEnglish ? 'Unknown Artist' : '未知艺术家'));
     }
     if (localLibraryView === 'formats') {
       return [...queryFilteredLocalTracks].sort((a, b) => (
@@ -2235,15 +2939,67 @@ function EchoLinkApp(): ReactElement {
       ));
     }
     return queryFilteredLocalTracks;
-  }, [favoriteLocalTrackIdSet, localLibraryView, queryFilteredLocalTracks, recentLocalTrackIds]);
+  }, [favoriteLocalTrackIdSet, languageIsEnglish, localLibraryView, queryFilteredLocalTracks, recentLocalTrackIds]);
+  const echoCollections = useMemo<LibraryCollectionPreview[]>(() => {
+    const albumByTitle = new Map(albums.map((album) => [album.title, album]));
+    return buildTrackCollections(
+      visibleTracks,
+      (track) => track.album?.trim() || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'),
+      (title) => `echo:${albumByTitle.get(title)?.id ?? title}`,
+      (count) => `${text.echoLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
+      (title) => albumByTitle.get(title)?.artworkUrl ?? null,
+    );
+  }, [albums, languageIsEnglish, text.echoLibrary, visibleTracks]);
+  const localCollections = useMemo(() => buildTrackCollections(
+    queryFilteredLocalTracks,
+    (track) => track.album?.trim() || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'),
+    (title) => `local:${title}`,
+    (count) => `${text.localLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
+  ), [languageIsEnglish, queryFilteredLocalTracks, text.localLibrary]);
+  const echoArtistCollections = useMemo(() => buildTrackCollections(
+    visibleTracks,
+    (track) => artistNamesForTrack(track, languageIsEnglish ? 'Unknown Artist' : '未知艺术家'),
+    (title) => `echo-artist:${title}`,
+    (count) => `${text.echoLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
+  ), [languageIsEnglish, text.echoLibrary, visibleTracks]);
+  const localArtistCollections = useMemo(() => buildTrackCollections(
+    queryFilteredLocalTracks,
+    (track) => artistNamesForTrack(track, languageIsEnglish ? 'Unknown Artist' : '未知艺术家'),
+    (title) => `local-artist:${title}`,
+    (count) => `${text.localLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
+  ), [languageIsEnglish, queryFilteredLocalTracks, text.localLibrary]);
+  const sortedPlaylists = useMemo(() => [...playlists]
+      .sort((a, b) => (
+        Number(b.pinned) - Number(a.pinned)
+        || Number(b.favorite) - Number(a.favorite)
+        || b.createdAt - a.createdAt
+      )), [playlists]);
+  const sortedStreamingPlaylists = useMemo(() => [...streamingPlaylists].sort((a, b) => (
+    Number(pinnedStreamingPlaylistIds.includes(b.id)) - Number(pinnedStreamingPlaylistIds.includes(a.id))
+    || Number(favoriteStreamingPlaylistIds.includes(b.id)) - Number(favoriteStreamingPlaylistIds.includes(a.id))
+    || a.name.localeCompare(b.name)
+  )), [favoriteStreamingPlaylistIds, pinnedStreamingPlaylistIds, streamingPlaylists]);
   const streamableTrackCount = useMemo(() => (
     tracks.filter((track) => track.canPlayOnPhone).length
   ), [tracks]);
   const pcLocalTrackCount = useMemo(() => (
     tracks.filter((track) => formatSourceTag(track.sourceLabel) === 'Local').length
   ), [tracks]);
-  const activeLibraryTracks: EchoLinkTrackPreview[] = librarySource === 'local' ? visibleLocalTracks : visibleTracks;
-  const activeLibraryTotal = librarySource === 'local' ? localTracks.length : tracks.length;
+  const showingAllLibrary = page === 'search' || librarySource === 'all';
+  const activeLibraryTracks: EchoLinkTrackPreview[] = librarySource === 'streaming'
+    ? streamingSessionMatchesApi ? streamingTracks : []
+    : showingAllLibrary
+      ? [...queryFilteredEchoTracks, ...queryFilteredLocalTracks]
+      : librarySource === 'local' ? visibleLocalTracks : organizedEchoTracks;
+  const activeLibraryCollections = showingAllLibrary
+    ? [...echoCollections, ...localCollections]
+    : librarySource === 'echo'
+      ? echoLibraryView === 'albums' ? echoCollections : echoLibraryView === 'artists' ? echoArtistCollections : []
+      : librarySource === 'local'
+        ? localLibraryView === 'albums' ? localCollections : localLibraryView === 'artists' ? localArtistCollections : []
+        : [];
+  const activeLibraryTotal = activeLibraryTracks.length;
+  const displayedLibraryTracks = activeLibraryTracks.slice(0, 20);
   const localGroupLabel = useCallback((track: LocalMusicTrack): string | null => {
     if (localLibraryView === 'albums') {
       return track.album || '未归类专辑';
@@ -2256,6 +3012,11 @@ function EchoLinkApp(): ReactElement {
     }
     return null;
   }, [localLibraryView]);
+  const echoGroupLabel = useCallback((track: EchoLinkTrackPreview): string | null => {
+    if (echoLibraryView === 'albums') return track.album || (languageIsEnglish ? 'Uncategorized' : '未归类专辑');
+    if (echoLibraryView === 'artists') return track.artist || (languageIsEnglish ? 'Unknown Artist' : '未知艺术家');
+    return null;
+  }, [echoLibraryView, languageIsEnglish]);
   const visibleAudioTagCount = audioTagOptions.filter((option) => audioTagVisibility[option.key]).length;
   const lyricLines = useMemo(() => {
     if (lyricsLoading) {
@@ -2489,7 +3250,7 @@ function EchoLinkApp(): ReactElement {
   }, [isLocalOutput, localTrack, lyricsError, lyricsText, lyricsTrackId, lyricsVisible, text.noLyrics]);
 
   useEffect(() => {
-    if (!lyricsVisible || isLocalOutput || !client || !displayTrack?.id) {
+    if (!lyricsVisible || isLocalOutput || isStreamingOutput || !client || !displayTrack?.id) {
       return;
     }
     if (lyricsTrackId === displayTrack.id && (lyricsText || lyricsError)) {
@@ -2524,28 +3285,30 @@ function EchoLinkApp(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [client, displayTrack?.id, isLocalOutput, lyricsError, lyricsText, lyricsTrackId, lyricsVisible, text.noLyrics]);
+  }, [client, displayTrack?.id, isLocalOutput, isStreamingOutput, lyricsError, lyricsText, lyricsTrackId, lyricsVisible, text.noLyrics]);
 
   useEffect(() => {
     if (
       !lyricsVisible
       || !displayTrack?.id
       || lyricsLoading
-      || lyricsTrackId !== displayTrack.id
+      || (lyricsTrackId !== displayTrack.id && !currentExternalFieldSources?.lyrics)
       || currentExternalMetadata?.status !== 'ready'
       || !currentExternalMetadata.lyrics
     ) {
       return;
     }
-    if (lyricsText && lyricsText !== text.noLyrics && !lyricsError) {
+    if (!currentExternalFieldSources?.lyrics && lyricsText && lyricsText !== text.noLyrics && !lyricsError) {
       return;
     }
     setLyricsText(currentExternalMetadata.lyrics);
+    setLyricsTrackId(displayTrack.id);
     setLyricsError(null);
     setLyricsLoading(false);
   }, [
     currentExternalMetadata?.lyrics,
     currentExternalMetadata?.status,
+    currentExternalFieldSources?.lyrics,
     displayTrack?.id,
     lyricsError,
     lyricsLoading,
@@ -2556,14 +3319,10 @@ function EchoLinkApp(): ReactElement {
   ]);
 
   const playTrackOnLocal = useCallback(async (track: LocalMusicTrack, positionMs = 0) => {
+    const requestId = ++devicePlaybackRequestRef.current;
+    setPhoneAudioBusy(true);
     setPhoneAudioError(null);
     setPhoneSeekPreviewMs(null);
-    setLocalTrack(track);
-    markLocalTrackPlayed(track.id);
-    setPlaybackOutputMode('local');
-    if (autoOpenLyricsForLocalTracks && track.hasLyrics) {
-      setLyricsVisible(true);
-    }
     try {
       phonePlayer.pause();
       phonePlayer.clearLockScreenControls();
@@ -2575,31 +3334,105 @@ function EchoLinkApp(): ReactElement {
           volume: phoneVolume,
         });
         setDspStatus(await echoAudioDsp.getStatus());
-        return;
+      } else {
+        phonePlayer.replace({
+          name: track.title,
+          uri: track.uri,
+        });
+        phonePlayer.volume = phoneVolume;
+        phonePlayer.setActiveForLockScreen(true, {
+          albumTitle: track.album,
+          artist: track.artist,
+          artworkUrl: track.artworkUrl ?? undefined,
+          title: track.title,
+        }, {
+          showSeekBackward: true,
+          showSeekForward: true,
+        });
+        if (positionMs > 0) {
+          await phonePlayer.seekTo(positionMs / 1000).catch(() => undefined);
+        }
+        phonePlayer.play();
       }
-
-      phonePlayer.replace({
-        name: track.title,
-        uri: track.uri,
-      });
-      phonePlayer.volume = phoneVolume;
-      phonePlayer.setActiveForLockScreen(true, {
-        albumTitle: track.album,
-        artist: track.artist,
-        artworkUrl: track.artworkUrl ?? undefined,
-        title: track.title,
-      }, {
-        showSeekBackward: true,
-        showSeekForward: true,
-      });
-      if (positionMs > 0) {
-        await phonePlayer.seekTo(positionMs / 1000).catch(() => undefined);
-      }
-      phonePlayer.play();
+      if (devicePlaybackRequestRef.current !== requestId) return;
+      setLocalTrack(track);
+      markLocalTrackPlayed(track.id);
+      setPlaybackOutputMode('local');
+      if (autoOpenLyricsForLocalTracks && track.hasLyrics) setLyricsVisible(true);
     } catch (localPlaybackError) {
-      setPhoneAudioError(formatPhoneAudioError(localPlaybackError));
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioError(formatPhoneAudioError(localPlaybackError));
+    } finally {
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
     }
   }, [autoOpenLyricsForLocalTracks, eqGains, loudnessNormalizationEnabled, markLocalTrackPlayed, phonePlayer, phoneVolume]);
+
+  const playNeteaseTrack = useCallback(async (track: EchoLinkTrackPreview, positionMs = 0) => {
+    if (!streamingApiBaseUrl || !streamingCookie || !streamingSessionMatchesApi) {
+      setConnectPanelMode('streaming');
+      switchPage('connect');
+      setStreamingStatusText(appLanguage === 'en' ? 'Sign in to NetEase Cloud Music first.' : '请先登录网易云音乐');
+      return;
+    }
+    const requestId = ++devicePlaybackRequestRef.current;
+    beginStreamingBusy();
+    setPhoneAudioBusy(true);
+    setActivePlaybackPlaylistId(null);
+    setPhoneAudioError(null);
+    setPhoneSeekPreviewMs(null);
+    try {
+      const url = await getNeteasePlaybackUrl(streamingApiBaseUrl, streamingCookie, track.id);
+      const cachedStreamUri = echoAudioDsp.isAvailable
+        ? await downloadStreamForDsp(url, track, 'netease')
+        : null;
+      if (devicePlaybackRequestRef.current !== requestId) return;
+      if (echoAudioDsp.isAvailable) await echoAudioDsp.stop().catch(() => undefined);
+      phonePlayer.pause();
+      if (echoAudioDsp.isAvailable && cachedStreamUri) {
+        phonePlayer.clearLockScreenControls();
+        await echoAudioDsp.playFile(cachedStreamUri, {
+          gains: eqGains,
+          loudnessEnabled: loudnessNormalizationEnabled,
+          positionMs,
+          volume: phoneVolume,
+        });
+        setDspStatus(await echoAudioDsp.getStatus());
+      } else {
+        phonePlayer.replace({ name: `${track.title} - ${track.artist}`, uri: url });
+        phonePlayer.volume = phoneVolume;
+        phonePlayer.setActiveForLockScreen(true, {
+          albumTitle: track.album,
+          artist: track.artist,
+          artworkUrl: track.artworkUrl ?? undefined,
+          title: track.title,
+        }, {
+          showSeekBackward: true,
+          showSeekForward: true,
+        });
+        if (positionMs > 0) await phonePlayer.seekTo(positionMs / 1000).catch(() => undefined);
+        phonePlayer.play();
+      }
+      if (devicePlaybackRequestRef.current !== requestId) return;
+      setStreamingTrack(track);
+      setPlaybackOutputMode('streaming');
+      switchPage('control');
+    } catch (streamingError) {
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioError(formatPhoneAudioError(streamingError));
+    } finally {
+      endStreamingBusy();
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
+    }
+  }, [appLanguage, beginStreamingBusy, endStreamingBusy, eqGains, loudnessNormalizationEnabled, phonePlayer, phoneVolume, streamingApiBaseUrl, streamingCookie, streamingSessionMatchesApi, switchPage]);
+
+  const switchToStreamingPlayback = useCallback(() => {
+    if (isStreamingOutput) return;
+    setActivePlaybackPlaylistId(null);
+    if (streamingTrack) {
+      void playNeteaseTrack(streamingTrack, 0);
+      return;
+    }
+    setLibrarySource('streaming');
+    switchPage('library');
+  }, [isStreamingOutput, playNeteaseTrack, streamingTrack, switchPage]);
 
   const switchToLocalPlayback = useCallback(() => {
     if (isLocalOutput) {
@@ -2612,6 +3445,7 @@ function EchoLinkApp(): ReactElement {
       showErrorAlert(text.localMusicMissingTitle, text.localMusicMissingMessage);
       return;
     }
+    setActivePlaybackPlaylistId(null);
     void playTrackOnLocal(track, 0);
   }, [isLocalOutput, localTrack, localTracks, playTrackOnLocal, showErrorAlert, switchPage, text.localMusicMissingMessage, text.localMusicMissingTitle]);
 
@@ -2621,6 +3455,7 @@ function EchoLinkApp(): ReactElement {
     pausePcAfterStart = false,
   ) => {
     if (!client) {
+      setPhoneAudioError(text.echoNotConnected);
       return;
     }
     if (!track.canPlayOnPhone) {
@@ -2628,6 +3463,7 @@ function EchoLinkApp(): ReactElement {
       return;
     }
 
+    const requestId = ++devicePlaybackRequestRef.current;
     setPhoneAudioBusy(true);
     setPhoneAudioError(null);
     setPhoneSeekPreviewMs(null);
@@ -2636,15 +3472,16 @@ function EchoLinkApp(): ReactElement {
       const nextVolume = isDeviceOutput
         ? phoneVolume
         : status?.playback.volume ?? phoneVolume;
+      const cachedStreamUri = echoAudioDsp.isAvailable
+        ? await downloadStreamForDsp(stream.streamUrl, stream.track, `echo-${connection.host}-${connection.port}`)
+        : null;
+      if (devicePlaybackRequestRef.current !== requestId) return;
 
       phonePlayer.pause();
       setPhoneVolume(nextVolume);
-      setPhoneTrack(stream.track);
-      setPlaybackOutputMode('phone');
 
-      if (echoAudioDsp.isAvailable) {
+      if (echoAudioDsp.isAvailable && cachedStreamUri) {
         phonePlayer.clearLockScreenControls();
-        const cachedStreamUri = await downloadStreamForDsp(stream.streamUrl, stream.track);
         await echoAudioDsp.playFile(cachedStreamUri, {
           gains: eqGains,
           loudnessEnabled: loudnessNormalizationEnabled,
@@ -2672,6 +3509,9 @@ function EchoLinkApp(): ReactElement {
         }
         phonePlayer.play();
       }
+      if (devicePlaybackRequestRef.current !== requestId) return;
+      setPhoneTrack(stream.track);
+      setPlaybackOutputMode('phone');
 
       if (pausePcAfterStart && (status?.playback.state === 'playing' || status?.playback.state === 'loading')) {
         void client.sendPlaybackCommand({ command: 'playPause' })
@@ -2679,51 +3519,73 @@ function EchoLinkApp(): ReactElement {
           .catch((handoffError) => setPhoneAudioError(formatPhoneAudioError(handoffError)));
       }
     } catch (phoneError) {
-      setPhoneAudioError(formatPhoneAudioError(phoneError));
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioError(formatPhoneAudioError(phoneError));
     } finally {
-      setPhoneAudioBusy(false);
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
     }
-  }, [applyStatus, client, eqGains, isDeviceOutput, loudnessNormalizationEnabled, phonePlayer, phoneVolume, status, text.streamUnsupportedMessage]);
+  }, [applyStatus, client, connection.host, connection.port, eqGains, isDeviceOutput, loudnessNormalizationEnabled, phonePlayer, phoneVolume, status, text.echoNotConnected, text.streamUnsupportedMessage]);
 
   const switchToPhonePlayback = useCallback(() => {
     if (isPhoneOutput) {
       return;
     }
+    if (!client) {
+      setConnectPanelMode('echo');
+      switchPage('connect');
+      return;
+    }
+    setActivePlaybackPlaylistId(null);
     const track = nowPlaying ?? phoneTrack;
     if (!track) {
       setPhoneAudioError(text.noPlayableTrackMessage);
       return;
     }
     void playTrackOnPhone(track, nowPlaying?.id === track.id ? pcPlaybackPositionMs : 0, true);
-  }, [isPhoneOutput, nowPlaying, pcPlaybackPositionMs, phoneTrack, playTrackOnPhone, text.noPlayableTrackMessage]);
+  }, [client, isPhoneOutput, nowPlaying, pcPlaybackPositionMs, phoneTrack, playTrackOnPhone, switchPage, text.noPlayableTrackMessage]);
 
   const switchToPcPlayback = useCallback(() => {
     if (playbackOutputMode === 'pc') {
       return;
     }
+    if (!client) {
+      setConnectPanelMode('echo');
+      switchPage('connect');
+      return;
+    }
     const track = phoneTrack ?? nowPlaying;
     const positionMs = Math.max(0, Math.round((echoAudioDsp.isAvailable ? dspStatus.currentTime : phonePlayerStatus.currentTime) * 1000));
 
-    phonePlayer.pause();
-    phonePlayer.clearLockScreenControls();
-    if (echoAudioDsp.isAvailable) {
-      void echoAudioDsp.stop().catch(() => undefined);
-    }
-    setPlaybackOutputMode('pc');
-    setPhoneSeekPreviewMs(null);
-    setPhoneAudioError(null);
-
-    if (isPhoneOutput && client && track) {
-      void client.sendPlaybackCommand({
+    if (isPhoneOutput && track) {
+      const requestId = ++devicePlaybackRequestRef.current;
+      setPhoneAudioBusy(false);
+      void sendCommand({
         command: 'handoff',
         positionMs,
         target: 'pc',
         trackId: track.id,
       })
-        .then(applyStatus)
-        .catch((handoffError) => setError(formatRequestError(handoffError)));
+        .then((nextStatus) => {
+          if (!nextStatus || devicePlaybackRequestRef.current !== requestId) return;
+          setActivePlaybackPlaylistId(null);
+          phonePlayer.pause();
+          phonePlayer.clearLockScreenControls();
+          if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+          setPlaybackOutputMode('pc');
+          setPhoneSeekPreviewMs(null);
+          setPhoneAudioError(null);
+        });
+      return;
     }
-  }, [applyStatus, client, dspStatus.currentTime, isPhoneOutput, nowPlaying, phonePlayer, phonePlayerStatus.currentTime, phoneTrack, playbackOutputMode]);
+    devicePlaybackRequestRef.current += 1;
+    setActivePlaybackPlaylistId(null);
+    setPhoneAudioBusy(false);
+    phonePlayer.pause();
+    phonePlayer.clearLockScreenControls();
+    if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+    setPlaybackOutputMode('pc');
+    setPhoneSeekPreviewMs(null);
+    setPhoneAudioError(null);
+  }, [client, dspStatus.currentTime, isPhoneOutput, nowPlaying, phonePlayer, phonePlayerStatus.currentTime, phoneTrack, playbackOutputMode, sendCommand, switchPage]);
 
   const togglePlayPause = useCallback(() => {
     if (isDeviceOutput) {
@@ -2733,6 +3595,10 @@ function EchoLinkApp(): ReactElement {
       }
       if (isPhoneOutput && !phoneTrack) {
         switchToPhonePlayback();
+        return;
+      }
+      if (isStreamingOutput && !streamingTrack) {
+        switchToStreamingPlayback();
         return;
       }
       if (echoAudioDsp.isAvailable) {
@@ -2752,6 +3618,7 @@ function EchoLinkApp(): ReactElement {
     isDeviceOutput,
     isLocalOutput,
     isPhoneOutput,
+    isStreamingOutput,
     localTrack,
     dspStatus.playing,
     phonePlayer,
@@ -2760,6 +3627,7 @@ function EchoLinkApp(): ReactElement {
     sendCommand,
     switchToLocalPlayback,
     switchToPhonePlayback,
+    switchToStreamingPlayback,
   ]);
 
   const playRelativePhoneQueueTrack = useCallback((direction: -1 | 1) => {
@@ -2783,7 +3651,46 @@ function EchoLinkApp(): ReactElement {
     void playTrackOnLocal(nextTrack, 0);
   }, [localPlaybackItems, localTrack?.id, playTrackOnLocal, text.localNextMissing, text.localPreviousMissing]);
 
+  const playRelativeStreamingTrack = useCallback((direction: -1 | 1) => {
+    const currentIndex = streamingTracks.findIndex((item) => item.id === streamingTrack?.id);
+    const nextTrack = currentIndex >= 0 ? streamingTracks[currentIndex + direction] : streamingTracks[0];
+    if (!nextTrack) {
+      setPhoneAudioError(appLanguage === 'en' ? 'No more streaming tracks.' : '没有更多流媒体歌曲');
+      return;
+    }
+    void playNeteaseTrack(nextTrack, 0);
+  }, [appLanguage, playNeteaseTrack, streamingTrack?.id, streamingTracks]);
+
+  const playRelativeSavedPlaylistTrack = useCallback((direction: -1 | 1) => {
+    if (!activePlaybackPlaylist) return;
+    const currentSource = isLocalOutput ? 'local' : 'echo';
+    const currentIndex = activePlaybackPlaylist.tracks.findIndex((item) => (
+      item.id === displayTrack?.id && item.source === currentSource
+    ));
+    const nextTrack = currentIndex >= 0
+      ? activePlaybackPlaylist.tracks[currentIndex + direction]
+      : activePlaybackPlaylist.tracks[0];
+    if (!nextTrack) {
+      setPhoneAudioError(appLanguage === 'en' ? 'No more tracks in this playlist.' : '歌单中没有更多歌曲');
+      return;
+    }
+    if (nextTrack.source === 'local') {
+      const localItem = localTracks.find((item) => item.id === nextTrack.id);
+      if (localItem) void playTrackOnLocal(localItem, 0);
+      return;
+    }
+    if (isPhoneOutput && nextTrack.canPlayOnPhone) {
+      void playTrackOnPhone(nextTrack, 0, false);
+    } else {
+      playTrackOnPc(nextTrack);
+    }
+  }, [activePlaybackPlaylist, appLanguage, displayTrack?.id, isLocalOutput, isPhoneOutput, localTracks, playTrackOnLocal, playTrackOnPhone, playTrackOnPc]);
+
   const playPrevious = useCallback(() => {
+    if (activePlaybackPlaylist) {
+      playRelativeSavedPlaylistTrack(-1);
+      return;
+    }
     if (isLocalOutput) {
       playRelativeLocalTrack(-1);
       return;
@@ -2792,10 +3699,18 @@ function EchoLinkApp(): ReactElement {
       playRelativePhoneQueueTrack(-1);
       return;
     }
+    if (isStreamingOutput) {
+      playRelativeStreamingTrack(-1);
+      return;
+    }
     void sendCommand({ command: 'previous' });
-  }, [isLocalOutput, isPhoneOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, sendCommand]);
+  }, [activePlaybackPlaylist, isLocalOutput, isPhoneOutput, isStreamingOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, playRelativeSavedPlaylistTrack, playRelativeStreamingTrack, sendCommand]);
 
   const playNext = useCallback(() => {
+    if (activePlaybackPlaylist) {
+      playRelativeSavedPlaylistTrack(1);
+      return;
+    }
     if (isLocalOutput) {
       playRelativeLocalTrack(1);
       return;
@@ -2804,8 +3719,12 @@ function EchoLinkApp(): ReactElement {
       playRelativePhoneQueueTrack(1);
       return;
     }
+    if (isStreamingOutput) {
+      playRelativeStreamingTrack(1);
+      return;
+    }
     void sendCommand({ command: 'next' });
-  }, [isLocalOutput, isPhoneOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, sendCommand]);
+  }, [activePlaybackPlaylist, isLocalOutput, isPhoneOutput, isStreamingOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, playRelativeSavedPlaylistTrack, playRelativeStreamingTrack, sendCommand]);
 
   useEffect(() => {
     if (!repeatOneEnabled || !isDeviceOutput || !deviceTrack) {
@@ -2856,6 +3775,29 @@ function EchoLinkApp(): ReactElement {
   ]);
 
   useEffect(() => {
+    if (repeatOneEnabled || !isDeviceOutput || !deviceTrack) {
+      phoneAutoAdvanceArmedRef.current = true;
+      return;
+    }
+    const devicePlaying = useDspPlayback ? dspStatus.playing : phonePlayerStatus.playing;
+    const didJustFinish = useDspPlayback ? dspStatus.didJustFinish : phonePlayerStatus.didJustFinish;
+    if (devicePlaying) phoneAutoAdvanceArmedRef.current = true;
+    if (!didJustFinish || !phoneAutoAdvanceArmedRef.current) return;
+    phoneAutoAdvanceArmedRef.current = false;
+    playNext();
+  }, [
+    deviceTrack,
+    dspStatus.didJustFinish,
+    dspStatus.playing,
+    isDeviceOutput,
+    phonePlayerStatus.didJustFinish,
+    phonePlayerStatus.playing,
+    playNext,
+    repeatOneEnabled,
+    useDspPlayback,
+  ]);
+
+  useEffect(() => {
     if (!repeatOneEnabled || isDeviceOutput || !client || !status?.playback.track) {
       pcRepeatArmedRef.current = true;
       return;
@@ -2880,6 +3822,30 @@ function EchoLinkApp(): ReactElement {
     applyStatus,
     client,
     isDeviceOutput,
+    repeatOneEnabled,
+    status?.playback.durationMs,
+    status?.playback.positionMs,
+    status?.playback.state,
+    status?.playback.track,
+  ]);
+
+  useEffect(() => {
+    if (repeatOneEnabled || isDeviceOutput || !activePlaybackPlaylist || !status?.playback.track) {
+      pcAutoAdvanceArmedRef.current = true;
+      return;
+    }
+    const { durationMs, positionMs, state } = status.playback;
+    const nearEnd = durationMs > 0 && positionMs >= Math.max(0, durationMs - 1500);
+    if (state === 'playing' || state === 'loading' || positionMs < Math.max(0, durationMs - 2500)) {
+      pcAutoAdvanceArmedRef.current = true;
+    }
+    if (state !== 'stopped' || !nearEnd || !pcAutoAdvanceArmedRef.current) return;
+    pcAutoAdvanceArmedRef.current = false;
+    playNext();
+  }, [
+    activePlaybackPlaylist,
+    isDeviceOutput,
+    playNext,
     repeatOneEnabled,
     status?.playback.durationMs,
     status?.playback.positionMs,
@@ -3001,11 +3967,15 @@ function EchoLinkApp(): ReactElement {
     ? text.connect
     : page === 'library'
       ? text.library
+      : page === 'search'
+        ? text.search
       : page === 'settings'
         ? text.settings
         : text.playback;
   const playbackModeLabel = isLocalOutput
     ? text.localMode
+    : isStreamingOutput
+      ? (languageIsEnglish ? 'Streaming Service' : '流媒体播放')
     : isPhoneOutput
       ? text.streamingMode
       : text.controllingMode;
@@ -3037,8 +4007,10 @@ function EchoLinkApp(): ReactElement {
     ['streaming', text.streamingServices],
   ];
   const librarySourceSettingOptions: Array<[LibrarySource, string]> = [
+    ['all', text.all],
     ['echo', text.echoLibrary],
     ['local', text.localLibrary],
+    ['streaming', text.streamingServices],
   ];
   const labelForLocalLibraryView = useCallback((view: LocalLibraryView) => {
     const labels: Record<LocalLibraryView, string> = {
@@ -3073,6 +4045,7 @@ function EchoLinkApp(): ReactElement {
       description: text.externalDataDescription,
       key: 'externalData',
       summary: [
+        lrcApiExternalDataEnabled ? 'LrcAPI' : null,
         lrclibExternalDataEnabled ? 'LRCLIB' : null,
         neteaseExternalDataEnabled ? (languageIsEnglish ? 'NetEase' : '网易云') : null,
       ].filter(Boolean).join(' · ') || (languageIsEnglish ? 'Off' : '关闭'),
@@ -3081,7 +4054,7 @@ function EchoLinkApp(): ReactElement {
     {
       description: text.librarySettingsDescription,
       key: 'library',
-      summary: `${defaultLibrarySource === 'local' ? text.localLibrary : text.echoLibrary} · ${labelForLocalLibraryView(defaultLocalLibraryView)}`,
+      summary: `${librarySourceSettingOptions.find(([value]) => value === defaultLibrarySource)?.[1] ?? text.echoLibrary} · ${labelForLocalLibraryView(defaultLocalLibraryView)}`,
       title: text.library,
     },
     {
@@ -3107,6 +4080,7 @@ function EchoLinkApp(): ReactElement {
     languageIsEnglish,
     localStorageBytes,
     loudnessNormalizationEnabled,
+    lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     neteaseExternalDataEnabled,
     pageSettingOptions,
@@ -3172,6 +4146,63 @@ function EchoLinkApp(): ReactElement {
         }
         break;
       }
+      case 'externalFieldSourcesSelect': {
+        const pending = pendingExternalMetadataSelection;
+        const selections = action.selections;
+        if (!pending || !selections) break;
+        const requiredFields = externalMetadataFields.filter((field) => (
+          pending.candidates.some((candidate) => Boolean(candidate[field]))
+        ));
+        const selectedCandidates = requiredFields.map((field) => ({
+          candidate: pending.candidates.find((item) => item.id === selections[field] && Boolean(item[field])),
+          field,
+        }));
+        if (selectedCandidates.some(({ candidate }) => !candidate)) break;
+
+        const metadata: ExternalTrackMetadata = {
+          albumArt: null,
+          artist: null,
+          error: null,
+          lyrics: null,
+          sourceTitle: selectedCandidates[0]?.candidate?.title ?? null,
+          status: 'ready',
+        };
+        const appliedSources: Partial<Record<ExternalMetadataField, ExternalMetadataSource>> = {};
+        selectedCandidates.forEach(({ candidate, field }) => {
+          if (!candidate) return;
+          if (field === 'albumArt') metadata.albumArt = candidate.albumArt;
+          if (field === 'artist') metadata.artist = candidate.artist;
+          if (field === 'lyrics') metadata.lyrics = candidate.lyrics;
+          appliedSources[field] = candidate.id;
+        });
+        setExternalMetadataByKey((current) => ({ ...current, [pending.metadataKey]: metadata }));
+        setExternalMetadataFieldSourcesByKey((current) => ({
+          ...current,
+          [pending.metadataKey]: appliedSources,
+        }));
+        setPendingExternalMetadataSelection(null);
+        break;
+      }
+      case 'externalSourcePickerDismiss': {
+        const pending = pendingExternalMetadataSelection;
+        if (!pending) break;
+        setExternalMetadataByKey((current) => {
+          const existing = current[pending.metadataKey];
+          return {
+            ...current,
+            [pending.metadataKey]: {
+              albumArt: existing?.albumArt ?? null,
+              artist: existing?.artist ?? null,
+              error: null,
+              lyrics: existing?.lyrics ?? null,
+              sourceTitle: existing?.sourceTitle ?? null,
+              status: 'ready',
+            },
+          };
+        });
+        setPendingExternalMetadataSelection(null);
+        break;
+      }
       case 'lyrics':
         setLyricsVisible(true);
         break;
@@ -3179,12 +4210,48 @@ function EchoLinkApp(): ReactElement {
         setLyricsVisible(false);
         break;
       case 'librarySource':
-        if (action.selection === 'echo' || action.selection === 'local') {
+        if (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'streaming') {
+          if (action.selection !== librarySource) setQuery('');
           setLibrarySource(action.selection);
         }
         break;
+      case 'streamingLibraryMode':
+        if (action.selection === 'search' || action.selection === 'playlists') {
+          setQuery('');
+          setStreamingLibraryMode(action.selection);
+          setStreamingTracks([]);
+          setSelectedStreamingPlaylistId(null);
+        }
+        break;
+      case 'streamingPlaylistOpen':
+        if (action.id && streamingApiBaseUrl && streamingCookie && streamingSessionMatchesApi) {
+          beginStreamingBusy();
+          setQuery('');
+          setSelectedStreamingPlaylistId(action.id);
+          void getNeteasePlaylistTracks(streamingApiBaseUrl, streamingCookie, action.id)
+            .then(setStreamingTracks)
+            .catch((playlistError) => setStreamingStatusText(formatRequestError(playlistError)))
+            .finally(endStreamingBusy);
+        }
+        break;
+      case 'streamingPlaylistFavorite':
+        if (action.id) {
+          setFavoriteStreamingPlaylistIds((current) => current.includes(action.id!)
+            ? current.filter((id) => id !== action.id)
+            : [action.id!, ...current]);
+        }
+        break;
+      case 'streamingPlaylistPin':
+        if (action.id) {
+          setPinnedStreamingPlaylistIds((current) => current.includes(action.id!)
+            ? current.filter((id) => id !== action.id)
+            : [action.id!, ...current]);
+        }
+        break;
       case 'libraryView':
-        if (localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
+        if (librarySource === 'echo' && echoLibraryViewOptions.includes(action.selection as EchoLibraryView)) {
+          setEchoLibraryView(action.selection as EchoLibraryView);
+        } else if (localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
           setLocalLibraryView(action.selection as LocalLibraryView);
         }
         break;
@@ -3197,7 +4264,15 @@ function EchoLinkApp(): ReactElement {
         setQuery(action.text ?? '');
         break;
       case 'libraryRefresh':
-        if (librarySource === 'local') {
+        if (librarySource === 'streaming' && streamingProfile && streamingApiBaseUrl && streamingCookie && streamingSessionMatchesApi) {
+          beginStreamingBusy();
+          void getNeteasePlaylists(streamingApiBaseUrl, streamingCookie, streamingProfile.userId)
+            .then(setStreamingPlaylists)
+            .catch((streamingError) => setStreamingStatusText(formatRequestError(streamingError)))
+            .finally(endStreamingBusy);
+        } else if (page === 'search' || librarySource === 'all') {
+          void Promise.all([refresh(), refreshLocalLibrary()]);
+        } else if (librarySource === 'local') {
           void refreshLocalLibrary();
         } else {
           void refresh();
@@ -3209,18 +4284,112 @@ function EchoLinkApp(): ReactElement {
       case 'libraryPlayFirst':
         switchToLocalPlayback();
         break;
+      case 'playlistCreate': {
+        const name = action.text?.trim();
+        if (!name) break;
+        const createdAt = Date.now();
+        const selectedTrack = action.source === 'local'
+          ? localTracks.find((track) => track.id === action.id)
+          : action.source === 'echo' ? tracks.find((track) => track.id === action.id) : null;
+        setPlaylists((current) => [{
+          createdAt,
+          favorite: false,
+          id: `playlist-${createdAt}`,
+          name,
+          pinned: false,
+          tracks: selectedTrack && (action.source === 'echo' || action.source === 'local')
+            ? [playlistTrackFromPreview(selectedTrack, action.source)]
+            : [],
+        }, ...current]);
+        break;
+      }
+      case 'playlistRename': {
+        const name = action.text?.trim();
+        if (!action.playlistId || !name) break;
+        setPlaylists((current) => current.map((playlist) => (
+          playlist.id === action.playlistId ? { ...playlist, name } : playlist
+        )));
+        break;
+      }
+      case 'playlistDelete':
+        if (action.playlistId) {
+          setPlaylists((current) => current.filter((playlist) => playlist.id !== action.playlistId));
+          if (activePlaylistId === action.playlistId) setActivePlaylistId(null);
+          if (activePlaybackPlaylistId === action.playlistId) setActivePlaybackPlaylistId(null);
+        }
+        break;
+      case 'playlistFavorite':
+        if (action.playlistId) {
+          setPlaylists((current) => current.map((playlist) => (
+            playlist.id === action.playlistId ? { ...playlist, favorite: !playlist.favorite } : playlist
+          )));
+        }
+        break;
+      case 'playlistPin':
+        if (action.playlistId) {
+          setPlaylists((current) => current.map((playlist) => (
+            playlist.id === action.playlistId ? { ...playlist, pinned: !playlist.pinned } : playlist
+          )));
+        }
+        break;
+      case 'playlistOpen':
+        if (action.playlistId) setActivePlaylistId(action.playlistId);
+        break;
+      case 'playlistClose':
+        setActivePlaylistId(null);
+        break;
+      case 'playlistAddTrack': {
+        if (!action.playlistId || !action.id || (action.source !== 'echo' && action.source !== 'local')) break;
+        const track = action.source === 'local'
+          ? localTracks.find((item) => item.id === action.id)
+          : tracks.find((item) => item.id === action.id);
+        if (!track) break;
+        const snapshot = playlistTrackFromPreview(track, action.source);
+        setPlaylists((current) => current.map((playlist) => {
+          if (playlist.id !== action.playlistId) return playlist;
+          if (playlist.tracks.some((item) => item.source === snapshot.source && item.id === snapshot.id)) return playlist;
+          return {
+            ...playlist,
+            tracks: [...playlist.tracks, snapshot],
+          };
+        }));
+        break;
+      }
+      case 'playlistRemoveTrack':
+        if (action.playlistId && action.trackId && (action.source === 'echo' || action.source === 'local')) {
+          setPlaylists((current) => current.map((playlist) => (
+            playlist.id === action.playlistId
+              ? {
+                ...playlist,
+                tracks: playlist.tracks.filter((track) => !(track.source === action.source && track.id === action.trackId)),
+              }
+              : playlist
+          )));
+        }
+        break;
       case 'trackPlay': {
+        setActivePlaybackPlaylistId(
+          action.playlistId && playlists.some((playlist) => playlist.id === action.playlistId)
+            ? action.playlistId
+            : null,
+        );
+        if (action.source === 'streaming') {
+          const track = streamingTracks.find((item) => item.id === action.id);
+          if (track) void playNeteaseTrack(track, 0);
+          break;
+        }
         if (action.source === 'local') {
           const track = localTracks.find((item) => item.id === action.id);
           if (track) void playTrackOnLocal(track, 0);
           break;
         }
-        const track = tracks.find((item) => item.id === action.id);
+        const track = tracks.find((item) => item.id === action.id)
+          ?? playlists.flatMap((playlist) => playlist.tracks).find((item) => item.source === 'echo' && item.id === action.id);
         if (track) {
           if (isPhoneOutput && track.canPlayOnPhone) {
             void playTrackOnPhone(track, 0, false);
           } else {
-            playTrackOnPc(track);
+            playEchoTrackOnPc(track, action.playlistId);
           }
         }
         break;
@@ -3253,10 +4422,20 @@ function EchoLinkApp(): ReactElement {
       case 'connectMode':
         if (action.selection === 'echo' || action.selection === 'streaming') {
           setConnectPanelMode(action.selection);
-          if (action.selection === 'streaming') {
-            showErrorAlert(text.streamingServices, text.streamingComingSoon, 'streaming-coming-soon');
-          }
         }
+        break;
+      case 'streamingApiUrl':
+        setStreamingApiBaseUrl(action.text ?? '');
+        break;
+      case 'streamingLogin':
+        void startNeteaseLogin();
+        break;
+      case 'streamingLogout':
+        void logoutNetease();
+        break;
+      case 'streamingConnect':
+        setConnectPanelMode('streaming');
+        switchPage('connect');
         break;
       case 'echoConnectionEnabled':
         if (typeof action.enabled === 'boolean') setEchoConnectionEnabled(action.enabled);
@@ -3272,11 +4451,11 @@ function EchoLinkApp(): ReactElement {
         break;
       case 'connectionField':
         if (action.field === 'host') {
-          setConnection((current) => ({ ...current, host: action.text ?? '' }));
+          setConnectionDraft((current) => ({ ...current, host: action.text ?? '' }));
         } else if (action.field === 'port') {
-          setConnection((current) => ({ ...current, port: Number(action.text) || 26789 }));
+          setConnectionDraft((current) => ({ ...current, port: action.text ?? '' }));
         } else if (action.field === 'token') {
-          setConnection((current) => ({ ...current, token: action.text ?? '' }));
+          setConnectionDraft((current) => ({ ...current, token: action.text ?? '' }));
         }
         break;
       case 'connectionSave':
@@ -3290,6 +4469,7 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'loudness') setLoudnessNormalizationEnabled(action.enabled);
         if (action.key === 'autoLyrics') setAutoOpenLyricsForLocalTracks(action.enabled);
         if (action.key === 'artworkGlow') setShowArtworkGlow(action.enabled);
+        if (action.key === 'lrcapi') setLrcApiExternalDataEnabled(action.enabled);
         if (action.key === 'lrclib') setLrclibExternalDataEnabled(action.enabled);
         if (action.key === 'netease') setNeteaseExternalDataEnabled(action.enabled);
         if (action.key === 'autoQueueImports') setAutoQueueImportedLocalTracks(action.enabled);
@@ -3308,7 +4488,7 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'defaultPage' && appPages.includes(action.selection as AppPage)) {
           setDefaultPage(action.selection as AppPage);
         }
-        if (action.key === 'defaultLibrarySource' && (action.selection === 'echo' || action.selection === 'local')) {
+        if (action.key === 'defaultLibrarySource' && (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'streaming')) {
           setDefaultLibrarySource(action.selection);
           setLibrarySource(action.selection);
         }
@@ -3320,7 +4500,10 @@ function EchoLinkApp(): ReactElement {
       case 'settingAction':
         if (action.key === 'resetTags') setAudioTagVisibility(defaultAudioTagVisibility);
         if (action.key === 'rescanMetadata') void refreshLocalLibrary();
-        if (action.key === 'clearLocalQueue') setLocalQueueTrackIds([]);
+        if (action.key === 'clearLocalQueue') {
+          setLocalQueueActive(true);
+          setLocalQueueTrackIds([]);
+        }
         if (action.key === 'clearRecent') setRecentLocalTrackIds([]);
         break;
       case 'next':
@@ -3328,6 +4511,7 @@ function EchoLinkApp(): ReactElement {
         break;
       case 'output':
         if (action.mode === 'local') switchToLocalPlayback();
+        if (action.mode === 'streaming') switchToStreamingPlayback();
         if (action.mode === 'pc') switchToPcPlayback();
         if (action.mode === 'phone') switchToPhonePlayback();
         break;
@@ -3341,6 +4525,14 @@ function EchoLinkApp(): ReactElement {
         setPlaylistOpen(true);
         break;
       case 'queuePlay': {
+        if (action.playlistId && playlists.some((playlist) => playlist.id === action.playlistId)) {
+          setActivePlaybackPlaylistId(action.playlistId);
+        }
+        if (action.source === 'streaming') {
+          const track = streamingTracks.find((item) => item.id === action.id);
+          if (track) void playNeteaseTrack(track, 0);
+          break;
+        }
         if (action.source === 'local') {
           const track = localTracks.find((item) => item.id === action.id);
           if (track) void playTrackOnLocal(track, 0);
@@ -3352,23 +4544,88 @@ function EchoLinkApp(): ReactElement {
           if (isPhoneOutput) {
             void playTrackOnPhone(track, 0, false);
           } else {
-            playTrackOnPc(track);
+            playEchoTrackOnPc(track, action.playlistId);
           }
         }
         break;
       }
       case 'queueMove': {
-        const track = localTracks.find((item) => item.id === action.id);
-        if (track && (action.value === -1 || action.value === 1)) {
-          moveLocalQueueTrack(track, action.value);
+        if (!action.id || (action.value !== -1 && action.value !== 1)) break;
+        if (action.playlistId && (action.source === 'echo' || action.source === 'local')) {
+          const playlist = playlists.find((item) => item.id === action.playlistId);
+          const index = playlist?.tracks.findIndex((track) => track.id === action.id && track.source === action.source) ?? -1;
+          const nextTracks = playlist ? moveItem(playlist.tracks, index, action.value as -1 | 1) : [];
+          setPlaylists((current) => current.map((playlist) => {
+            if (playlist.id !== action.playlistId) return playlist;
+            return { ...playlist, tracks: nextTracks };
+          }));
+          if (playbackOutputMode === 'pc' && action.playlistId === activePlaybackPlaylistId) {
+            reorderEchoQueue(nextTracks.filter((track) => track.source === 'echo'));
+          }
+          break;
         }
+        if (action.source === 'streaming') {
+          setStreamingTracks((current) => moveItem(
+            current,
+            current.findIndex((track) => track.id === action.id),
+            action.value as -1 | 1,
+          ));
+          break;
+        }
+        if (action.source === 'echo' && playbackOutputMode === 'pc') {
+          reorderEchoQueue(moveItem(
+            playlistItems,
+            playlistItems.findIndex((track) => track.id === action.id),
+            action.value as -1 | 1,
+          ));
+          break;
+        }
+        const track = localTracks.find((item) => item.id === action.id);
+        if (track) moveLocalQueueTrack(track, action.value);
         break;
       }
       case 'queueRemove':
-        if (action.id) setLocalQueueTrackIds((current) => current.filter((id) => id !== action.id));
+        if (!action.id) break;
+        if (action.playlistId && (action.source === 'echo' || action.source === 'local')) {
+          const playlist = playlists.find((item) => item.id === action.playlistId);
+          const nextTracks = playlist?.tracks.filter((track) => !(track.id === action.id && track.source === action.source)) ?? [];
+          setPlaylists((current) => current.map((playlist) => playlist.id === action.playlistId
+            ? {
+              ...playlist,
+              tracks: nextTracks,
+            }
+            : playlist));
+          if (playbackOutputMode === 'pc' && action.playlistId === activePlaybackPlaylistId) {
+            reorderEchoQueue(nextTracks.filter((track) => track.source === 'echo'));
+          }
+        } else if (action.source === 'streaming') {
+          setStreamingTracks((current) => current.filter((track) => track.id !== action.id));
+        } else if (action.source === 'echo' && playbackOutputMode === 'pc') {
+          const next = playlistItems.filter((track) => track.id !== action.id);
+          reorderEchoQueue(next, displayTrack?.id === action.id ? next[0]?.id ?? null : displayTrack?.id ?? null);
+        } else {
+          setLocalQueueActive(true);
+          setLocalQueueTrackIds((current) => (
+            localQueueActive || current.length > 0 ? current : localTracks.map((track) => track.id)
+          ).filter((id) => id !== action.id));
+        }
         break;
       case 'queueClear':
-        setLocalQueueTrackIds([]);
+        if (action.playlistId) {
+          setPlaylists((current) => current.map((playlist) => playlist.id === action.playlistId
+            ? { ...playlist, tracks: [] }
+            : playlist));
+          if (playbackOutputMode === 'pc' && action.playlistId === activePlaybackPlaylistId) {
+            void sendCommand({ command: 'queueClear', output: 'pc' });
+          }
+        } else if (action.source === 'streaming') {
+          setStreamingTracks([]);
+        } else if (action.source === 'echo' && playbackOutputMode === 'pc') {
+          void sendCommand({ command: 'queueClear', output: 'pc' });
+        } else {
+          setLocalQueueActive(true);
+          setLocalQueueTrackIds([]);
+        }
         break;
       case 'previous':
         playPrevious();
@@ -3524,6 +4781,7 @@ function EchoLinkApp(): ReactElement {
     if (section === 'externalData') {
       return (
         <View style={styles.settingsList}>
+          {renderSettingSwitch(text.lrcApiSource, text.lrcApiSourceHint, lrcApiExternalDataEnabled, setLrcApiExternalDataEnabled)}
           {renderSettingSwitch(text.lrclibSource, text.lrclibSourceHint, lrclibExternalDataEnabled, setLrclibExternalDataEnabled)}
           {renderSettingSwitch(text.neteaseSource, text.neteaseSourceHint, neteaseExternalDataEnabled, setNeteaseExternalDataEnabled)}
           <Text style={styles.settingDescription}>{text.externalDataDescription}</Text>
@@ -3562,7 +4820,10 @@ function EchoLinkApp(): ReactElement {
         </View>
         {renderSettingSwitch(text.confirmDelete, text.confirmDeleteDescription, confirmBeforeDeletingLocalTracks, setConfirmBeforeDeletingLocalTracks)}
         {renderSettingAction(text.rescanMetadata, text.rescanMetadataDescription, () => void refreshLocalLibrary(), localLibraryBusy)}
-        {renderSettingAction(text.clearLocalQueue, text.clearLocalQueueDescription, () => setLocalQueueTrackIds([]), localQueueTrackIds.length === 0)}
+        {renderSettingAction(text.clearLocalQueue, text.clearLocalQueueDescription, () => {
+          setLocalQueueActive(true);
+          setLocalQueueTrackIds([]);
+        }, localQueueActive && localQueueTrackIds.length === 0)}
         {renderSettingAction(text.clearRecent, text.clearRecentDescription, () => setRecentLocalTrackIds([]), recentLocalTrackIds.length === 0)}
       </View>
     );
@@ -3946,12 +5207,45 @@ function EchoLinkApp(): ReactElement {
     <EchoNativePlayerView
       activeLyricIndex={activeLyricIndex}
       activePage={page}
-      artist={displayTrack?.artist ?? ''}
+      artist={displayArtist}
       artworkUrl={displayArtworkUrl ?? stableArtworkUrl ?? ''}
       connectionLabel={connectedLabel}
       connectionOnline={echoConnectionOnline}
-      controlsEnabled={Boolean(client || isDeviceOutput || localTracks.length > 0)}
+      controlsEnabled={playbackControlsEnabled}
       durationMs={playbackDurationMs}
+      externalSourcePickerPayload={pendingExternalMetadataSelection?.metadataKey === externalMetadataKey
+        ? JSON.stringify({
+          artworkLabel: languageIsEnglish ? 'Artwork' : '封面',
+          artistLabel: languageIsEnglish ? 'Artist' : '艺术家',
+          cancelLabel: languageIsEnglish ? 'Cancel' : '取消',
+          candidates: pendingExternalMetadataSelection.candidates.map((candidate) => ({
+            albumArt: candidate.albumArt,
+            availableLabel: [
+              candidate.lyrics ? (languageIsEnglish ? 'Lyrics' : '歌词') : null,
+              candidate.artist ? (languageIsEnglish ? 'Artist' : '艺术家') : null,
+              candidate.albumArt ? (languageIsEnglish ? 'Artwork' : '封面') : null,
+            ].filter(Boolean).join(' / '),
+            hasArtist: Boolean(candidate.artist),
+            hasArtwork: Boolean(candidate.albumArt),
+            hasLyrics: Boolean(candidate.lyrics),
+            id: candidate.id,
+            sourceLabel: candidate.id === 'netease' && !languageIsEnglish
+              ? '网易云音乐'
+              : candidate.sourceLabel,
+            title: candidate.title,
+          })),
+          doneLabel: languageIsEnglish ? 'Done' : '完成',
+          id: pendingExternalMetadataSelection.id,
+          lyricsLabel: languageIsEnglish ? 'Lyrics' : '歌词',
+          selectedLabel: languageIsEnglish ? 'Selected' : '已选择',
+          subtitle: languageIsEnglish
+            ? 'Choose a source separately for each available field.'
+            : '分别为歌词、艺术家和封面选择来源。',
+          title: languageIsEnglish ? 'Choose a source' : '选择外源数据',
+          unavailableLabel: languageIsEnglish ? 'Unavailable' : '未获取',
+          useSourceLabel: languageIsEnglish ? 'Use this source' : '使用此来源',
+        })
+        : ''}
       eqGains={eqGains}
       eqPreset={eqPreset}
       isPlaying={isPlaybackActive}
@@ -3959,6 +5253,7 @@ function EchoLinkApp(): ReactElement {
       lyricTexts={lyricLines.map((line) => line.text)}
       lyricTimesMs={lyricLines.map((line) => line.timeMs ?? -1)}
       lyricsVisible={lyricsVisible}
+      metadataLoading={currentExternalMetadata?.status === 'loading' || phoneAudioBusy}
       modeLabel={playbackModeLabel}
       onAction={handleNativeAction}
       outputMode={playbackOutputMode}
@@ -3966,20 +5261,28 @@ function EchoLinkApp(): ReactElement {
       positionMs={playbackPositionMs}
       queueCount={playlistItems.length}
       queuePayload={JSON.stringify({
+        canEdit: queueCanEdit,
         clearLabel: text.clear,
         emptyLabel: text.queueEmpty,
-        isLocal: isLocalOutput,
-        items: playlistItems.map((item, index) => ({
-          artist: item.artist,
-          current: item.id === playbackQueue?.currentTrackId || item.id === displayTrack?.id,
-          id: `${item.id}-${index}`,
-          meta: item.album || item.sourceLabel,
-          title: item.title,
-          trackId: item.id,
-        })),
+        items: playlistItems.map((item, index) => {
+          const source = item.source ?? queueSource;
+          return {
+            artist: item.artist,
+            current: (item.id === playbackQueue?.currentTrackId || item.id === displayTrack?.id)
+              && source === queueSource,
+            id: queueCanEdit ? `${source}:${item.id}` : `${source}:${item.id}:${index}`,
+            meta: item.album || item.sourceLabel,
+            source,
+            title: item.title,
+            trackId: item.id,
+          };
+        }),
         moveDownLabel: text.moveDown,
         moveUpLabel: text.moveUp,
         removeLabel: text.removeFromQueue,
+        playlistId: activePlaybackPlaylist?.id ?? '',
+        source: queueSource,
+        subtitle: queueSubtitle,
         title: text.playlist,
       })}
       repeatOne={repeatOneEnabled}
@@ -4030,6 +5333,39 @@ function EchoLinkApp(): ReactElement {
       title,
       value: '',
     });
+    const nativePlaylist = (playlist: SavedPlaylist) => {
+      const liveTracks = playlist.tracks.map((track) => (
+        track.source === 'local' ? localTrackById.get(track.id) ?? track : echoTrackById.get(track.id) ?? track
+      ));
+      return {
+        artworkUrl: resolveArtworkUrl(liveTracks.find((track) => track.artworkUrl)?.artworkUrl) ?? '',
+        favorite: playlist.favorite,
+        id: playlist.id,
+        name: playlist.name,
+        pinned: playlist.pinned,
+        subtitle: languageIsEnglish ? `${playlist.tracks.length} tracks` : `${playlist.tracks.length} 首`,
+        tracks: playlist.tracks.map((track, index) => {
+          const liveTrack = liveTracks[index] ?? track;
+          const localLiveTrack = track.source === 'local' ? localTrackById.get(track.id) : null;
+          return {
+            artworkUrl: resolveArtworkUrl(liveTrack.artworkUrl) ?? '',
+            artist: liveTrack.artist,
+            canPlayOnPhone: liveTrack.canPlayOnPhone,
+            favorite: track.source === 'local' && favoriteLocalTrackIdSet.has(track.id),
+            group: '',
+            hasLyrics: localLiveTrack?.hasLyrics ?? false,
+            id: track.id,
+            isLocal: track.source === 'local',
+            source: track.source,
+            tags: tagsForTrack(liveTrack, { includeDuration: true, visibleAudioTags: audioTagVisibility }),
+            title: liveTrack.title,
+          };
+        }),
+      };
+    };
+    const selectedPlaylist = activePlaylistId
+      ? playlists.find((playlist) => playlist.id === activePlaylistId) ?? null
+      : null;
     const settingRows = {
       interface: [
         settingPicker('language', text.language, text.languageHint, appLanguage, [['zh', '中文'], ['en', 'English']]),
@@ -4052,6 +5388,7 @@ function EchoLinkApp(): ReactElement {
         settingToggle('artworkGlow', text.glow, text.glowDescription, showArtworkGlow),
       ],
       externalData: [
+        settingToggle('lrcapi', text.lrcApiSource, text.lrcApiSourceHint, lrcApiExternalDataEnabled),
         settingToggle('lrclib', text.lrclibSource, text.lrclibSourceHint, lrclibExternalDataEnabled),
         settingToggle('netease', text.neteaseSource, text.neteaseSourceHint, neteaseExternalDataEnabled),
       ],
@@ -4114,9 +5451,9 @@ function EchoLinkApp(): ReactElement {
     };
     const payload = {
       connection: page === 'connect' ? {
-        busy: busy || !client,
+        busy: connectPanelMode === 'streaming' ? streamingBusy : busy || !client || connectionDraftDirty,
         enabled: echoConnectionEnabled,
-        host: connection.host,
+        host: connectionDraft.host,
         labels: {
           connect: text.connect,
           connectionDescription: text.echoConnectionDescription,
@@ -4140,14 +5477,32 @@ function EchoLinkApp(): ReactElement {
         mode: connectPanelMode,
         modeOptions: connectPanelOptions.map(([id, label]) => ({ id, label })),
         pairingText,
-        port: String(connection.port),
+        port: String(connectionDraft.port),
         streamableCount: String(streamableTrackCount),
-        token: connection.token,
+        streaming: {
+          apiBaseUrl: streamingApiBaseUrl,
+          busy: streamingBusy,
+          loggedIn: Boolean(streamingProfile && streamingSessionMatchesApi),
+          playlistCount: streamingPlaylists.length,
+          profileAvatarUrl: streamingProfile?.avatarUrl ?? '',
+          profileName: streamingProfile?.nickname ?? '',
+          qrUrl: streamingQrUrl,
+          status: streamingStatusText,
+        },
+        token: connectionDraft.token,
       } : null,
       language: appLanguage,
-      library: page === 'library' ? {
-        busy: librarySource === 'local' ? localLibraryBusy : busy || !client,
+      library: page === 'library' || page === 'search' ? {
+        busy: librarySource === 'streaming'
+          ? streamingBusy
+          : page === 'search' || librarySource === 'all'
+          ? busy || localLibraryBusy
+          : librarySource === 'local' ? localLibraryBusy : busy || !client,
         canPlayLocal: localTracks.length > 0,
+        collections: activeLibraryCollections.map((collection) => ({
+          ...collection,
+          artworkUrl: resolveArtworkUrl(collection.artworkUrl) ?? '',
+        })),
         filter: libraryFilter,
         filterOptions: [
           { id: 'all', label: `${text.all} ${tracks.length}` },
@@ -4156,39 +5511,92 @@ function EchoLinkApp(): ReactElement {
         ],
         labels: {
           addToQueue: text.addToQueue,
+          addToPlaylist: languageIsEnglish ? 'Add to playlist' : '加入歌单',
+          cancel: languageIsEnglish ? 'Cancel' : '取消',
+          collections: !showingAllLibrary && (librarySource === 'echo' ? echoLibraryView : localLibraryView) === 'artists'
+            ? (languageIsEnglish ? 'Artists' : '艺术家')
+            : (languageIsEnglish ? 'Albums' : '专辑'),
+          createPlaylist: languageIsEnglish ? 'Create playlist' : '创建歌单',
           deleteTrack: text.deleteLocalTrackTitle,
-          empty: librarySource === 'local' ? text.emptyLocalLibrary : text.emptyEchoLibrary,
+          deletePlaylist: languageIsEnglish ? 'Delete playlist' : '删除歌单',
+          empty: librarySource === 'streaming'
+            ? (streamingProfile
+              ? (languageIsEnglish ? 'No matching NetEase Cloud Music content' : '没有匹配的网易云音乐内容')
+              : (languageIsEnglish ? 'Sign in to NetEase Cloud Music from Connect first' : '请先在连接页登录网易云音乐'))
+            : showingAllLibrary
+            ? (languageIsEnglish ? 'No matching albums or tracks' : '没有匹配的专辑或歌曲')
+            : librarySource === 'local' ? text.emptyLocalLibrary : text.emptyEchoLibrary,
           favorite: languageIsEnglish ? 'Favorite' : '收藏',
+          favoritePlaylist: languageIsEnglish ? 'Favorite playlist' : '收藏歌单',
           importLyrics: text.importLyricsA11y,
           importMusic: text.importMusic,
           localPlay: text.localPlay,
           playNext: text.playNextA11y,
-          refresh: librarySource === 'local' ? text.scan : text.sync,
+          playlistName: languageIsEnglish ? 'Playlist name' : '歌单名称',
+          playlists: languageIsEnglish ? 'Playlists' : '歌单',
+          pinPlaylist: languageIsEnglish ? 'Pin playlist' : '置顶歌单',
+          removeFromPlaylist: languageIsEnglish ? 'Remove from playlist' : '从歌单移除',
+          renamePlaylist: languageIsEnglish ? 'Rename playlist' : '重命名歌单',
+          refresh: showingAllLibrary ? text.sync : librarySource === 'local' ? text.scan : text.sync,
           searchPlaceholder: text.searchPlaceholder,
+          songs: text.songs,
+          unFavoritePlaylist: languageIsEnglish ? 'Remove favorite' : '取消收藏',
+          unpinPlaylist: languageIsEnglish ? 'Unpin playlist' : '取消置顶',
           unfavorite: languageIsEnglish ? 'Remove Favorite' : '取消收藏',
         },
         query,
-        source: librarySource,
+        playlists: sortedPlaylists.map(nativePlaylist),
+        selectedPlaylist: selectedPlaylist ? nativePlaylist(selectedPlaylist) : null,
+        source: page === 'search' ? 'all' : librarySource,
         sourceOptions: librarySourceSettingOptions.map(([id, label]) => ({ id, label })),
-        totalLabel: languageIsEnglish ? `${activeLibraryTotal} tracks` : `${activeLibraryTotal} 首`,
-        tracks: activeLibraryTracks.map((item) => {
+        streaming: {
+          libraryMode: streamingLibraryMode,
+          libraryModeOptions: [
+            { id: 'search', label: languageIsEnglish ? 'Search' : '搜索' },
+            { id: 'playlists', label: languageIsEnglish ? 'Playlists' : '歌单' },
+          ],
+          loggedIn: Boolean(streamingProfile && streamingSessionMatchesApi),
+          playlistCount: streamingSessionMatchesApi ? streamingPlaylists.length : 0,
+          playlists: (streamingSessionMatchesApi ? sortedStreamingPlaylists : []).map((playlist) => ({
+            artworkUrl: playlist.artworkUrl,
+            favorite: favoriteStreamingPlaylistIds.includes(playlist.id),
+            id: playlist.id,
+            name: playlist.name,
+            pinned: pinnedStreamingPlaylistIds.includes(playlist.id),
+            sourceLabel: languageIsEnglish ? 'NetEase' : '网易云',
+            trackCount: playlist.trackCount,
+          })),
+          profileName: streamingProfile?.nickname ?? '',
+          selectedPlaylistId: selectedStreamingPlaylistId ?? '',
+          selectedPlaylistName: streamingPlaylists.find((item) => item.id === selectedStreamingPlaylistId)?.name ?? '',
+          status: streamingStatusText,
+        },
+        totalLabel: languageIsEnglish
+          ? `${activeLibraryTotal} tracks · showing ${displayedLibraryTracks.length}`
+          : `共 ${activeLibraryTotal} 首 · 显示 ${displayedLibraryTracks.length} 首`,
+        tracks: displayedLibraryTracks.map((item) => {
           const localItem = item as LocalMusicTrack;
+          const isLocalItem = localTrackById.has(item.id);
           const artworkUrl = resolveArtworkUrl(item.artworkUrl);
           return {
             artworkUrl: artworkUrlIsVisible(artworkUrl) ? artworkUrl ?? '' : '',
             artist: item.artist,
             canPlayOnPhone: item.canPlayOnPhone,
-            favorite: librarySource === 'local' && favoriteLocalTrackIdSet.has(item.id),
-            group: librarySource === 'local' ? localGroupLabel(localItem) ?? '' : '',
-            hasLyrics: librarySource === 'local' && localItem.hasLyrics,
+            favorite: isLocalItem && favoriteLocalTrackIdSet.has(item.id),
+            group: showingAllLibrary
+              ? (isLocalItem ? text.localLibrary : text.echoLibrary)
+              : isLocalItem ? localGroupLabel(localItem) ?? '' : echoGroupLabel(item) ?? '',
+            hasLyrics: isLocalItem && localItem.hasLyrics,
             id: item.id,
-            isLocal: librarySource === 'local',
+            isLocal: isLocalItem,
+            source: librarySource === 'streaming' ? 'streaming' : isLocalItem ? 'local' : 'echo',
             tags: tagsForTrack(item, { includeDuration: true, visibleAudioTags: audioTagVisibility }),
             title: item.title,
           };
         }),
-        view: localLibraryView,
-        viewOptions: localLibraryViewOptions.map((id) => ({ id, label: labelForLocalLibraryView(id) })),
+        view: librarySource === 'echo' ? echoLibraryView : localLibraryView,
+        viewOptions: (librarySource === 'echo' ? echoLibraryViewOptions : localLibraryViewOptions)
+          .map((id) => ({ id, label: labelForLocalLibraryView(id) })),
       } : null,
       page,
       settings: page === 'settings' ? {
@@ -4331,8 +5739,8 @@ function EchoLinkApp(): ReactElement {
                       <Text style={styles.cardEyebrow}>{text.manual}</Text>
                       <Text style={styles.cardTitle}>{text.manual}</Text>
                       <TextInput
-                        value={connection.host}
-                        onChangeText={(host) => setConnection((current) => ({ ...current, host }))}
+                        value={connectionDraft.host}
+                        onChangeText={(host) => setConnectionDraft((current) => ({ ...current, host }))}
                         placeholder={text.manualHostPlaceholder}
                         placeholderTextColor="#a8a29e"
                         autoCapitalize="none"
@@ -4340,16 +5748,16 @@ function EchoLinkApp(): ReactElement {
                         style={styles.input}
                       />
                       <TextInput
-                        value={String(connection.port)}
-                        onChangeText={(port) => setConnection((current) => ({ ...current, port: Number(port) || 26789 }))}
+                        value={connectionDraft.port}
+                        onChangeText={(port) => setConnectionDraft((current) => ({ ...current, port }))}
                         placeholder={text.portPlaceholder}
                         placeholderTextColor="#a8a29e"
                         keyboardType="number-pad"
                         style={styles.input}
                       />
                       <TextInput
-                        value={connection.token}
-                        onChangeText={(token) => setConnection((current) => ({ ...current, token }))}
+                        value={connectionDraft.token}
+                        onChangeText={(token) => setConnectionDraft((current) => ({ ...current, token }))}
                         placeholder="Token"
                         placeholderTextColor="#a8a29e"
                         autoCapitalize="none"
@@ -4373,7 +5781,7 @@ function EchoLinkApp(): ReactElement {
                           accessibilityRole="button"
                           style={styles.secondaryButton}
                           onPress={() => void refresh()}
-                          disabled={!client || busy}
+                          disabled={!client || busy || connectionDraftDirty}
                         >
                           {renderButtonBlur(24)}
                           <AnimatedButtonContent motionKey={`test-${busy}`} style={styles.buttonMotionRow}>
@@ -4813,7 +6221,10 @@ function EchoLinkApp(): ReactElement {
                       <Pressable
                         accessibilityLabel={text.clearLocalQueue}
                         accessibilityRole="button"
-                        onPress={() => setLocalQueueTrackIds([])}
+                        onPress={() => {
+                          setLocalQueueActive(true);
+                          setLocalQueueTrackIds([]);
+                        }}
                         style={styles.playlistSmallButton}
                       >
                         <Text style={styles.playlistSmallButtonText}>{text.clear}</Text>
@@ -4894,7 +6305,10 @@ function EchoLinkApp(): ReactElement {
                               accessibilityRole="button"
                               onPress={(event) => {
                                 event.stopPropagation();
-                                setLocalQueueTrackIds((current) => current.filter((id) => id !== item.id));
+                                setLocalQueueActive(true);
+                                setLocalQueueTrackIds((current) => (
+                                  localQueueActive || current.length > 0 ? current : localTracks.map((track) => track.id)
+                                ).filter((id) => id !== item.id));
                               }}
                               style={styles.localQueueButton}
                             >

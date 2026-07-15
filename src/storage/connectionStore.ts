@@ -10,9 +10,14 @@ const isConnection = (value: unknown): value is EchoLinkConnection => {
   const candidate = value as Partial<EchoLinkConnection>;
   return (
     typeof candidate.host === 'string' &&
+    candidate.host.trim().length > 0 &&
     typeof candidate.token === 'string' &&
+    candidate.token.trim().length > 0 &&
     typeof candidate.name === 'string' &&
     typeof candidate.port === 'number' &&
+    Number.isInteger(candidate.port) &&
+    candidate.port >= 1 &&
+    candidate.port <= 65535 &&
     (candidate.scheme === 'http' || candidate.scheme === 'https')
   );
 };

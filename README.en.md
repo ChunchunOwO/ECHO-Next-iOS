@@ -24,29 +24,31 @@
 
 ## What is this?
 
-ECHO iPhone is an iPhone music player. It can scan and play music stored locally on the phone, and it can connect to ECHO NEXT through EchoLink to browse the desktop library, control desktop playback, or stream desktop music to the phone.
+ECHO iPhone is an independent iPhone music player. It plays music stored on the phone, connects to ECHO NEXT, and can sign in to NetEase Cloud Music. Libraries, search, playlists, lyrics, and playback controls live in one app.
 
-Starting from 0.5.0, local and streamed playback can use a native iOS DSP engine. EQ presets, loudness normalization, volume, and seeking are applied to the real audio path. Connection information, language, audio tags, EQ, and external-data settings are persisted locally.
+Version 0.5.0 moves the main pages to SwiftUI and adds native audio DSP. Local playback, ECHO streams, and NetEase playback prefer the native iOS audio engine, so EQ, loudness normalization, volume, and seeking affect the real audio path.
 
 ## Features
 
-- Independent playback modes: Local, Control, and Streaming can be switched from the playback page.
+- Playback outputs: Local, Media, Control, and Stream can be switched from the playback page.
 - Local library: import, scan, favorites, recently played, local queue, and imported LRC lyrics.
-- Library source switch: the Library page can switch between the ECHO library and the phone library. The local library supports songs, albums, artists, formats, favorites, and recently played views.
+- Multiple library sources: All, ECHO, Local, and Media. The local library supports songs, albums, artists, formats, favorites, and recent views.
+- NetEase Cloud Music: custom NeteaseCloudMusicApi endpoint, QR sign-in, profile, playlists, search, and playback.
+- Global search across ECHO and local tracks, albums, and artists.
+- Editable playlists: create, rename, delete, favorite, pin, and add tracks from ECHO or the local library.
 - EchoLink pairing link connection: supports one-tap filling through `echo://pair?...`.
+- QR pairing through the camera or an image selected from Photos.
 - Manual LAN connection: Host, Port, and Token are saved locally, so the pairing link does not need to be pasted every time.
 - The Connection page now has an ECHO connection switch. It is off by default; when off, the app does not poll the desktop app or show connection-error alerts.
-- The Connection page adds a "Connect ECHO / Streaming" switch. The Streaming entry is present but not open yet.
-- Four main pages: Playback, Library, Connection, and Settings, with a glass bottom dock and swipe navigation.
-- Redesigned playback page: cover art, track information, tags, progress, playback controls, volume, EQ, playlist, and output switching are gathered into one player view.
-- Gaussian glass UI: playback panels, buttons, dock, alerts, and popovers use a unified `expo-blur` style.
+- Native pages: Playback, Library, Search, Connection, and Settings use SwiftUI with a native TabView. Liquid Glass is used when available, with a material fallback on older systems.
+- Playback page: cover art, track information, tags, progress, controls, volume, EQ, lyrics, queue, and output switching share one player view.
 - Real DSP: local / streamed playback supports native iOS DSP, EQ presets, and loudness normalization.
 - EQ presets: Flat, Bass, Vocal, Clarity, Warm, and Late Night.
 - Expandable volume control: the expanded slider is longer and shows the current percentage.
-- Playlist popover: opens inside the playback page with an enter / exit animation.
-- Lyrics mode: supports local LRC, EchoLink `/lyrics`, LRCLIB, and NetEase Cloud Music results, parses LRC, auto-scrolls, and highlights the current lyric line.
+- Native queue: play, remove, reorder, and clear tracks while showing the current playlist and track.
+- Lyrics mode: local LRC, EchoLink `/lyrics`, LRCLIB, LrcAPI, and NetEase Cloud Music with auto-scroll and current-line highlighting.
 - Tap-to-seek lyrics: lyric lines with timestamps can be tapped to seek directly.
-- External data: LRCLIB is preferred for lyrics. NetEase Cloud Music supplements cover art and Chinese-library lyrics. If EchoLink does not return cover art or the image fails to load, the app can try an external cover.
+- External data: LRCLIB is preferred for lyrics, NetEase for artwork, and LrcAPI can supplement lyrics, artwork, and artists. When several sources match, each field can use a different source.
 - Stable cover loading: keeps the previous cover before the new one is successfully loaded, reducing default-cover flickering and blank states.
 - Slider touch interruption fix: page gestures are locked while dragging the progress bar or volume slider to prevent vertical swipes from stealing touch input.
 - Playback controls: previous track, play / pause, next track, repeat one, and playlist preview.
@@ -55,6 +57,8 @@ Starting from 0.5.0, local and streamed playback can use a native iOS DSP engine
 - Audio information tags: Local, streamable, WASAPI / ASIO, format, sample rate, bit depth, bitrate, and more.
 - Settings page: grouped expandable sections for language, launch page, default library, audio tags, EQ, loudness normalization, external data, and storage management.
 - Local persistence: connection information, settings, local favorites, recently played items, and the local queue are stored in app data.
+- Playback protection: status polling no longer pulls a dragged seek position back, and failed output changes keep the current playback and mode.
+- Data protection: a failed local scan cannot erase favorites, recent history, playlists, or the queue; stale connection responses cannot replace the active connection.
 
 ## Current Limitations
 
@@ -62,10 +66,11 @@ Starting from 0.5.0, local and streamed playback can use a native iOS DSP engine
 - The iPhone and computer must be on the same LAN.
 - Windows Firewall must allow ECHO NEXT communication.
 - Mobile streaming depends on the desktop stream interface; DSP mode caches streamed audio before playback.
-- External data is off by default. LRCLIB and NetEase Cloud Music can be enabled separately and require internet access on the phone.
+- NetEase streaming requires a reachable NeteaseCloudMusicApi service supplied by the user.
+- External data is off by default. LRCLIB, LrcAPI, and NetEase Cloud Music can be enabled separately and require internet access on the phone.
 - NetEase Cloud Music uses an unofficial public endpoint, so availability depends on the upstream service.
 - Cover art, lyrics, and audio tags prefer local files or desktop EchoLink data first.
-- This repository is an Expo / React Native project, not a native SwiftUI project.
+- Expo / React Native provides state and networking, while the main iOS pages and DSP are implemented with native Swift / SwiftUI.
 
 ## Requirements
 
@@ -96,7 +101,7 @@ npx expo export --platform ios --output-dir build\export-check
 
 ## Connecting to ECHO NEXT
 
-The Connection page does not automatically connect to ECHO by default. Turn on "Enable ECHO connection" first, then use a pairing link or manually enter the LAN address.
+The Connection page does not automatically connect to ECHO by default. Turn on "Enable ECHO connection" first, then scan a QR code, select one from Photos, paste a pairing link, or manually enter the LAN address.
 
 ```text
 echo://pair?host=192.168.1.12&port=26789&token=...
@@ -124,8 +129,10 @@ If the connection fails, check the following first:
 - App settings are stored in local app data, including language, launch page, default library, audio tags, EQ, loudness normalization, the ECHO connection switch, the LRCLIB switch, and the NetEase Cloud Music switch.
 - Local music state is stored in `src/storage/localMusicStore.ts`, including favorites, recently played items, and the local queue.
 - LRCLIB is preferred for song lyrics and related lyric data.
+- LrcAPI can supplement lyrics, artwork, and artist information.
 - NetEase Cloud Music is used mainly for cover art and can also provide Chinese-library lyric fallback.
-- External data is a fallback: local LRC, EchoLink lyrics, and existing cover art are used first; external results are used when those are missing or fail to load.
+- When several sources match, lyrics, artist, and artwork can each use a separately selected source.
+- NetEase credentials are stored in the iOS Keychain. Regular preferences and playlist state stay in local app data.
 
 ## EchoLink API
 
@@ -194,6 +201,7 @@ The script will open the generated Xcode workspace. Select your own Apple ID Tea
 App.tsx                         Main UI, playback controls, lyrics, local playback, streaming, and settings
 app.json                        Expo iOS configuration
 modules/echo-audio-dsp/         Native iOS DSP playback module
+modules/echo-audio-dsp/ios/     SwiftUI pages, player, lyrics, EQ, and native audio implementation
 src/components/                 Internal app icon components
 src/echoLink/client.ts          EchoLink HTTP client
 src/echoLink/types.ts           Mobile EchoLink types
@@ -202,6 +210,8 @@ src/localMusic/                 Local music scanning, import, metadata, and lyri
 src/storage/connectionStore.ts  Local connection information storage
 src/storage/localMusicStore.ts  Local music state storage
 src/storage/settingsStore.ts    Settings persistence
+src/storage/streamingStore.ts   Streaming preferences and secure session storage
+src/streaming/                  NetEase sign-in, playlists, search, and playback API
 scripts/                        iOS build helper scripts
 .github/workflows/              Unsigned IPA workflow
 docs/                           Icons, preview images, and README assets

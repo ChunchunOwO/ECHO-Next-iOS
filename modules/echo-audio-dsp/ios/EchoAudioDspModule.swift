@@ -259,56 +259,60 @@ public final class EchoAudioDspModule: Module {
     View(EchoNativePlayerView.self) {
       Events("onAction")
 
-      Prop("activeLyricIndex") { (view: EchoNativePlayerView, value: Int) in view.model.activeLyricIndex = value }
-      Prop("activePage") { (view: EchoNativePlayerView, value: String) in view.model.activePage = value }
-      Prop("artist") { (view: EchoNativePlayerView, value: String) in view.model.artist = value }
-      Prop("artworkUrl") { (view: EchoNativePlayerView, value: String) in view.model.artworkUrl = value }
-      Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in view.model.connectionLabel = value }
-      Prop("connectionOnline") { (view: EchoNativePlayerView, value: Bool) in view.model.connectionOnline = value }
-      Prop("controlsEnabled") { (view: EchoNativePlayerView, value: Bool) in view.model.controlsEnabled = value }
-      Prop("durationMs") { (view: EchoNativePlayerView, value: Double) in view.model.durationMs = value }
+      Prop("activeLyricIndex") { (view: EchoNativePlayerView, value: Int) in setIfChanged(view.model, \.activeLyricIndex, value) }
+      Prop("activePage") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.activePage, value) }
+      Prop("artist") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.artist, value) }
+      Prop("artworkUrl") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.artworkUrl, value) }
+      Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.connectionLabel, value) }
+      Prop("connectionOnline") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.connectionOnline, value) }
+      Prop("controlsEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.controlsEnabled, value) }
+      Prop("durationMs") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.durationMs, value) }
+      Prop("externalSourcePickerPayload") { (view: EchoNativePlayerView, value: String) in
+        view.model.updateExternalSourcePicker(payloadJSON: value)
+      }
       Prop("eqGains") { (view: EchoNativePlayerView, value: [Double]) in
         let gains = normalizedNativeEqGains(value)
-        view.model.equalizer.gains = gains
-        view.pagesModel.equalizer.gains = gains
+        setIfChanged(view.model.equalizer, \.gains, gains)
+        setIfChanged(view.pagesModel.equalizer, \.gains, gains)
       }
       Prop("eqPreset") { (view: EchoNativePlayerView, value: String) in
-        view.model.equalizer.preset = value
-        view.pagesModel.equalizer.preset = value
+        setIfChanged(view.model.equalizer, \.preset, value)
+        setIfChanged(view.pagesModel.equalizer, \.preset, value)
       }
-      Prop("isPlaying") { (view: EchoNativePlayerView, value: Bool) in view.model.isPlaying = value }
+      Prop("isPlaying") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.isPlaying, value) }
       Prop("language") { (view: EchoNativePlayerView, value: String) in
-        view.model.language = value
-        view.model.equalizer.language = value
-        view.pagesModel.equalizer.language = value
+        setIfChanged(view.model, \.language, value)
+        setIfChanged(view.model.equalizer, \.language, value)
+        setIfChanged(view.pagesModel.equalizer, \.language, value)
       }
-      Prop("lyricTexts") { (view: EchoNativePlayerView, value: [String]) in view.model.lyricTexts = value }
-      Prop("lyricTimesMs") { (view: EchoNativePlayerView, value: [Double]) in view.model.lyricTimesMs = value }
-      Prop("lyricsVisible") { (view: EchoNativePlayerView, value: Bool) in view.model.lyricsVisible = value }
-      Prop("modeLabel") { (view: EchoNativePlayerView, value: String) in view.model.modeLabel = value }
-      Prop("outputMode") { (view: EchoNativePlayerView, value: String) in view.model.outputMode = value }
+      Prop("lyricTexts") { (view: EchoNativePlayerView, value: [String]) in setIfChanged(view.model, \.lyricTexts, value) }
+      Prop("lyricTimesMs") { (view: EchoNativePlayerView, value: [Double]) in setIfChanged(view.model, \.lyricTimesMs, value) }
+      Prop("lyricsVisible") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.lyricsVisible, value) }
+      Prop("metadataLoading") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.metadataLoading, value) }
+      Prop("modeLabel") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.modeLabel, value) }
+      Prop("outputMode") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.outputMode, value) }
       Prop("pagePayload") { (view: EchoNativePlayerView, value: String) in view.pagesModel.update(payloadJSON: value) }
-      Prop("positionMs") { (view: EchoNativePlayerView, value: Double) in view.model.positionMs = value }
-      Prop("queueCount") { (view: EchoNativePlayerView, value: Int) in view.model.queueCount = value }
+      Prop("positionMs") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.positionMs, value) }
+      Prop("queueCount") { (view: EchoNativePlayerView, value: Int) in setIfChanged(view.model, \.queueCount, value) }
       Prop("queuePayload") { (view: EchoNativePlayerView, value: String) in view.model.updateQueue(payloadJSON: value) }
-      Prop("repeatOne") { (view: EchoNativePlayerView, value: Bool) in view.model.repeatOne = value }
-      Prop("showArtworkGlow") { (view: EchoNativePlayerView, value: Bool) in view.model.showArtworkGlow = value }
-      Prop("tags") { (view: EchoNativePlayerView, value: [String]) in view.model.tags = value }
-      Prop("title") { (view: EchoNativePlayerView, value: String) in view.model.title = value }
-      Prop("volume") { (view: EchoNativePlayerView, value: Double) in view.model.volume = value }
+      Prop("repeatOne") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.repeatOne, value) }
+      Prop("showArtworkGlow") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.showArtworkGlow, value) }
+      Prop("tags") { (view: EchoNativePlayerView, value: [String]) in setIfChanged(view.model, \.tags, value) }
+      Prop("title") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.title, value) }
+      Prop("volume") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.volume, value) }
     }
 
     View(EchoNativeEqLauncherView.self) {
       Events("onAction")
 
-      Prop("description") { (view: EchoNativeEqLauncherView, value: String) in view.model.description = value }
+      Prop("description") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model, \.description, value) }
       Prop("eqGains") { (view: EchoNativeEqLauncherView, value: [Double]) in
-        view.model.equalizer.gains = normalizedNativeEqGains(value)
+        setIfChanged(view.model.equalizer, \.gains, normalizedNativeEqGains(value))
       }
-      Prop("eqPreset") { (view: EchoNativeEqLauncherView, value: String) in view.model.equalizer.preset = value }
-      Prop("label") { (view: EchoNativeEqLauncherView, value: String) in view.model.label = value }
-      Prop("language") { (view: EchoNativeEqLauncherView, value: String) in view.model.equalizer.language = value }
-      Prop("title") { (view: EchoNativeEqLauncherView, value: String) in view.model.title = value }
+      Prop("eqPreset") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model.equalizer, \.preset, value) }
+      Prop("label") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model, \.label, value) }
+      Prop("language") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model.equalizer, \.language, value) }
+      Prop("title") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model, \.title, value) }
     }
 
     AsyncFunction("playFile") { (uri: String, positionMs: Double, volume: Double, gains: [Double], loudnessEnabled: Bool) in

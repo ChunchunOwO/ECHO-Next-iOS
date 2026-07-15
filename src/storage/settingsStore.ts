@@ -6,12 +6,13 @@ export type SavedSettings = {
   autoOpenLyricsForLocalTracks: boolean;
   autoQueueImportedLocalTracks: boolean;
   confirmBeforeDeletingLocalTracks: boolean;
-  defaultLibrarySource: 'echo' | 'local';
+  defaultLibrarySource: 'all' | 'echo' | 'local' | 'streaming';
   defaultLocalLibraryView: 'albums' | 'artists' | 'favorites' | 'formats' | 'recent' | 'songs';
-  defaultPage: 'connect' | 'control' | 'library' | 'settings';
+  defaultPage: 'connect' | 'control' | 'library' | 'search' | 'settings';
   echoConnectionEnabled: boolean;
   eqGains: number[];
   eqPreset: 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
+  lrcApiExternalDataEnabled: boolean;
   lrclibExternalDataEnabled: boolean;
   neteaseExternalDataEnabled: boolean;
   loudnessNormalizationEnabled: boolean;

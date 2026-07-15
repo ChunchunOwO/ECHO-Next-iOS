@@ -33,7 +33,8 @@
           "recordAudioAndroid": false
         }
       ],
-      "expo-image"
+      "expo-image",
+      "expo-secure-store"
     ]
   }
 }

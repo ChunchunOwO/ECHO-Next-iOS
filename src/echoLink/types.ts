@@ -84,4 +84,6 @@ export type EchoLinkPlaybackCommand =
   | { command: 'setVolume'; volume: number }
   | { command: 'playTrack'; trackId: string; output: 'pc' }
   | { command: 'handoff'; trackId: string; positionMs: number; target: 'pc' }
-  | { command: 'queueReplace'; trackIds: string[]; startTrackId?: string; output: 'pc' };
+  | { command: 'queueReplace'; trackIds: string[]; startTrackId?: string; output: 'pc' }
+  | { command: 'queueReorder'; trackIds: string[]; startTrackId?: string; output: 'pc' }
+  | { command: 'queueClear'; output: 'pc' };
