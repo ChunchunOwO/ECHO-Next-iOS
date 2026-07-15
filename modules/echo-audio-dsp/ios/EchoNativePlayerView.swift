@@ -355,16 +355,7 @@ private struct EchoNativeAppScreen: View {
 
   var body: some View {
     ZStack {
-      EchoNativeArtworkBackdrop(
-        urlString: playerModel.activePage == "control" && playerModel.artworkBackgroundEnabled
-          ? playerModel.artworkUrl
-          : ""
-      ) {
-        onAction(["action": "artworkError", "url": playerModel.artworkUrl])
-      }
-      .ignoresSafeArea()
-      .allowsHitTesting(false)
-
+      echoWarmBackground.ignoresSafeArea()
       Group {
         #if compiler(>=6.0)
         if #available(iOS 18.0, *) {
@@ -466,15 +457,23 @@ private struct EchoNativeAppScreen: View {
     playerBackground: Bool = false,
     @ViewBuilder content: () -> Content
   ) -> some View {
-    content()
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background {
-        if playerBackground {
-          Color.clear
-        } else {
-          echoWarmBackground.ignoresSafeArea()
+    ZStack {
+      if playerBackground {
+        EchoNativeArtworkBackdrop(
+          urlString: playerModel.artworkBackgroundEnabled ? playerModel.artworkUrl : ""
+        ) {
+          onAction(["action": "artworkError", "url": playerModel.artworkUrl])
         }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+      } else {
+        echoWarmBackground.ignoresSafeArea()
       }
+
+      content()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private func title(_ page: String) -> String {
