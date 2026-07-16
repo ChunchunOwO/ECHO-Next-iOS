@@ -360,6 +360,7 @@ struct EchoNativePagesScreen: View {
   @State private var showStreamingLogoutConfirmation = false
   @State private var showNeteaseQrSaveError = false
   @State private var selectedAlbumId = ""
+  @State private var selectedAlbumArtworkUrl = ""
   @State private var selectedAlbumTitle = ""
   @State private var libraryTrackContentHeight: CGFloat = 0
   @State private var activeLibraryIndexKey: String?
@@ -818,6 +819,24 @@ struct EchoNativePagesScreen: View {
 
         if !library.tracks.isEmpty {
           HStack(spacing: 10) {
+            if !selectedAlbumId.isEmpty {
+              Button {
+                clearAlbumSelection()
+                updateLibrary { $0.query = "" }
+                onAction(["action": "libraryQuery", "text": ""])
+              } label: {
+                Image(systemName: "chevron.left")
+                  .font(.system(size: 13, weight: .bold))
+                  .frame(width: 38, height: 38)
+                  .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel(model.payload?.language == "en" ? "Back to albums" : "返回专辑")
+
+              EchoNativeArtwork(urlString: selectedAlbumArtworkUrl, onError: {})
+                .frame(width: 42, height: 42)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
             Text(!selectedAlbumTitle.isEmpty
               ? selectedAlbumTitle
               : library.source == "streaming" && !library.streaming.selectedPlaylistName.isEmpty
@@ -1067,6 +1086,7 @@ struct EchoNativePagesScreen: View {
       clearAlbumSelection()
     } else {
       selectedAlbumId = collection.id
+      selectedAlbumArtworkUrl = collection.artworkUrl
       selectedAlbumTitle = collection.title
     }
     updateLibrary { $0.query = collection.query }
@@ -1195,6 +1215,7 @@ struct EchoNativePagesScreen: View {
 
   private func clearAlbumSelection() {
     selectedAlbumId = ""
+    selectedAlbumArtworkUrl = ""
     selectedAlbumTitle = ""
   }
 
