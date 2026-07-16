@@ -1537,7 +1537,7 @@ function EchoLinkApp(): ReactElement {
     powerampRemoteEnabled: 'Enable Poweramp compatibility',
     powerampRemoteEnabledDescription: 'When enabled, ECHO iPhone can connect to the configured Android Poweramp service.',
     powerampRemoteVisibility: 'Show Poweramp Remote',
-    powerampRemoteVisibilityDescription: 'Show the Poweramp connection option on the Connect page.',
+    powerampRemoteVisibilityDescription: 'Remote entry switch.',
     powerampRemoteSetup: 'Poweramp service',
     powerampRemoteSetupDescription: 'Set the Android address, port, and pairing token.',
     powerampRemoteNotConfigured: 'Not configured',
@@ -1722,7 +1722,7 @@ function EchoLinkApp(): ReactElement {
     powerampRemoteEnabled: '兼容 Poweramp',
     powerampRemoteEnabledDescription: '开启后，ECHO iPhone 会连接已配置的安卓 Poweramp 服务。',
     powerampRemoteVisibility: '显示 Poweramp 远程',
-    powerampRemoteVisibilityDescription: '在连接页显示 Poweramp 远程连接入口。',
+    powerampRemoteVisibilityDescription: '远程入口开关',
     powerampRemoteSetup: 'Poweramp 服务',
     powerampRemoteSetupDescription: '设置安卓地址、端口与配对令牌。',
     powerampRemoteNotConfigured: '未配置',
@@ -4954,7 +4954,7 @@ function EchoLinkApp(): ReactElement {
   const connectPanelOptions: Array<[ConnectPanelMode, string]> = [
     ['echo', text.connectEcho],
   ];
-  if (showPowerampRemoteConnection) connectPanelOptions.push(['remote', text.powerampRemote]);
+  if (showPowerampRemoteConnection) connectPanelOptions.push(['remote', languageIsEnglish ? 'Remote' : '远程']);
   connectPanelOptions.push(['streaming', text.streamingServices]);
   const fallbackLibrarySourceOptions: Array<[LibrarySource, string]> = [];
   if (echoConnectionEnabled) fallbackLibrarySourceOptions.push(['echo', `${text.echoLibrary} ${tracks.length}`]);
@@ -5631,6 +5631,17 @@ function EchoLinkApp(): ReactElement {
         break;
       case 'powerampRemoteEnabled':
         if (typeof action.enabled === 'boolean') setPowerampRemoteEnabled(action.enabled);
+        break;
+      case 'powerampRemoteField':
+        if (action.field === 'host') {
+          setPowerampConnectionDraft((current) => ({ ...current, host: action.text ?? '' }));
+        } else if (action.field === 'name') {
+          setPowerampConnectionDraft((current) => ({ ...current, name: action.text ?? '' }));
+        } else if (action.field === 'port') {
+          setPowerampConnectionDraft((current) => ({ ...current, port: action.text ?? '' }));
+        } else if (action.field === 'token') {
+          setPowerampConnectionDraft((current) => ({ ...current, token: action.text ?? '' }));
+        }
         break;
       case 'pairingText':
         setPairingText(action.text ?? '');
@@ -6796,10 +6807,10 @@ function EchoLinkApp(): ReactElement {
         port: String(connectionDraft.port),
         powerampRemote: {
           enabled: powerampRemoteEnabled,
-          host: powerampConnection?.host ?? '',
-          name: powerampConnection?.name ?? 'Poweramp',
-          port: String(powerampConnection?.port ?? 27806),
-          token: powerampConnection?.token ?? '',
+          host: powerampConnectionDraft.host,
+          name: powerampConnectionDraft.name,
+          port: powerampConnectionDraft.port,
+          token: powerampConnectionDraft.token,
         },
         streamableCount: String(streamableTrackCount),
         streaming: {
