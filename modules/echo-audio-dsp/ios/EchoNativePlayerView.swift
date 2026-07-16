@@ -35,10 +35,6 @@ private func echoAdaptiveColor(light: UIColor, dark: UIColor) -> Color {
 
 let echoInk = Color.primary
 let echoAccent = Color(red: 0.67, green: 0.12, blue: 0.14)
-private let echoEqAccent = echoAdaptiveColor(
-  light: UIColor(red: 0.67, green: 0.12, blue: 0.14, alpha: 1),
-  dark: UIColor(red: 1.0, green: 0.48, blue: 0.5, alpha: 1)
-)
 let echoGold = Color(red: 0.82, green: 0.55, blue: 0.08)
 let echoPageHeaderBackground = echoAdaptiveColor(
   light: UIColor(red: 0.97, green: 0.79, blue: 0.73, alpha: 1),
@@ -564,7 +560,6 @@ struct EchoNativePlayerScreen: View {
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: model.lyricsVisible)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
-        .echoBlurredSheet()
     }
     .sheet(isPresented: $showQueue) {
       EchoNativeQueueSheet(model: model, onAction: onAction)
@@ -731,6 +726,7 @@ struct EchoNativePlayerScreen: View {
         }
         .padding(.vertical, compact ? 56 : 76)
       }
+      .echoScrollClipDisabled()
       .simultaneousGesture(
         DragGesture(minimumDistance: 4)
           .onChanged { _ in lastLyricsInteraction = Date() }
@@ -1710,7 +1706,6 @@ private struct EchoNativeEqLauncherScreen: View {
     .accessibilityLabel("\(model.title), \(model.label)")
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
-        .echoBlurredSheet()
     }
   }
 }
@@ -1731,15 +1726,15 @@ struct EchoNativeEqualizerSheet: View {
             .font(.system(size: 24, weight: .bold))
           Text(model.language == "en" ? "10-band equalizer" : "十段均衡器")
             .font(.system(size: 12, weight: .medium))
-            .foregroundColor(echoInk.opacity(0.68))
+            .foregroundColor(echoInk.opacity(0.52))
         }
         Spacer()
         Text(presetLabel(model.preset))
           .font(.system(size: 11, weight: .bold))
-          .foregroundColor(echoEqAccent)
+          .foregroundColor(echoAccent)
           .padding(.horizontal, 10)
           .frame(height: 28)
-          .overlay(Capsule().stroke(echoEqAccent.opacity(0.62), lineWidth: 1))
+          .overlay(Capsule().stroke(echoAccent.opacity(0.36), lineWidth: 1))
         Button {
           dismiss()
         } label: {
@@ -1755,7 +1750,7 @@ struct EchoNativeEqualizerSheet: View {
       HStack(alignment: .firstTextBaseline) {
         Text(frequencyLabel(activeBand))
           .font(.system(size: 13, weight: .semibold))
-          .foregroundColor(echoInk.opacity(0.72))
+          .foregroundColor(echoInk.opacity(0.58))
         Spacer()
         Text(String(format: "%+.1f dB", model.gains[activeBand]))
           .font(.system(size: 23, weight: .bold, design: .monospaced))
@@ -1769,8 +1764,8 @@ struct EchoNativeEqualizerSheet: View {
           VStack {
             ForEach([12, 6, 0, -6, -12], id: \.self) { gain in
               Text("\(gain > 0 ? "+" : "")\(gain)dB")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundColor(echoInk.opacity(0.68))
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(echoInk.opacity(0.42))
               if gain != -12 { Spacer() }
             }
           }
@@ -1779,7 +1774,7 @@ struct EchoNativeEqualizerSheet: View {
           ZStack(alignment: .top) {
             VStack(spacing: 0) {
               ForEach(0..<5, id: \.self) { index in
-                Rectangle().fill(echoInk.opacity(0.18)).frame(height: 1)
+                Rectangle().fill(echoInk.opacity(0.1)).frame(height: 1)
                 if index < 4 { Spacer() }
               }
             }
@@ -1816,7 +1811,7 @@ struct EchoNativeEqualizerSheet: View {
               } label: {
                 Text(presetLabel(key))
                   .font(.system(size: 12, weight: .bold))
-                  .foregroundColor(model.preset == key ? echoEqAccent : echoInk.opacity(0.68))
+                  .foregroundColor(model.preset == key ? echoAccent : echoInk.opacity(0.58))
                   .padding(.horizontal, 13)
                   .frame(height: 36)
                   .echoGlass(
@@ -1833,7 +1828,7 @@ struct EchoNativeEqualizerSheet: View {
     }
     .padding(20)
     .foregroundColor(echoInk)
-    .background(Color.clear)
+    .background(echoWarmBackground.ignoresSafeArea())
   }
 
   private func frequencyLabel(_ index: Int) -> String {
@@ -1861,14 +1856,14 @@ private struct EchoNativeEqBand: View {
         let center = geometry.size.height / 2
         ZStack(alignment: .top) {
           Rectangle()
-            .fill(echoInk.opacity(0.34))
+            .fill(echoInk.opacity(0.2))
             .frame(width: 2)
           Rectangle()
-            .fill(echoEqAccent)
+            .fill(echoAccent)
             .frame(width: 2, height: max(2, abs(y - center)))
             .offset(y: min(y, center))
           Circle()
-            .fill(echoEqAccent)
+            .fill(echoAccent)
             .overlay(Circle().stroke(Color.white, lineWidth: 2))
             .frame(width: 12, height: 12)
             .offset(y: y - 6)
@@ -1883,8 +1878,8 @@ private struct EchoNativeEqBand: View {
       }
       .frame(height: plotHeight)
       Text(label)
-        .font(.system(size: 10, weight: .bold, design: .monospaced))
-        .foregroundColor(echoInk.opacity(0.7))
+        .font(.system(size: 9, weight: .bold, design: .monospaced))
+        .foregroundColor(echoInk.opacity(0.54))
         .lineLimit(1)
     }
     .frame(maxWidth: .infinity)

@@ -416,7 +416,6 @@ struct EchoNativePagesScreen: View {
     .background(Color.clear)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
-        .echoBlurredSheet()
     }
     .sheet(item: $playlistEditor) { editor in
       EchoNativePlaylistEditorSheet(
@@ -575,14 +574,11 @@ struct EchoNativePagesScreen: View {
       ScrollView(showsIndicators: false) {
         LazyVStack(alignment: .leading, spacing: 14) {
         if !searchOnly {
-          ScrollView(.horizontal, showsIndicators: false) {
-            EchoNativeSegmentedControl(
-              options: library.sourceOptions,
-              selection: library.source,
-              onSelect: { onAction(["action": "librarySource", "selection": $0]) }
-            )
-          }
-          .echoScrollClipDisabled()
+          EchoNativeSegmentedControl(
+            options: library.sourceOptions,
+            selection: library.source,
+            onSelect: { onAction(["action": "librarySource", "selection": $0]) }
+          )
         }
 
         if !searchOnly && library.source == "streaming" {
@@ -670,31 +666,23 @@ struct EchoNativePagesScreen: View {
               onAction(["action": "libraryFilter", "selection": selection])
             }
           )
-          ScrollView(.horizontal, showsIndicators: false) {
-            EchoNativeSegmentedControl(
-              options: library.viewOptions,
-              selection: library.view,
-              compact: true,
-              onSelect: { selection in
-                clearAlbumSelection()
-                onAction(["action": "libraryView", "selection": selection])
-              }
-            )
-          }
-          .echoScrollClipDisabled()
+          EchoNativeSegmentedControl(
+            options: library.viewOptions,
+            selection: library.view,
+            onSelect: { selection in
+              clearAlbumSelection()
+              onAction(["action": "libraryView", "selection": selection])
+            }
+          )
         } else if !searchOnly && library.source == "local" {
-          ScrollView(.horizontal, showsIndicators: false) {
-            EchoNativeSegmentedControl(
-              options: library.viewOptions,
-              selection: library.view,
-              compact: true,
-              onSelect: { selection in
-                clearAlbumSelection()
-                onAction(["action": "libraryView", "selection": selection])
-              }
-            )
-          }
-          .echoScrollClipDisabled()
+          EchoNativeSegmentedControl(
+            options: library.viewOptions,
+            selection: library.view,
+            onSelect: { selection in
+              clearAlbumSelection()
+              onAction(["action": "libraryView", "selection": selection])
+            }
+          )
         }
 
         if library.source != "streaming" {
@@ -944,6 +932,7 @@ struct EchoNativePagesScreen: View {
         }
       }
       .padding(.horizontal, 20)
+      .padding(.top, 12)
       .padding(.bottom, 24)
       .id(contentAnimationKey)
       .transition(.opacity)
@@ -1802,6 +1791,7 @@ struct EchoNativePagesScreen: View {
         }
       }
       .padding(.horizontal, 20)
+      .padding(.top, 12)
       .padding(.bottom, 24)
     }
     .echoScrollClipDisabled()
@@ -2952,7 +2942,8 @@ private struct EchoNativeSegmentedControl: View {
               .font(.system(size: compact ? 11 : 12, weight: .bold))
               .foregroundColor(selected ? echoAccent : echoInk.opacity(0.54))
               .lineLimit(1)
-              .padding(.horizontal, compact ? 12 : 16)
+              .minimumScaleFactor(0.72)
+              .padding(.horizontal, compact ? 12 : 8)
               .frame(maxWidth: compact ? nil : .infinity, minHeight: 44)
               .echoGlass(
                 tint: selected ? Color.black.opacity(0.1) : Color.white.opacity(0.08),
