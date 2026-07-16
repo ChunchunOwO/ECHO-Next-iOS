@@ -52,8 +52,10 @@ export type EchoNativePlayerViewProps = SharedEqProps & {
   connectionLabel: string;
   connectionOnline: boolean;
   controlsEnabled: boolean;
+  darkModeEnabled: boolean;
   durationMs: number;
   externalSourcePickerPayload: string;
+  followSystemAppearance: boolean;
   isFavorite: boolean;
   isPlaying: boolean;
   lyricTexts: string[];

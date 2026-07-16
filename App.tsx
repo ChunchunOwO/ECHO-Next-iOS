@@ -410,6 +410,7 @@ const defaultSettings: SavedSettings = {
   echoConnectionEnabled: false,
   eqGains: [...defaultEqOption.gains],
   eqPreset: 'flat',
+  followSystemAppearance: true,
   externalMetadataSearchEnabled: false,
   externalMetadataSkipExisting: true,
   lrcApiExternalDataEnabled: false,
@@ -421,6 +422,7 @@ const defaultSettings: SavedSettings = {
   powerampRemoteEnabled: false,
   showPowerampRemoteConnection: false,
   showArtworkGlow: true,
+  darkModeEnabled: false,
 };
 
 type LyricLine = {
@@ -1204,6 +1206,8 @@ function EchoLinkApp(): ReactElement {
   const [confirmBeforeDeletingLocalTracks, setConfirmBeforeDeletingLocalTracks] = useState(defaultSettings.confirmBeforeDeletingLocalTracks);
   const [eqGains, setEqGains] = useState(() => normalizeEqGains(defaultSettings.eqGains));
   const [eqPreset, setEqPreset] = useState<EqPreset>(defaultSettings.eqPreset);
+  const [followSystemAppearance, setFollowSystemAppearance] = useState(defaultSettings.followSystemAppearance);
+  const [darkModeEnabled, setDarkModeEnabled] = useState(defaultSettings.darkModeEnabled);
   const [eqPanelOpen, setEqPanelOpen] = useState(false);
   const [eqPanelVisible, setEqPanelVisible] = useState(false);
   const [activeEqBand, setActiveEqBand] = useState(4);
@@ -1478,6 +1482,10 @@ function EchoLinkApp(): ReactElement {
     importMusic: 'Import Music',
     interface: 'Interface',
     interfaceDescription: 'Language and launch behavior.',
+    followSystemAppearance: 'Follow system appearance',
+    followSystemAppearanceDescription: 'Use the iPhone system light or dark mode. Turn this off to choose manually.',
+    manualAppearance: 'Manual dark mode',
+    manualAppearanceDescription: 'Choose the app appearance when system following is disabled.',
     language: 'Language',
     languageHint: 'Changes the app language and keeps it saved on this phone.',
     library: 'Library',
@@ -1663,6 +1671,10 @@ function EchoLinkApp(): ReactElement {
     importMusic: '导入音乐',
     interface: '界面',
     interfaceDescription: '语言、启动页和界面显示。',
+    followSystemAppearance: '自动跟随系统深色模式',
+    followSystemAppearanceDescription: '跟随 iPhone 系统的浅色/深色模式；关闭后可以手动选择。',
+    manualAppearance: '手动深色模式',
+    manualAppearanceDescription: '关闭自动跟随后，手动选择浅色或深色界面。',
     language: '语言',
     languageHint: '切换 App 界面语言，并保存在本机个人数据里。',
     library: '曲库',
@@ -2023,6 +2035,12 @@ function EchoLinkApp(): ReactElement {
           setEqGains([...savedEqOption.gains]);
         }
       }
+      if (typeof savedSettings.followSystemAppearance === 'boolean') {
+        setFollowSystemAppearance(savedSettings.followSystemAppearance);
+      }
+      if (typeof savedSettings.darkModeEnabled === 'boolean') {
+        setDarkModeEnabled(savedSettings.darkModeEnabled);
+      }
       if (typeof savedSettings.lrcApiExternalDataEnabled === 'boolean') {
         setLrcApiExternalDataEnabled(savedSettings.lrcApiExternalDataEnabled);
       }
@@ -2168,6 +2186,7 @@ function EchoLinkApp(): ReactElement {
       echoConnectionEnabled,
       eqGains,
       eqPreset,
+      followSystemAppearance,
       externalMetadataSearchEnabled,
       externalMetadataSkipExisting,
       lrcApiExternalDataEnabled,
@@ -2179,6 +2198,7 @@ function EchoLinkApp(): ReactElement {
       powerampRemoteEnabled,
       showPowerampRemoteConnection,
       showArtworkGlow,
+      darkModeEnabled,
     }).catch((saveError) => {
       showErrorAlert(
         languageIsEnglish ? 'Settings not saved' : '设置未保存',
@@ -2199,6 +2219,7 @@ function EchoLinkApp(): ReactElement {
     echoConnectionEnabled,
     eqGains,
     eqPreset,
+    followSystemAppearance,
     externalMetadataSearchEnabled,
     externalMetadataSkipExisting,
     lrcApiExternalDataEnabled,
@@ -2211,6 +2232,7 @@ function EchoLinkApp(): ReactElement {
     settingsLoaded,
     showPowerampRemoteConnection,
     showArtworkGlow,
+    darkModeEnabled,
     showErrorAlert,
   ]);
 
@@ -4985,7 +5007,7 @@ function EchoLinkApp(): ReactElement {
     {
       description: text.interfaceDescription,
       key: 'interface',
-      summary: `${appLanguage === 'en' ? 'English' : '中文'} · ${pageSettingOptions.find(([value]) => value === defaultPage)?.[1] ?? text.playback}`,
+      summary: `${appLanguage === 'en' ? 'English' : '中文'} · ${pageSettingOptions.find(([value]) => value === defaultPage)?.[1] ?? text.playback} · ${followSystemAppearance ? (languageIsEnglish ? 'System' : '系统') : (darkModeEnabled ? (languageIsEnglish ? 'Dark' : '深色') : (languageIsEnglish ? 'Light' : '浅色'))}`,
       title: text.interface,
     },
     {
@@ -5055,6 +5077,8 @@ function EchoLinkApp(): ReactElement {
     pageSettingOptions,
     showArtworkGlow,
     showPowerampRemoteConnection,
+    followSystemAppearance,
+    darkModeEnabled,
     text,
     visibleAudioTagCount,
   ]);
@@ -5065,15 +5089,17 @@ function EchoLinkApp(): ReactElement {
     options: Array<[T, string]>,
     currentValue: T,
     onChange: (value: T) => void,
+    disabled = false,
   ) => (
-    <View style={styles.segmentRow}>
+    <View style={[styles.segmentRow, disabled ? styles.settingRowDisabled : null]}>
       {options.map(([value, label]) => (
         <Pressable
           accessibilityLabel={label}
           accessibilityRole="button"
           key={value}
+          disabled={disabled}
           onPress={() => onChange(value)}
-          style={[styles.segmentButton, currentValue === value ? styles.segmentButtonActive : null]}
+           style={[styles.segmentButton, currentValue === value ? styles.segmentButtonActive : null]}
         >
           {renderButtonBlur(currentValue === value ? 10 : 20)}
           <AnimatedButtonContent motionKey={currentValue === value} style={styles.buttonMotionCenter}>
@@ -5687,6 +5713,7 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'autoQueueImports') setAutoQueueImportedLocalTracks(action.enabled);
         if (action.key === 'confirmDelete') setConfirmBeforeDeletingLocalTracks(action.enabled);
         if (action.key === 'showPowerampRemoteConnection') setShowPowerampRemoteConnection(action.enabled);
+        if (action.key === 'followSystemAppearance') setFollowSystemAppearance(action.enabled);
         if (action.key?.startsWith('audioTag.')) {
           const key = action.key.slice('audioTag.'.length) as AudioTagKey;
           if (audioTagOptions.some((option) => option.key === key)) {
@@ -5714,6 +5741,9 @@ function EchoLinkApp(): ReactElement {
         }
         if (action.key === 'neteaseAccessMode' && (action.selection === 'direct' || action.selection === 'selfHosted')) {
           setNeteaseAccessMode(action.selection);
+        }
+        if (action.key === 'manualAppearance' && (action.selection === 'light' || action.selection === 'dark')) {
+          setDarkModeEnabled(action.selection === 'dark');
         }
         break;
       case 'settingAction':
@@ -5954,6 +5984,22 @@ function EchoLinkApp(): ReactElement {
             <Text style={styles.settingDescription}>
               {text.defaultPageHint}
             </Text>
+          </View>
+          {renderSettingSwitch(
+            text.followSystemAppearance,
+            text.followSystemAppearanceDescription,
+            followSystemAppearance,
+            setFollowSystemAppearance,
+          )}
+          <View style={styles.settingGroupBlock}>
+            <Text style={styles.settingGroupTitle}>{text.manualAppearance}</Text>
+            {renderSegmentOptions(
+              [['light', languageIsEnglish ? 'Light' : '浅色'], ['dark', languageIsEnglish ? 'Dark' : '深色']] as Array<['light' | 'dark', string]>,
+              darkModeEnabled ? 'dark' : 'light',
+              (value) => setDarkModeEnabled(value === 'dark'),
+              followSystemAppearance,
+            )}
+            <Text style={styles.settingDescription}>{text.manualAppearanceDescription}</Text>
           </View>
         </View>
       );
@@ -6485,6 +6531,7 @@ function EchoLinkApp(): ReactElement {
       connectionLabel={connectedLabel}
       connectionOnline={isPowerampControlOutput || isPowerampStreamOutput ? powerampConnectionOnline : echoConnectionOnline}
       controlsEnabled={playbackControlsEnabled}
+      darkModeEnabled={darkModeEnabled}
       durationMs={playbackDurationMs}
       externalSourcePickerPayload={pendingExternalMetadataSelection?.metadataKey === externalMetadataKey
         ? JSON.stringify({
@@ -6521,6 +6568,7 @@ function EchoLinkApp(): ReactElement {
           useSourceLabel: languageIsEnglish ? 'Use this source' : '使用此来源',
         })
         : ''}
+      followSystemAppearance={followSystemAppearance}
       eqGains={eqGains}
       eqPreset={eqPreset}
       isPlaying={isPlaybackActive}
@@ -6588,16 +6636,17 @@ function EchoLinkApp(): ReactElement {
       title,
       value: '',
     });
-    const settingPicker = (
-      id: string,
-      title: string,
-      description: string,
-      selection: string,
-      options: Array<[string, string]>,
-    ) => ({
+  const settingPicker = (
+    id: string,
+    title: string,
+    description: string,
+    selection: string,
+    options: Array<[string, string]>,
+    disabled = false,
+  ) => ({
       boolValue: null,
       description,
-      disabled: false,
+    disabled,
       id,
       kind: 'picker',
       options: options.map(([optionId, label]) => ({ id: optionId, label })),
@@ -6654,6 +6703,21 @@ function EchoLinkApp(): ReactElement {
       interface: [
         settingPicker('language', text.language, text.languageHint, appLanguage, [['zh', '中文'], ['en', 'English']]),
         settingPicker('defaultPage', text.defaultPage, text.defaultPageHint, defaultPage, pageSettingOptions),
+        settingToggle('followSystemAppearance', text.followSystemAppearance, text.followSystemAppearanceDescription, followSystemAppearance),
+        settingPicker(
+          'manualAppearance',
+          text.manualAppearance,
+          text.manualAppearanceDescription,
+          darkModeEnabled ? 'dark' : 'light',
+          [[
+            'light',
+            languageIsEnglish ? 'Light' : '浅色',
+          ], [
+            'dark',
+            languageIsEnglish ? 'Dark' : '深色',
+          ]],
+          followSystemAppearance,
+        ),
       ],
       playback: [
         {

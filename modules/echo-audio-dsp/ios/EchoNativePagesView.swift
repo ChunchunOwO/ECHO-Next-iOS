@@ -561,8 +561,7 @@ struct EchoNativePagesScreen: View {
     let indexTargets = model.libraryIndexTargets
     let contentAnimationKey = "\(library.source)::\(library.view)::\(library.filter)::\(library.pagination.page)"
     return ScrollViewReader { proxy in
-      HStack(spacing: 0) {
-        ScrollView(showsIndicators: false) {
+      ScrollView(showsIndicators: false) {
         LazyVStack(alignment: .leading, spacing: 14) {
         if !searchOnly {
           ScrollView(.horizontal, showsIndicators: false) {
@@ -572,6 +571,7 @@ struct EchoNativePagesScreen: View {
               onSelect: { onAction(["action": "librarySource", "selection": $0]) }
             )
           }
+          .echoScrollClipDisabled()
         }
 
         if !searchOnly && library.source == "streaming" {
@@ -661,6 +661,7 @@ struct EchoNativePagesScreen: View {
               }
             )
           }
+          .echoScrollClipDisabled()
           ScrollView(.horizontal, showsIndicators: false) {
             EchoNativeSegmentedControl(
               options: library.viewOptions,
@@ -672,6 +673,7 @@ struct EchoNativePagesScreen: View {
               }
             )
           }
+          .echoScrollClipDisabled()
         } else if !searchOnly && library.source == "local" {
           ScrollView(.horizontal, showsIndicators: false) {
             EchoNativeSegmentedControl(
@@ -684,6 +686,7 @@ struct EchoNativePagesScreen: View {
               }
             )
           }
+          .echoScrollClipDisabled()
         }
 
         if library.source != "streaming" {
@@ -716,6 +719,7 @@ struct EchoNativePagesScreen: View {
                 }
               }
             }
+            .echoScrollClipDisabled()
           }
         }
 
@@ -753,6 +757,10 @@ struct EchoNativePagesScreen: View {
               }
             }
           }
+        }
+
+        if indexTargets.count > 1 {
+          libraryAlphabetIndex(indexTargets, pagination: library.pagination, proxy: proxy)
         }
 
         if !library.collections.isEmpty {
@@ -892,19 +900,13 @@ struct EchoNativePagesScreen: View {
             .padding(.top, 8)
         }
       }
-      .padding(.leading, 20)
-      .padding(.trailing, indexTargets.count > 1 ? 6 : 20)
+      .padding(.horizontal, 20)
       .padding(.bottom, 24)
       .id(contentAnimationKey)
       .transition(.opacity)
-        }
-        .refreshable { onAction(["action": "libraryRefresh"]) }
-
-        if indexTargets.count > 1 {
-          libraryAlphabetIndex(indexTargets, pagination: library.pagination, proxy: proxy)
-            .padding(.trailing, 4)
-        }
       }
+      .refreshable { onAction(["action": "libraryRefresh"]) }
+      .echoScrollClipDisabled()
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: contentAnimationKey)
       .onChange(of: library.pagination.page) { _ in
         guard let target = pendingLibraryIndexTarget, target.page == library.pagination.page else { return }
@@ -939,25 +941,22 @@ struct EchoNativePagesScreen: View {
     proxy: ScrollViewProxy
   ) -> some View {
     GeometryReader { geometry in
-      let rowHeight = max(12, (geometry.size.height - 12) / CGFloat(targets.count))
-      VStack(spacing: 0) {
+      let itemWidth = max(10, (geometry.size.width - 12) / CGFloat(targets.count))
+      HStack(spacing: 0) {
         ForEach(targets) { target in
           Text(target.key)
             .font(.system(size: 9, weight: .bold, design: .rounded))
             .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
-            .frame(maxWidth: .infinity)
-            .frame(height: rowHeight)
+            .frame(width: itemWidth, height: 32)
         }
       }
-      .padding(.vertical, 6)
-      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-      .background(.ultraThinMaterial, in: Capsule())
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
       .contentShape(Rectangle())
       .gesture(
         DragGesture(minimumDistance: 0)
           .onChanged { value in
             isLibraryIndexPressed = true
-            let index = min(targets.count - 1, max(0, Int((value.location.y - 6) / rowHeight)))
+            let index = min(targets.count - 1, max(0, Int(value.location.x / itemWidth)))
             let target = targets[index]
             guard activeLibraryIndexKey != target.key else { return }
             activeLibraryIndexKey = target.key
@@ -988,13 +987,13 @@ struct EchoNativePagesScreen: View {
             .foregroundColor(echoInk)
             .frame(width: 48, height: 48)
             .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
-            .offset(x: -54)
+            .offset(x: 0, y: -54)
         }
       }
     }
-    .frame(width: 24)
-    .padding(.top, 84)
-    .padding(.bottom, 24)
+    .frame(height: 32)
+    .padding(.vertical, 4)
+    .zIndex(10)
   }
 
   private func libraryQueryBinding(_ library: EchoNativeLibraryPayload) -> Binding<String> {
@@ -1552,6 +1551,7 @@ struct EchoNativePagesScreen: View {
             onSelect: { onAction(["action": "connectMode", "selection": $0]) }
           )
         }
+        .echoScrollClipDisabled()
 
         if connection.mode == "streaming" {
           connectionSection(
@@ -1742,6 +1742,7 @@ struct EchoNativePagesScreen: View {
       .padding(.horizontal, 20)
       .padding(.bottom, 24)
     }
+    .echoScrollClipDisabled()
   }
 
   private func connectionToggle(_ connection: EchoNativeConnectionPayload) -> some View {
@@ -2081,6 +2082,8 @@ struct EchoNativePagesScreen: View {
         }
       }
       .padding(.vertical, 12)
+      .disabled(row.disabled)
+      .opacity(row.disabled ? 0.42 : 1)
     case "eq":
       Button {
         showEqualizer = true

@@ -480,10 +480,12 @@ public final class EchoAudioDspModule: Module {
       Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.connectionLabel, value) }
       Prop("connectionOnline") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.connectionOnline, value) }
       Prop("controlsEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.controlsEnabled, value) }
+      Prop("darkModeEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.darkModeEnabled, value) }
       Prop("durationMs") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.durationMs, value) }
       Prop("externalSourcePickerPayload") { (view: EchoNativePlayerView, value: String) in
         view.model.updateExternalSourcePicker(payloadJSON: value)
       }
+      Prop("followSystemAppearance") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.followSystemAppearance, value) }
       Prop("isFavorite") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.isFavorite, value) }
       Prop("eqGains") { (view: EchoNativePlayerView, value: [Double]) in
         let gains = normalizedNativeEqGains(value)

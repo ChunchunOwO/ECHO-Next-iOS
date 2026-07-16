@@ -33,7 +33,7 @@ private func echoAdaptiveColor(light: UIColor, dark: UIColor) -> Color {
   })
 }
 
-let echoInk = Color(uiColor: .label)
+let echoInk = Color.primary
 let echoAccent = Color(red: 0.67, green: 0.12, blue: 0.14)
 let echoGold = Color(red: 0.82, green: 0.55, blue: 0.08)
 var echoWarmBackground: LinearGradient {
@@ -97,6 +97,15 @@ extension View {
       background(tint ?? Color.clear, in: shape)
         .background(.ultraThinMaterial, in: shape)
         .overlay(shape.stroke(Color.white.opacity(0.48), lineWidth: 0.8))
+    }
+  }
+
+  @ViewBuilder
+  func echoScrollClipDisabled() -> some View {
+    if #available(iOS 17.0, *) {
+      scrollClipDisabled()
+    } else {
+      self
     }
   }
 
@@ -224,8 +233,10 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var connectionLabel = "ECHO未连接"
   @Published var connectionOnline = false
   @Published var controlsEnabled = false
+  @Published var darkModeEnabled = false
   @Published var durationMs = 0.0
   @Published var externalSourcePicker: EchoNativeExternalSourcePickerPayload?
+  @Published var followSystemAppearance = true
   @Published var isFavorite = false
   @Published var isPlaying = false
   @Published var language = "zh"
@@ -389,6 +400,7 @@ private struct EchoNativeAppScreen: View {
       EchoNativeExternalSourcePicker(payload: payload, onAction: onAction)
         .echoMediumSheet()
     }
+    .preferredColorScheme(playerModel.followSystemAppearance ? nil : (playerModel.darkModeEnabled ? .dark : .light))
   }
 
   private var selection: Binding<String> {
@@ -1068,6 +1080,7 @@ private struct EchoNativeArtworkBackdrop: View {
   let urlString: String
   let onError: () -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.colorScheme) private var colorScheme
   @State private var stableIdentity = ""
   @State private var stableUrl = ""
 
@@ -1102,11 +1115,13 @@ private struct EchoNativeArtworkBackdrop: View {
         }
 
         LinearGradient(
-          colors: [
-            Color.white.opacity(0.18),
-            Color(red: 0.98, green: 0.90, blue: 0.86).opacity(0.12),
-            Color.white.opacity(0.1),
-          ],
+          colors: colorScheme == .dark
+            ? [Color.black.opacity(0.3), Color.black.opacity(0.18), Color.black.opacity(0.24)]
+            : [
+              Color.white.opacity(0.18),
+              Color(red: 0.98, green: 0.90, blue: 0.86).opacity(0.12),
+              Color.white.opacity(0.1),
+            ],
           startPoint: .topLeading,
           endPoint: .bottomTrailing
         )

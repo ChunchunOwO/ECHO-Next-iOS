@@ -13,6 +13,7 @@ export type SavedSettings = {
   echoConnectionEnabled: boolean;
   eqGains: number[];
   eqPreset: 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
+  followSystemAppearance: boolean;
   externalMetadataSkipExisting: boolean;
   lrcApiExternalDataEnabled: boolean;
   lrclibExternalDataEnabled: boolean;
@@ -24,6 +25,7 @@ export type SavedSettings = {
   powerampRemoteEnabled: boolean;
   showPowerampRemoteConnection: boolean;
   showArtworkGlow: boolean;
+  darkModeEnabled: boolean;
 };
 
 const storageKey = 'echo.ios.settings.v1';
