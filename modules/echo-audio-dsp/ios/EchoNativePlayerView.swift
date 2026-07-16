@@ -36,6 +36,10 @@ private func echoAdaptiveColor(light: UIColor, dark: UIColor) -> Color {
 let echoInk = Color.primary
 let echoAccent = Color(red: 0.67, green: 0.12, blue: 0.14)
 let echoGold = Color(red: 0.82, green: 0.55, blue: 0.08)
+let echoPageHeaderBackground = echoAdaptiveColor(
+  light: UIColor(red: 0.97, green: 0.79, blue: 0.73, alpha: 1),
+  dark: UIColor(red: 0.13, green: 0.09, blue: 0.13, alpha: 1)
+)
 var echoWarmBackground: LinearGradient {
   LinearGradient(
     colors: [

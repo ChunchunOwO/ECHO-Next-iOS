@@ -376,7 +376,12 @@ struct EchoNativePagesScreen: View {
       if let payload = model.payload {
         VStack(spacing: 0) {
           pageHeader(payload, title: pageTitle(payload.language))
-            .background(echoWarmBackground)
+            .background(echoPageHeaderBackground)
+            .overlay(alignment: .bottom) {
+              Rectangle()
+                .fill(echoInk.opacity(0.12))
+                .frame(height: 0.7)
+            }
             .zIndex(20)
           Group {
             switch page {
@@ -508,8 +513,8 @@ struct EchoNativePagesScreen: View {
       )
     }
     .padding(.horizontal, 20)
-    .padding(.top, 18)
-    .padding(.bottom, 12)
+    .padding(.top, 10)
+    .padding(.bottom, 6)
   }
 
   private func pageTitle(_ language: String) -> String {
