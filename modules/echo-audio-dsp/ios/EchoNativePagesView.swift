@@ -361,6 +361,7 @@ struct EchoNativePagesScreen: View {
   @State private var showNeteaseQrSaveError = false
   @State private var selectedAlbumId = ""
   @State private var selectedAlbumTitle = ""
+  @State private var libraryTrackContentHeight: CGFloat = 0
   @State private var activeLibraryIndexKey: String?
   @State private var isLibraryIndexPressed = false
   @State private var pendingLibraryIndexTarget: EchoNativeLibraryIndexTarget?
@@ -374,13 +375,8 @@ struct EchoNativePagesScreen: View {
       if let payload = model.payload {
         VStack(spacing: 0) {
           pageHeader(payload, title: pageTitle(payload.language))
-          if page == "library" || page == "connect" {
-            Rectangle()
-              .fill(echoInk.opacity(0.1))
-              .frame(height: 0.7)
-              .padding(.horizontal, 20)
-              .padding(.bottom, 8)
-          }
+            .background(echoWarmBackground)
+            .zIndex(20)
           Group {
             switch page {
             case "library":
@@ -766,9 +762,7 @@ struct EchoNativePagesScreen: View {
           }
         }
 
-        HStack(alignment: .top, spacing: 6) {
-          LazyVStack(alignment: .leading, spacing: 14) {
-          if !library.collections.isEmpty {
+        if !library.collections.isEmpty {
           HStack {
             Text(library.labels.collections)
               .font(.system(size: 18, weight: .bold, design: .rounded))
@@ -842,6 +836,8 @@ struct EchoNativePagesScreen: View {
           }
         }
 
+        HStack(alignment: .top, spacing: 6) {
+          LazyVStack(alignment: .leading, spacing: 0) {
         if (library.source == "streaming"
           ? streamingContentEmpty
           : (library.tracks.isEmpty && library.collections.isEmpty && displayedPlaylists.isEmpty)) {
@@ -906,9 +902,21 @@ struct EchoNativePagesScreen: View {
           }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
+          .background {
+            GeometryReader { geometry in
+              Color.clear
+                .onAppear { libraryTrackContentHeight = geometry.size.height }
+                .onChange(of: geometry.size.height) { libraryTrackContentHeight = $0 }
+            }
+          }
 
-          if indexTargets.count > 1 {
-            libraryAlphabetIndex(indexTargets, pagination: library.pagination, proxy: proxy)
+          if !library.tracks.isEmpty && indexTargets.count > 1 {
+            libraryAlphabetIndex(
+              indexTargets,
+              height: libraryTrackContentHeight,
+              pagination: library.pagination,
+              proxy: proxy
+            )
           }
         }
       }
@@ -949,63 +957,67 @@ struct EchoNativePagesScreen: View {
 
   private func libraryAlphabetIndex(
     _ targets: [EchoNativeLibraryIndexTarget],
+    height: CGFloat,
     pagination: EchoNativeLibraryPagination,
     proxy: ScrollViewProxy
   ) -> some View {
-    let rowHeight: CGFloat = 14
-    let indexHeight = rowHeight * CGFloat(targets.count)
-    return VStack(spacing: 0) {
-      ForEach(targets) { target in
-        Text(target.key)
-          .font(.system(size: 9, weight: .bold, design: .rounded))
-          .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
-          .frame(width: 22, height: rowHeight)
-      }
-    }
-    .frame(width: 22, height: indexHeight, alignment: .top)
-    .contentShape(Rectangle())
-    .gesture(
-      DragGesture(minimumDistance: 0)
-        .onChanged { value in
-          isLibraryIndexPressed = true
-          let index = min(targets.count - 1, max(0, Int(value.location.y / rowHeight)))
-          let target = targets[index]
-          guard activeLibraryIndexKey != target.key else { return }
-          activeLibraryIndexKey = target.key
-          if target.page == pagination.page {
-            pendingLibraryIndexTarget = nil
-            scrollToLibraryIndex(target, proxy: proxy)
-          } else {
-            pendingLibraryIndexTarget = target
-            onAction(["action": "libraryIndex", "index": target.page - 1])
-          }
+    let indexHeight = max(1, height)
+    return GeometryReader { geometry in
+      let rowHeight = geometry.size.height / CGFloat(targets.count)
+      VStack(spacing: 0) {
+        ForEach(targets) { target in
+          Text(target.key)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
+            .frame(width: 22, height: rowHeight)
         }
-        .onEnded { _ in
-          if reduceMotion {
-            isLibraryIndexPressed = false
-            activeLibraryIndexKey = nil
-          } else {
-            withAnimation(.easeOut(duration: 0.18)) {
-              isLibraryIndexPressed = false
-              activeLibraryIndexKey = nil
+      }
+      .frame(width: 22, height: geometry.size.height, alignment: .top)
+      .contentShape(Rectangle())
+      .gesture(
+        DragGesture(minimumDistance: 0)
+          .onChanged { value in
+            isLibraryIndexPressed = true
+            let index = min(targets.count - 1, max(0, Int(value.location.y / rowHeight)))
+            let target = targets[index]
+            guard activeLibraryIndexKey != target.key else { return }
+            activeLibraryIndexKey = target.key
+            if target.page == pagination.page {
+              pendingLibraryIndexTarget = nil
+              scrollToLibraryIndex(target, proxy: proxy)
+            } else {
+              pendingLibraryIndexTarget = target
+              onAction(["action": "libraryIndex", "index": target.page - 1])
             }
           }
+          .onEnded { _ in
+            if reduceMotion {
+              isLibraryIndexPressed = false
+              activeLibraryIndexKey = nil
+            } else {
+              withAnimation(.easeOut(duration: 0.18)) {
+                isLibraryIndexPressed = false
+                activeLibraryIndexKey = nil
+              }
+            }
+          }
+      )
+      .overlay(alignment: .topLeading) {
+        if isLibraryIndexPressed, let activeLibraryIndexKey,
+          let activeIndex = targets.firstIndex(where: { $0.key == activeLibraryIndexKey }) {
+          Text(activeLibraryIndexKey)
+            .font(.system(size: 20, weight: .bold, design: .rounded))
+            .foregroundColor(echoInk)
+            .frame(width: 48, height: 48)
+            .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
+            .offset(
+              x: -54,
+              y: min(max(0, CGFloat(activeIndex) * rowHeight + (rowHeight - 48) / 2), max(0, geometry.size.height - 48))
+            )
         }
-    )
-    .overlay(alignment: .topLeading) {
-      if isLibraryIndexPressed, let activeLibraryIndexKey,
-        let activeIndex = targets.firstIndex(where: { $0.key == activeLibraryIndexKey }) {
-        Text(activeLibraryIndexKey)
-          .font(.system(size: 20, weight: .bold, design: .rounded))
-          .foregroundColor(echoInk)
-          .frame(width: 48, height: 48)
-          .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
-          .offset(
-            x: -54,
-            y: min(max(0, CGFloat(activeIndex) * rowHeight - 17), max(0, indexHeight - 48))
-          )
       }
     }
+    .frame(width: 22, height: indexHeight)
     .zIndex(10)
   }
 
