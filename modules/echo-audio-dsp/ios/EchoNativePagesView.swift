@@ -917,7 +917,8 @@ struct EchoNativePagesScreen: View {
           Text(target.key)
             .font(.system(size: 9, weight: .bold, design: .rounded))
             .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
-            .frame(maxWidth: .infinity, height: rowHeight)
+            .frame(maxWidth: .infinity)
+            .frame(height: rowHeight)
         }
       }
       .padding(.vertical, 6)
@@ -1022,7 +1023,7 @@ struct EchoNativePagesScreen: View {
     let labels = model.payload?.library?.labels
     let playlists = model.payload?.library?.playlists ?? []
     let source = selectedAlbumId.hasPrefix("local:") ? "local" : selectedAlbumId.hasPrefix("remote:") ? "remote" : "echo"
-    Menu {
+    return Menu {
       Button {
         onAction([
           "action": "collectionPlay",
