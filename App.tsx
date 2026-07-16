@@ -3647,15 +3647,34 @@ function EchoLinkApp(): ReactElement {
         return left.localeCompare(right) || a.title.localeCompare(b.title);
       })
     : sourceLibraryTracks;
-  const activeLibraryCollections = browsingCollections
-    ? librarySource === 'echo'
-      ? echoLibraryView === 'albums' ? echoCollections : echoLibraryView === 'artists' ? echoArtistCollections : []
-      : librarySource === 'local'
-        ? localLibraryView === 'albums' ? localCollections : localLibraryView === 'artists' ? localArtistCollections : []
-        : librarySource === 'remote'
-          ? powerampLibraryView === 'albums' ? powerampCollections : powerampLibraryView === 'artists' ? powerampArtistCollections : []
-          : []
-    : [];
+  const activeLibraryCollections = useMemo(() => {
+    const collections = browsingCollections
+      ? librarySource === 'echo'
+        ? echoLibraryView === 'albums' ? echoCollections : echoLibraryView === 'artists' ? echoArtistCollections : []
+        : librarySource === 'local'
+          ? localLibraryView === 'albums' ? localCollections : localLibraryView === 'artists' ? localArtistCollections : []
+          : librarySource === 'remote'
+            ? powerampLibraryView === 'albums' ? powerampCollections : powerampLibraryView === 'artists' ? powerampArtistCollections : []
+            : []
+      : [];
+    const locale = languageIsEnglish ? 'en' : 'zh-Hans-CN';
+    return [...collections].sort((left, right) => (
+      left.title.localeCompare(right.title, locale, { sensitivity: 'base', numeric: true })
+    ));
+  }, [
+    browsingCollections,
+    echoArtistCollections,
+    echoCollections,
+    echoLibraryView,
+    languageIsEnglish,
+    librarySource,
+    localArtistCollections,
+    localCollections,
+    localLibraryView,
+    powerampArtistCollections,
+    powerampCollections,
+    powerampLibraryView,
+  ]);
   const libraryPaginationKind = selectedLibraryCollectionId
     ? 'tracks'
     : librarySource === 'streaming' && streamingLibraryMode === 'playlists' && !selectedStreamingPlaylistId
@@ -5332,7 +5351,6 @@ function EchoLinkApp(): ReactElement {
       case 'libraryAlbumSort':
         if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration' || action.selection === 'track') {
           setLibraryAlbumSort(action.selection);
-          setLibraryPageIndex(0);
         }
         break;
       case 'libraryExpand':

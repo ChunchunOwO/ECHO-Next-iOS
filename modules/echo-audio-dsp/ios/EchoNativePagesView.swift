@@ -366,6 +366,7 @@ struct EchoNativePagesScreen: View {
   @State private var activeLibraryIndexKey: String?
   @State private var isLibraryIndexPressed = false
   @State private var pendingLibraryIndexTarget: EchoNativeLibraryIndexTarget?
+  @State private var pendingAlbumScroll = false
   @AppStorage("echo.library.albumTrackSort") private var albumTrackSort = "default"
   @AppStorage("echo.library.echoDisplayMode") private var trackDisplayMode = "list"
   @AppStorage("echo.library.collectionDisplayMode") private var collectionDisplayMode = "grid"
@@ -415,6 +416,7 @@ struct EchoNativePagesScreen: View {
     .background(Color.clear)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
+        .echoBlurredSheet()
     }
     .sheet(item: $playlistEditor) { editor in
       EchoNativePlaylistEditorSheet(
@@ -659,18 +661,15 @@ struct EchoNativePagesScreen: View {
         }
 
         if !searchOnly && (library.source == "echo" || library.source == "remote") {
-          ScrollView(.horizontal, showsIndicators: false) {
-            EchoNativeSegmentedControl(
-              options: library.filterOptions,
-              selection: library.filter,
-              compact: true,
-              onSelect: { selection in
-                clearAlbumSelection()
-                onAction(["action": "libraryFilter", "selection": selection])
-              }
-            )
-          }
-          .echoScrollClipDisabled()
+          EchoNativeSegmentedControl(
+            options: library.filterOptions,
+            selection: library.filter,
+            compact: false,
+            onSelect: { selection in
+              clearAlbumSelection()
+              onAction(["action": "libraryFilter", "selection": selection])
+            }
+          )
           ScrollView(.horizontal, showsIndicators: false) {
             EchoNativeSegmentedControl(
               options: library.viewOptions,
@@ -703,7 +702,7 @@ struct EchoNativePagesScreen: View {
             Text(library.labels.playlists)
               .font(.system(size: 18, weight: .bold, design: .rounded))
             Spacer()
-            EchoNativeLabelButton(symbol: "plus", title: library.labels.createPlaylist) {
+            EchoNativeLabelButton(symbol: "plus.circle.fill", title: library.labels.createPlaylist) {
               playlistEditor = EchoNativePlaylistEditorState(initialName: "", playlistId: nil)
             }
           }
@@ -712,7 +711,7 @@ struct EchoNativePagesScreen: View {
             Button {
               playlistEditor = EchoNativePlaylistEditorState(initialName: "", playlistId: nil)
             } label: {
-              Label(library.labels.createPlaylist, systemImage: "music.note.list")
+              Label(library.labels.createPlaylist, systemImage: "plus.circle.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(echoInk.opacity(0.52))
                 .frame(maxWidth: .infinity)
@@ -909,7 +908,6 @@ struct EchoNativePagesScreen: View {
                 : track.id)
           }
         }
-
         if canPaginate && !library.pagination.expanded {
           EchoNativeLabelButton(
             symbol: "arrow.up.left.and.arrow.down.right",
@@ -926,6 +924,7 @@ struct EchoNativePagesScreen: View {
           }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
+          .id("library-album-first-track")
           .background {
             GeometryReader { geometry in
               Color.clear
@@ -956,6 +955,19 @@ struct EchoNativePagesScreen: View {
         guard let target = pendingLibraryIndexTarget, target.page == library.pagination.page else { return }
         scrollToLibraryIndex(target, proxy: proxy)
         pendingLibraryIndexTarget = nil
+      }
+      .onChange(of: "\(library.paginationScope)::\(library.tracks.first?.id ?? "")") { _ in
+        guard pendingAlbumScroll, !library.tracks.isEmpty else { return }
+        pendingAlbumScroll = false
+        DispatchQueue.main.async {
+          if reduceMotion {
+            proxy.scrollTo("library-album-first-track", anchor: .top)
+          } else {
+            withAnimation(.easeInOut(duration: 0.22)) {
+              proxy.scrollTo("library-album-first-track", anchor: .top)
+            }
+          }
+        }
       }
       .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
     }
@@ -1090,6 +1102,7 @@ struct EchoNativePagesScreen: View {
     if collection.id.contains("-artist:") {
       clearAlbumSelection()
     } else {
+      pendingAlbumScroll = true
       selectedAlbumId = collection.id
       selectedAlbumArtworkUrl = collection.artworkUrl
       selectedAlbumTitle = collection.title
@@ -1219,6 +1232,7 @@ struct EchoNativePagesScreen: View {
   }
 
   private func clearAlbumSelection() {
+    pendingAlbumScroll = false
     selectedAlbumId = ""
     selectedAlbumArtworkUrl = ""
     selectedAlbumTitle = ""
@@ -1595,14 +1609,11 @@ struct EchoNativePagesScreen: View {
   private func connectionPage(_ connection: EchoNativeConnectionPayload) -> some View {
     ScrollView(showsIndicators: false) {
       VStack(alignment: .leading, spacing: 18) {
-        ScrollView(.horizontal, showsIndicators: false) {
-          EchoNativeSegmentedControl(
-            options: connection.modeOptions,
-            selection: connection.mode,
-            onSelect: { onAction(["action": "connectMode", "selection": $0]) }
-          )
-        }
-        .echoScrollClipDisabled()
+        EchoNativeSegmentedControl(
+          options: connection.modeOptions,
+          selection: connection.mode,
+          onSelect: { onAction(["action": "connectMode", "selection": $0]) }
+        )
 
         if connection.mode == "streaming" {
           connectionSection(
@@ -2251,14 +2262,17 @@ private struct EchoNativePlaylistEditorSheet: View {
         .echoGlass(tint: Color.white.opacity(0.12), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .submitLabel(.done)
         .onSubmit(save)
+      Spacer(minLength: 0)
       HStack(spacing: 12) {
         EchoNativeLabelButton(symbol: "xmark", title: labels?.cancel ?? "取消") { dismiss() }
+        Spacer(minLength: 12)
         EchoNativeLabelButton(
           symbol: "checkmark",
           title: editorTitle,
           disabled: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         ) { save() }
       }
+      .frame(maxWidth: .infinity)
     }
     .padding(22)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -2950,6 +2964,7 @@ private struct EchoNativeSegmentedControl: View {
           .accessibilityAddTraits(selected ? [.isButton, .isSelected] : [.isButton])
       }
     }
+    .frame(maxWidth: compact ? nil : .infinity, alignment: .center)
   }
 }
 
