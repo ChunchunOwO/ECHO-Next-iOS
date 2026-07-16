@@ -374,6 +374,13 @@ struct EchoNativePagesScreen: View {
       if let payload = model.payload {
         VStack(spacing: 0) {
           pageHeader(payload, title: pageTitle(payload.language))
+          if page == "library" || page == "connect" {
+            Rectangle()
+              .fill(echoInk.opacity(0.1))
+              .frame(height: 0.7)
+              .padding(.horizontal, 20)
+              .padding(.bottom, 8)
+          }
           Group {
             switch page {
             case "library":
@@ -759,11 +766,9 @@ struct EchoNativePagesScreen: View {
           }
         }
 
-        if indexTargets.count > 1 {
-          libraryAlphabetIndex(indexTargets, pagination: library.pagination, proxy: proxy)
-        }
-
-        if !library.collections.isEmpty {
+        HStack(alignment: .top, spacing: 6) {
+          LazyVStack(alignment: .leading, spacing: 14) {
+          if !library.collections.isEmpty {
           HStack {
             Text(library.labels.collections)
               .font(.system(size: 18, weight: .bold, design: .rounded))
@@ -895,9 +900,16 @@ struct EchoNativePagesScreen: View {
           .frame(maxWidth: .infinity, alignment: .center)
         }
 
-        if canPaginate && library.pagination.expanded && library.pagination.totalPages > 1 {
-          libraryPaginationControls(library.pagination)
-            .padding(.top, 8)
+          if canPaginate && library.pagination.expanded && library.pagination.totalPages > 1 {
+            libraryPaginationControls(library.pagination)
+              .padding(.top, 8)
+          }
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+
+          if indexTargets.count > 1 {
+            libraryAlphabetIndex(indexTargets, pagination: library.pagination, proxy: proxy)
+          }
         }
       }
       .padding(.horizontal, 20)
@@ -940,59 +952,60 @@ struct EchoNativePagesScreen: View {
     pagination: EchoNativeLibraryPagination,
     proxy: ScrollViewProxy
   ) -> some View {
-    GeometryReader { geometry in
-      let itemWidth = max(10, (geometry.size.width - 12) / CGFloat(targets.count))
-      HStack(spacing: 0) {
-        ForEach(targets) { target in
-          Text(target.key)
-            .font(.system(size: 9, weight: .bold, design: .rounded))
-            .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
-            .frame(width: itemWidth, height: 32)
-        }
-      }
-      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-      .contentShape(Rectangle())
-      .gesture(
-        DragGesture(minimumDistance: 0)
-          .onChanged { value in
-            isLibraryIndexPressed = true
-            let index = min(targets.count - 1, max(0, Int(value.location.x / itemWidth)))
-            let target = targets[index]
-            guard activeLibraryIndexKey != target.key else { return }
-            activeLibraryIndexKey = target.key
-            if target.page == pagination.page {
-              pendingLibraryIndexTarget = nil
-              scrollToLibraryIndex(target, proxy: proxy)
-            } else {
-              pendingLibraryIndexTarget = target
-              onAction(["action": "libraryIndex", "index": target.page - 1])
-            }
-          }
-          .onEnded { _ in
-            if reduceMotion {
-              isLibraryIndexPressed = false
-              activeLibraryIndexKey = nil
-            } else {
-              withAnimation(.easeOut(duration: 0.18)) {
-                isLibraryIndexPressed = false
-                activeLibraryIndexKey = nil
-              }
-            }
-          }
-      )
-      .overlay(alignment: .leading) {
-        if isLibraryIndexPressed, let activeLibraryIndexKey {
-          Text(activeLibraryIndexKey)
-            .font(.system(size: 20, weight: .bold, design: .rounded))
-            .foregroundColor(echoInk)
-            .frame(width: 48, height: 48)
-            .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
-            .offset(x: 0, y: -54)
-        }
+    let rowHeight: CGFloat = 14
+    let indexHeight = rowHeight * CGFloat(targets.count)
+    return VStack(spacing: 0) {
+      ForEach(targets) { target in
+        Text(target.key)
+          .font(.system(size: 9, weight: .bold, design: .rounded))
+          .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
+          .frame(width: 22, height: rowHeight)
       }
     }
-    .frame(height: 32)
-    .padding(.vertical, 4)
+    .frame(width: 22, height: indexHeight, alignment: .top)
+    .contentShape(Rectangle())
+    .gesture(
+      DragGesture(minimumDistance: 0)
+        .onChanged { value in
+          isLibraryIndexPressed = true
+          let index = min(targets.count - 1, max(0, Int(value.location.y / rowHeight)))
+          let target = targets[index]
+          guard activeLibraryIndexKey != target.key else { return }
+          activeLibraryIndexKey = target.key
+          if target.page == pagination.page {
+            pendingLibraryIndexTarget = nil
+            scrollToLibraryIndex(target, proxy: proxy)
+          } else {
+            pendingLibraryIndexTarget = target
+            onAction(["action": "libraryIndex", "index": target.page - 1])
+          }
+        }
+        .onEnded { _ in
+          if reduceMotion {
+            isLibraryIndexPressed = false
+            activeLibraryIndexKey = nil
+          } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+              isLibraryIndexPressed = false
+              activeLibraryIndexKey = nil
+            }
+          }
+        }
+    )
+    .overlay(alignment: .topLeading) {
+      if isLibraryIndexPressed, let activeLibraryIndexKey,
+        let activeIndex = targets.firstIndex(where: { $0.key == activeLibraryIndexKey }) {
+        Text(activeLibraryIndexKey)
+          .font(.system(size: 20, weight: .bold, design: .rounded))
+          .foregroundColor(echoInk)
+          .frame(width: 48, height: 48)
+          .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
+          .offset(
+            x: -54,
+            y: min(max(0, CGFloat(activeIndex) * rowHeight - 17), max(0, indexHeight - 48))
+          )
+      }
+    }
     .zIndex(10)
   }
 
