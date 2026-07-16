@@ -7,18 +7,22 @@ export type SavedSettings = {
   autoOpenLyricsForLocalTracks: boolean;
   autoQueueImportedLocalTracks: boolean;
   confirmBeforeDeletingLocalTracks: boolean;
-  defaultLibrarySource: 'all' | 'echo' | 'local' | 'streaming';
+  defaultLibrarySource: 'all' | 'echo' | 'local' | 'remote' | 'streaming';
   defaultLocalLibraryView: 'albums' | 'artists' | 'favorites' | 'formats' | 'recent' | 'songs';
   defaultPage: 'connect' | 'control' | 'library' | 'search' | 'settings';
   echoConnectionEnabled: boolean;
   eqGains: number[];
   eqPreset: 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
+  externalMetadataSkipExisting: boolean;
   lrcApiExternalDataEnabled: boolean;
   lrclibExternalDataEnabled: boolean;
+  externalMetadataSearchEnabled: boolean;
   externalDataSelectionMode: 'ask' | 'automatic';
   neteaseAccessMode: 'direct' | 'selfHosted';
   neteaseExternalDataEnabled: boolean;
   loudnessNormalizationEnabled: boolean;
+  powerampRemoteEnabled: boolean;
+  showPowerampRemoteConnection: boolean;
   showArtworkGlow: boolean;
 };
 

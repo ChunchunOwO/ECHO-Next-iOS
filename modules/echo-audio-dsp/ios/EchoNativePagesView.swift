@@ -12,6 +12,13 @@ private struct EchoNativePageOption: Decodable, Identifiable {
   let label: String
 }
 
+private enum EchoPairingScannerTarget: String, Identifiable {
+  case echo
+  case poweramp
+
+  var id: String { rawValue }
+}
+
 private struct EchoNativePageStatus: Decodable {
   let broken: Bool
   let label: String
@@ -22,6 +29,7 @@ private struct EchoNativeLibraryTrack: Decodable, Identifiable {
   let artworkUrl: String
   let artist: String
   let canPlayOnPhone: Bool
+  let discNo: Int?
   let durationMs: Double
   let favorite: Bool
   let group: String
@@ -31,6 +39,7 @@ private struct EchoNativeLibraryTrack: Decodable, Identifiable {
   let source: String
   let tags: [String]
   let title: String
+  let trackNo: Int?
 }
 
 private struct EchoNativeStreamingPlaylist: Decodable, Identifiable {
@@ -61,6 +70,13 @@ private struct EchoNativeLibraryCollection: Decodable, Identifiable {
   let query: String
   let subtitle: String
   let title: String
+}
+
+private struct EchoNativeLibraryIndexTarget: Identifiable {
+  let key: String
+  let page: Int
+  let scope: String
+  var id: String { "library-index-\(scope)-\(key)" }
 }
 
 private struct EchoNativeLibraryPagination: Decodable {
@@ -139,8 +155,10 @@ private struct EchoNativeLibraryPayload: Decodable {
   let collections: [EchoNativeLibraryCollection]
   let filter: String
   let filterOptions: [EchoNativePageOption]
+  let indexTitles: [String]
   let labels: EchoNativeLibraryLabels
   let pagination: EchoNativeLibraryPagination
+  let paginationScope: String
   let playlists: [EchoNativePlaylist]
   var query: String
   let source: String
@@ -196,6 +214,7 @@ private struct EchoNativeConnectionPayload: Decodable {
   let modeOptions: [EchoNativePageOption]
   var pairingText: String
   var port: String
+  var powerampRemote: EchoNativePowerampRemoteSettings?
   let streamableCount: String
   var streaming: EchoNativeConnectionStreaming
   var token: String
@@ -225,6 +244,14 @@ private struct EchoNativeSettingSection: Decodable, Identifiable {
 private struct EchoNativeSettingsPayload: Decodable {
   var sections: [EchoNativeSettingSection]
   let subtitle: String
+}
+
+private struct EchoNativePowerampRemoteSettings: Decodable {
+  var enabled: Bool
+  var host: String
+  var name: String
+  var port: String
+  var token: String
 }
 
 private struct EchoNativePagePayload: Decodable {
@@ -267,8 +294,9 @@ struct EchoNativePagesScreen: View {
   @Environment(\.openURL) private var openURL
   @Environment(\.scenePhase) private var scenePhase
   @State private var expandedSection = "interface"
-  @State private var showPairingScanner = false
+  @State private var pairingScannerTarget: EchoPairingScannerTarget?
   @State private var showEqualizer = false
+  @State private var showPowerampRemoteSetup = false
   @State private var playlistEditor: EchoNativePlaylistEditorState?
   @State private var playlistSelection: EchoNativePlaylistSelection?
   @State private var playlistPendingDeletion: EchoNativePlaylist?
@@ -276,8 +304,10 @@ struct EchoNativePagesScreen: View {
   @State private var showNeteaseQrSaveError = false
   @State private var selectedAlbumId = ""
   @State private var selectedAlbumTitle = ""
+  @State private var activeLibraryIndexKey: String?
+  @State private var pendingLibraryIndexTarget: EchoNativeLibraryIndexTarget?
   @AppStorage("echo.library.albumTrackSort") private var albumTrackSort = "default"
-  @AppStorage("echo.library.echoDisplayMode") private var echoLibraryDisplayMode = "list"
+  @AppStorage("echo.library.echoDisplayMode") private var trackDisplayMode = "list"
   @AppStorage("echo.library.collectionDisplayMode") private var collectionDisplayMode = "grid"
   @AppStorage("echo.library.streamingPlaylistDisplayMode") private var streamingPlaylistDisplayMode = "grid"
 
@@ -316,9 +346,18 @@ struct EchoNativePagesScreen: View {
       }
     }
     .background(Color.clear)
-    .preferredColorScheme(.light)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
+    }
+    .sheet(isPresented: $showPowerampRemoteSetup) {
+      if let remote = model.payload?.connection?.powerampRemote {
+        EchoNativePowerampRemoteSetupSheet(
+          configuration: remote,
+          language: model.payload?.language ?? "zh",
+          onAction: onAction
+        )
+        .echoCompactSheet(height: 430)
+      }
     }
     .sheet(item: $playlistEditor) { editor in
       EchoNativePlaylistEditorSheet(
@@ -335,9 +374,15 @@ struct EchoNativePagesScreen: View {
         onAction: onAction
       )
     }
-    .fullScreenCover(isPresented: $showPairingScanner) {
-      EchoPairingScannerSheet(language: model.payload?.language ?? "zh") { code in
-        onAction(["action": "pairScanned", "text": code])
+    .fullScreenCover(item: $pairingScannerTarget) { target in
+      EchoPairingScannerSheet(
+        language: model.payload?.language ?? "zh",
+        serviceName: target == .echo ? "ECHO" : "Poweramp Remote"
+      ) { code in
+        onAction([
+          "action": target == .echo ? "pairScanned" : "powerampPairScanned",
+          "text": code,
+        ])
       }
     }
     .confirmationDialog(
@@ -453,14 +498,31 @@ struct EchoNativePagesScreen: View {
         : library.tracks.isEmpty
     )
     let sortedTracks = sortedAlbumTracks(library.tracks)
-    return ScrollView(showsIndicators: false) {
+    let canPaginate = library.pagination.totalCount > library.pagination.pageSize
+    let paginationExpansionLabel = !selectedAlbumId.isEmpty
+      ? (model.payload?.language == "en"
+        ? "Show all \(library.pagination.totalCount) album tracks"
+        : "展开专辑内全部 \(library.pagination.totalCount) 首")
+      : (model.payload?.language == "en"
+        ? "Browse all \(library.pagination.totalCount) items"
+        : "展开全部 \(library.pagination.totalCount) 项并分页浏览")
+    let indexTargets = libraryIndexTargets(
+      library.indexTitles,
+      scope: library.paginationScope,
+      pageSize: library.pagination.pageSize
+    )
+    let contentAnimationKey = "\(library.source)::\(library.view)::\(library.filter)::\(library.pagination.page)"
+    return ScrollViewReader { proxy in
+      ScrollView(showsIndicators: false) {
       LazyVStack(alignment: .leading, spacing: 14) {
         if !searchOnly {
-          EchoNativeSegmentedControl(
-            options: library.sourceOptions,
-            selection: library.source,
-            onSelect: { onAction(["action": "librarySource", "selection": $0]) }
-          )
+          ScrollView(.horizontal, showsIndicators: false) {
+            EchoNativeSegmentedControl(
+              options: library.sourceOptions,
+              selection: library.source,
+              onSelect: { onAction(["action": "librarySource", "selection": $0]) }
+            )
+          }
         }
 
         if !searchOnly && library.source == "streaming" {
@@ -538,7 +600,7 @@ struct EchoNativePagesScreen: View {
           }
         }
 
-        if !searchOnly && library.source == "echo" {
+        if !searchOnly && (library.source == "echo" || library.source == "remote") {
           ScrollView(.horizontal, showsIndicators: false) {
             EchoNativeSegmentedControl(
               options: library.filterOptions,
@@ -624,15 +686,21 @@ struct EchoNativePagesScreen: View {
           }
 
           if streamingPlaylistDisplayMode == "grid" {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())], spacing: 18) {
-              ForEach(displayedStreamingPlaylists) { playlist in
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
+              ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
                 streamingPlaylistGridCard(playlist, labels: library.labels)
+                  .id(index == 0 || libraryIndexKey(displayedStreamingPlaylists[index - 1].name) != libraryIndexKey(playlist.name)
+                    ? libraryIndexAnchor(for: playlist.name, scope: "streaming")
+                    : playlist.id)
               }
             }
           } else {
             LazyVStack(spacing: 0) {
-              ForEach(displayedStreamingPlaylists) { playlist in
+              ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
                 streamingPlaylistRow(playlist, labels: library.labels)
+                  .id(index == 0 || libraryIndexKey(displayedStreamingPlaylists[index - 1].name) != libraryIndexKey(playlist.name)
+                    ? libraryIndexAnchor(for: playlist.name, scope: "streaming")
+                    : playlist.id)
               }
             }
           }
@@ -648,15 +716,21 @@ struct EchoNativePagesScreen: View {
             }
           }
           if collectionDisplayMode == "grid" {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())], spacing: 18) {
-              ForEach(library.collections) { collection in
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
+              ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
                 libraryCollectionGridCard(collection)
+                  .id(index == 0 || libraryIndexKey(library.collections[index - 1].title) != libraryIndexKey(collection.title)
+                    ? libraryIndexAnchor(for: collection.title, scope: "collections")
+                    : collection.id)
               }
             }
           } else {
             LazyVStack(spacing: 0) {
-              ForEach(library.collections) { collection in
+              ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
                 libraryCollectionRow(collection)
+                  .id(index == 0 || libraryIndexKey(library.collections[index - 1].title) != libraryIndexKey(collection.title)
+                    ? libraryIndexAnchor(for: collection.title, scope: "collections")
+                    : collection.id)
               }
             }
           }
@@ -667,19 +741,6 @@ struct EchoNativePagesScreen: View {
             .font(.system(size: 13, weight: .bold))
             .foregroundColor(echoInk.opacity(0.52))
           Spacer()
-          if !library.pagination.expanded && library.pagination.totalCount > library.pagination.pageSize {
-            EchoNativeLabelButton(
-              symbol: "arrow.up.left.and.arrow.down.right",
-              title: model.payload?.language == "en" ? "Expand" : "展开"
-            ) {
-              onAction(["action": "libraryExpand", "enabled": true])
-            }
-          }
-          if library.source == "echo" && library.view == "songs" {
-            EchoNativeDisplayModeButton(mode: echoLibraryDisplayMode, language: model.payload?.language ?? "zh") {
-              echoLibraryDisplayMode = echoLibraryDisplayMode == "grid" ? "list" : "grid"
-            }
-          }
           if library.source == "local" {
             EchoNativeLabelButton(
               symbol: "square.and.arrow.down",
@@ -699,10 +760,6 @@ struct EchoNativePagesScreen: View {
         }
         .frame(minHeight: 38)
 
-        if library.pagination.expanded {
-          libraryPaginationControls(library.pagination)
-        }
-
         if !library.tracks.isEmpty {
           HStack(spacing: 10) {
             Text(!selectedAlbumTitle.isEmpty
@@ -713,7 +770,13 @@ struct EchoNativePagesScreen: View {
               .font(.system(size: 18, weight: .bold, design: .rounded))
               .lineLimit(1)
             Spacer(minLength: 8)
-            if !selectedAlbumId.isEmpty { albumSortMenu }
+            if !selectedAlbumId.isEmpty {
+              albumPlayMenu
+              albumSortMenu
+            }
+            EchoNativeDisplayModeButton(mode: trackDisplayMode, language: model.payload?.language ?? "zh") {
+              trackDisplayMode = trackDisplayMode == "grid" ? "list" : "grid"
+            }
           }
         }
 
@@ -730,13 +793,16 @@ struct EchoNativePagesScreen: View {
           .foregroundColor(echoInk.opacity(0.4))
           .frame(maxWidth: .infinity)
           .padding(.vertical, 54)
-        } else if library.source == "echo" && library.view == "songs" && echoLibraryDisplayMode == "grid" {
+        } else if !library.tracks.isEmpty && trackDisplayMode == "grid" {
           LazyVGrid(
-            columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())],
-            spacing: 18
+            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+            spacing: 16
           ) {
-            ForEach(sortedTracks) { track in
+            ForEach(Array(sortedTracks.enumerated()), id: \.element.id) { index, track in
               libraryTrackGridCard(track, labels: library.labels)
+                .id(index == 0 || libraryIndexKey(sortedTracks[index - 1].title) != libraryIndexKey(track.title)
+                  ? libraryIndexAnchor(for: track.title, scope: "tracks")
+                  : track.id)
             }
           }
           .transition(.opacity.combined(with: .scale(scale: 0.98)))
@@ -748,20 +814,151 @@ struct EchoNativePagesScreen: View {
                 .foregroundColor(echoAccent.opacity(0.78))
                 .padding(.top, index == 0 ? 2 : 10)
             }
+            if !selectedAlbumId.isEmpty, let discNo = track.discNo,
+              index == 0 || sortedTracks[index - 1].discNo != discNo {
+              Text("DISC \(discNo)")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(echoInk.opacity(0.58))
+                .padding(.top, index == 0 ? 2 : 12)
+            }
             libraryTrackRow(track, labels: library.labels)
+              .id(index == 0 || libraryIndexKey(sortedTracks[index - 1].title) != libraryIndexKey(track.title)
+                ? libraryIndexAnchor(for: track.title, scope: "tracks")
+                : track.id)
           }
         }
 
-        if library.pagination.expanded && library.pagination.totalPages > 1 {
+        if canPaginate && !library.pagination.expanded {
+          EchoNativeLabelButton(
+            symbol: "arrow.up.left.and.arrow.down.right",
+            title: paginationExpansionLabel
+          ) {
+            onAction(["action": "libraryExpand", "enabled": true])
+          }
+          .frame(maxWidth: .infinity, alignment: .center)
+        }
+
+        if canPaginate && library.pagination.expanded && library.pagination.totalPages > 1 {
           libraryPaginationControls(library.pagination)
             .padding(.top, 8)
         }
       }
       .padding(.horizontal, 20)
       .padding(.bottom, 24)
+      .id(contentAnimationKey)
+      .transition(.opacity)
+      }
+      .refreshable { onAction(["action": "libraryRefresh"]) }
+      .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: contentAnimationKey)
+      .overlay(alignment: .trailing) {
+        if indexTargets.count > 1 {
+          libraryAlphabetIndex(indexTargets, pagination: library.pagination, proxy: proxy)
+            .padding(.trailing, 2)
+        }
+      }
+      .onChange(of: library.pagination.page) { _ in
+        guard let target = pendingLibraryIndexTarget, target.page == library.pagination.page else { return }
+        scrollToLibraryIndex(target, proxy: proxy)
+        pendingLibraryIndexTarget = nil
+        activeLibraryIndexKey = nil
+      }
+      .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
     }
-    .refreshable { onAction(["action": "libraryRefresh"]) }
-    .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
+  }
+
+  private func libraryIndexKey(_ title: String) -> String {
+    let latin = NSMutableString(string: title.trimmingCharacters(in: .whitespacesAndNewlines))
+    CFStringTransform(latin, nil, kCFStringTransformToLatin, false)
+    CFStringTransform(latin, nil, kCFStringTransformStripCombiningMarks, false)
+    guard let first = latin.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().unicodeScalars.first,
+      first.value >= 65, first.value <= 90 else {
+      return "#"
+    }
+    return String(first)
+  }
+
+  private func libraryIndexTargets(
+    _ titles: [String],
+    scope: String,
+    pageSize: Int
+  ) -> [EchoNativeLibraryIndexTarget] {
+    var seen = Set<String>()
+    return titles.enumerated().compactMap { index, title in
+      let key = libraryIndexKey(title)
+      return seen.insert(key).inserted
+        ? EchoNativeLibraryIndexTarget(key: key, page: index / max(1, pageSize) + 1, scope: scope)
+        : nil
+    }
+  }
+
+  private func libraryIndexAnchor(for title: String, scope: String) -> String {
+    "library-index-\(scope)-\(libraryIndexKey(title))"
+  }
+
+  private func scrollToLibraryIndex(_ target: EchoNativeLibraryIndexTarget, proxy: ScrollViewProxy) {
+    if reduceMotion {
+      proxy.scrollTo(target.id, anchor: .top)
+    } else {
+      withAnimation(.easeInOut(duration: 0.18)) {
+        proxy.scrollTo(target.id, anchor: .top)
+      }
+    }
+  }
+
+  private func libraryAlphabetIndex(
+    _ targets: [EchoNativeLibraryIndexTarget],
+    pagination: EchoNativeLibraryPagination,
+    proxy: ScrollViewProxy
+  ) -> some View {
+    GeometryReader { geometry in
+      let rowHeight = max(12, (geometry.size.height - 12) / CGFloat(targets.count))
+      VStack(spacing: 0) {
+        ForEach(targets) { target in
+          Text(target.key)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
+            .frame(maxWidth: .infinity, height: rowHeight)
+        }
+      }
+      .padding(.vertical, 6)
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+      .background(.ultraThinMaterial, in: Capsule())
+      .contentShape(Rectangle())
+      .gesture(
+        DragGesture(minimumDistance: 0)
+          .onChanged { value in
+            let index = min(targets.count - 1, max(0, Int((value.location.y - 6) / rowHeight)))
+            let target = targets[index]
+            guard activeLibraryIndexKey != target.key else { return }
+            activeLibraryIndexKey = target.key
+            if target.page == pagination.page {
+              pendingLibraryIndexTarget = nil
+              scrollToLibraryIndex(target, proxy: proxy)
+            } else {
+              pendingLibraryIndexTarget = target
+              onAction(["action": "libraryIndex", "index": target.page - 1])
+            }
+          }
+          .onEnded { _ in
+            guard case nil = pendingLibraryIndexTarget else { return }
+            if reduceMotion { activeLibraryIndexKey = nil } else {
+              withAnimation(.easeOut(duration: 0.18)) { activeLibraryIndexKey = nil }
+            }
+          }
+      )
+      .overlay(alignment: .leading) {
+        if let activeLibraryIndexKey {
+          Text(activeLibraryIndexKey)
+            .font(.system(size: 20, weight: .bold, design: .rounded))
+            .foregroundColor(echoInk)
+            .frame(width: 48, height: 48)
+            .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
+            .offset(x: -54)
+        }
+      }
+    }
+    .frame(width: 24)
+    .padding(.vertical, 84)
   }
 
   private func libraryQueryBinding(_ library: EchoNativeLibraryPayload) -> Binding<String> {
@@ -821,6 +1018,63 @@ struct EchoNativePagesScreen: View {
     ])
   }
 
+  private var albumPlayMenu: some View {
+    let labels = model.payload?.library?.labels
+    let playlists = model.payload?.library?.playlists ?? []
+    let source = selectedAlbumId.hasPrefix("local:") ? "local" : selectedAlbumId.hasPrefix("remote:") ? "remote" : "echo"
+    Menu {
+      Button {
+        onAction([
+          "action": "collectionPlay",
+          "id": selectedAlbumId,
+          "source": source,
+        ])
+      } label: {
+        Label(model.payload?.language == "en" ? "Play album" : "播放该专辑", systemImage: "play.fill")
+      }
+      Button {
+        onAction([
+          "action": "collectionPlay",
+          "id": selectedAlbumId,
+          "selection": "track",
+          "source": source,
+        ])
+      } label: {
+        Label(model.payload?.language == "en" ? "Play in disc and track order" : "按碟序和音轨号播放", systemImage: "list.number")
+      }
+      if let labels, !playlists.isEmpty {
+        Menu {
+          ForEach(playlists) { playlist in
+            Button(playlist.name) {
+              onAction([
+                "action": "collectionPlaylistAdd",
+                "playlistId": playlist.id,
+                "source": source,
+              ])
+            }
+          }
+        } label: {
+          Label(labels.addToPlaylist, systemImage: "text.badge.plus")
+        }
+      }
+      Button {
+        onAction([
+          "action": "collectionPlaylistCreate",
+          "source": source,
+          "text": selectedAlbumTitle,
+        ])
+      } label: {
+        Label(labels?.createPlaylist ?? (model.payload?.language == "en" ? "Create playlist" : "创建歌单"), systemImage: "plus")
+      }
+    } label: {
+      Image(systemName: "play.fill")
+        .font(.system(size: 13, weight: .bold))
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+    }
+    .accessibilityLabel(model.payload?.language == "en" ? "Album playback options" : "专辑播放选项")
+  }
+
   private var albumSortMenu: some View {
     Menu {
       Picker(
@@ -834,6 +1088,7 @@ struct EchoNativePagesScreen: View {
         )
       ) {
         Label(model.payload?.language == "en" ? "Album order" : "专辑顺序", systemImage: "list.number").tag("default")
+        Label(model.payload?.language == "en" ? "Disc and track number" : "碟序和音轨号", systemImage: "number").tag("track")
         Label(model.payload?.language == "en" ? "Title" : "歌名", systemImage: "textformat").tag("title")
         Label(model.payload?.language == "en" ? "Artist" : "艺术家", systemImage: "person").tag("artist")
         Label(model.payload?.language == "en" ? "Duration" : "时长", systemImage: "clock").tag("duration")
@@ -850,6 +1105,15 @@ struct EchoNativePagesScreen: View {
   private func sortedAlbumTracks(_ tracks: [EchoNativeLibraryTrack]) -> [EchoNativeLibraryTrack] {
     guard !selectedAlbumId.isEmpty else { return tracks }
     switch albumTrackSort {
+    case "track":
+      return tracks.sorted {
+        let discOrder = ($0.discNo ?? 1) - ($1.discNo ?? 1)
+        if discOrder != 0 { return discOrder < 0 }
+        let trackOrder = ($0.trackNo ?? Int.max) - ($1.trackNo ?? Int.max)
+        return trackOrder == 0
+          ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
+          : trackOrder < 0
+      }
     case "title":
       return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     case "artist":
@@ -1091,6 +1355,12 @@ struct EchoNativePagesScreen: View {
         onAction(["action": "trackPlay", "id": track.id, "source": track.source])
       } label: {
         HStack(spacing: 11) {
+          if !selectedAlbumId.isEmpty, let trackNo = track.trackNo {
+            Text(String(trackNo))
+              .font(.system(size: 14, weight: .semibold, design: .rounded))
+              .foregroundColor(echoInk.opacity(0.54))
+              .frame(width: 24, alignment: .trailing)
+          }
           EchoNativeArtwork(urlString: track.artworkUrl) {
             onAction(["action": "artworkError", "url": track.artworkUrl])
           }
@@ -1154,7 +1424,7 @@ struct EchoNativePagesScreen: View {
             initialName: "",
             playlistId: nil,
             trackId: track.id,
-            trackSource: track.isLocal ? "local" : "echo"
+            trackSource: track.source
           )
         } label: {
           Label(labels.createPlaylist, systemImage: "plus")
@@ -1167,7 +1437,7 @@ struct EchoNativePagesScreen: View {
                 "action": "playlistAddTrack",
                 "id": track.id,
                 "playlistId": playlist.id,
-                "source": track.isLocal ? "local" : "echo",
+                "source": track.source,
               ])
             }
           }
@@ -1179,20 +1449,34 @@ struct EchoNativePagesScreen: View {
             initialName: "",
             playlistId: nil,
             trackId: track.id,
-            trackSource: track.isLocal ? "local" : "echo"
+            trackSource: track.source
           )
         } label: {
           Label(labels.createPlaylist, systemImage: "plus")
         }
       }
 
-      if track.isLocal {
+      if track.source != "streaming" {
         Divider()
         Button {
-          onAction(["action": "trackFavorite", "id": track.id])
+          onAction(["action": "trackFavorite", "id": track.id, "source": track.source])
         } label: {
           Label(track.favorite ? labels.unfavorite : labels.favorite, systemImage: track.favorite ? "heart.slash" : "heart")
         }
+      }
+      if track.source == "remote" {
+        Button {
+          onAction(["action": "remoteTrackControl", "id": track.id])
+        } label: {
+          Label(model.payload?.language == "en" ? "Control with Poweramp" : "Poweramp 播放", systemImage: "speaker.wave.2")
+        }
+        Button {
+          onAction(["action": "remoteTrackStream", "id": track.id])
+        } label: {
+          Label(model.payload?.language == "en" ? "Stream to iPhone" : "串流到 iPhone", systemImage: "iphone.and.arrow.forward")
+        }
+      }
+      if track.isLocal {
         Button {
           onAction(["action": "trackQueue", "id": track.id])
         } label: {
@@ -1225,11 +1509,13 @@ struct EchoNativePagesScreen: View {
   private func connectionPage(_ connection: EchoNativeConnectionPayload) -> some View {
     ScrollView(showsIndicators: false) {
       VStack(alignment: .leading, spacing: 18) {
-        EchoNativeSegmentedControl(
-          options: connection.modeOptions,
-          selection: connection.mode,
-          onSelect: { onAction(["action": "connectMode", "selection": $0]) }
-        )
+        ScrollView(.horizontal, showsIndicators: false) {
+          EchoNativeSegmentedControl(
+            options: connection.modeOptions,
+            selection: connection.mode,
+            onSelect: { onAction(["action": "connectMode", "selection": $0]) }
+          )
+        }
 
         if connection.mode == "streaming" {
           connectionSection(
@@ -1360,6 +1646,8 @@ struct EchoNativePagesScreen: View {
               .foregroundColor(echoInk.opacity(0.42))
               .fixedSize(horizontal: false, vertical: true)
           }
+        } else if connection.mode == "remote" {
+          powerampRemoteConnection(connection)
         } else {
           connectionToggle(connection)
           connectionMetrics(connection)
@@ -1379,7 +1667,7 @@ struct EchoNativePagesScreen: View {
                 onAction(["action": "pairConnection"])
               }
               EchoNativeLabelButton(symbol: "qrcode.viewfinder", title: connection.labels.scanPairing) {
-                showPairingScanner = true
+                pairingScannerTarget = .echo
               }
             }
           }
@@ -1448,6 +1736,75 @@ struct EchoNativePagesScreen: View {
     }
     .padding(15)
     .echoGlass(tint: Color.white.opacity(0.1), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+  }
+
+  @ViewBuilder
+  private func powerampRemoteConnection(_ connection: EchoNativeConnectionPayload) -> some View {
+    if let remote = connection.powerampRemote {
+      connectionSection(
+        symbol: "dot.radiowaves.left.and.right",
+        title: model.payload?.language == "en" ? "Poweramp Remote" : "Poweramp 远程"
+      ) {
+        HStack(spacing: 14) {
+          Image(systemName: "waveform.badge.magnifyingglass")
+            .font(.system(size: 19, weight: .semibold))
+            .foregroundColor(echoAccent)
+            .frame(width: 42, height: 42)
+            .echoGlass(tint: echoAccent.opacity(0.08), interactive: false, in: Circle())
+          VStack(alignment: .leading, spacing: 3) {
+            Text(model.payload?.language == "en" ? "Connect Poweramp" : "连接 Poweramp")
+              .font(.system(size: 15, weight: .bold))
+            Text(model.payload?.language == "en"
+              ? "Control Poweramp or stream Android music to this iPhone."
+              : "控制 Poweramp，或将安卓音乐串流到此 iPhone。")
+              .font(.system(size: 11, weight: .medium))
+              .foregroundColor(echoInk.opacity(0.5))
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          Spacer(minLength: 6)
+          Toggle("", isOn: Binding(
+            get: { model.payload?.connection?.powerampRemote?.enabled ?? remote.enabled },
+            set: { enabled in
+              updateConnection { $0.powerampRemote?.enabled = enabled }
+              onAction(["action": "powerampRemoteEnabled", "enabled": enabled])
+            }
+          ))
+          .labelsHidden()
+          .tint(echoAccent)
+        }
+        .padding(15)
+        .echoGlass(tint: Color.white.opacity(0.1), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+        HStack(spacing: 10) {
+          EchoNativeLabelButton(
+            symbol: "slider.horizontal.3",
+            title: model.payload?.language == "en" ? "Configure" : "配置"
+          ) {
+            showPowerampRemoteSetup = true
+          }
+          EchoNativeLabelButton(
+            symbol: "qrcode.viewfinder",
+            title: connection.labels.scanPairing
+          ) {
+            pairingScannerTarget = .poweramp
+          }
+          EchoNativeLabelButton(
+            symbol: "arrow.clockwise",
+            title: model.payload?.language == "en" ? "Test" : "测试",
+            disabled: !remote.enabled || remote.host.isEmpty || remote.token.isEmpty || connection.busy
+          ) {
+            onAction(["action": "powerampRemoteTest"])
+          }
+        }
+
+        Text(remote.host.isEmpty
+          ? (model.payload?.language == "en" ? "No Android service configured." : "尚未配置安卓服务。")
+          : "\(remote.name) · \(remote.host):\(remote.port)")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundColor(echoInk.opacity(0.5))
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+    }
   }
 
   private func connectionMetrics(_ connection: EchoNativeConnectionPayload) -> some View {
@@ -1729,6 +2086,87 @@ struct EchoNativePagesScreen: View {
   }
 }
 
+private struct EchoNativePowerampRemoteSetupSheet: View {
+  let language: String
+  let onAction: ([String: Any]) -> Void
+  @Environment(\.dismiss) private var dismiss
+  @State private var host: String
+  @State private var name: String
+  @State private var port: String
+  @State private var token: String
+
+  init(
+    configuration: EchoNativePowerampRemoteSettings,
+    language: String,
+    onAction: @escaping ([String: Any]) -> Void
+  ) {
+    self.language = language
+    self.onAction = onAction
+    _host = State(initialValue: configuration.host)
+    _name = State(initialValue: configuration.name)
+    _port = State(initialValue: configuration.port)
+    _token = State(initialValue: configuration.token)
+  }
+
+  private var english: Bool { language == "en" }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      HStack {
+        Text(english ? "Poweramp Remote" : "Poweramp 远程")
+          .font(.system(size: 20, weight: .bold, design: .rounded))
+        Spacer()
+        Button { dismiss() } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 13, weight: .bold))
+            .frame(width: 34, height: 34)
+            .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
+        }
+        .buttonStyle(.plain)
+      }
+
+      TextField(english ? "Android address" : "安卓地址", text: $host)
+        .textInputAutocapitalization(.never)
+        .disableAutocorrection(true)
+        .textFieldStyle(.roundedBorder)
+      HStack(spacing: 10) {
+        TextField(english ? "Name" : "名称", text: $name)
+          .textFieldStyle(.roundedBorder)
+        TextField(english ? "Port" : "端口", text: $port)
+          .keyboardType(.numberPad)
+          .textFieldStyle(.roundedBorder)
+          .frame(width: 82)
+      }
+      SecureField(english ? "Pairing token" : "配对令牌", text: $token)
+        .textInputAutocapitalization(.never)
+        .disableAutocorrection(true)
+        .textFieldStyle(.roundedBorder)
+
+      Button {
+        onAction([
+          "action": "powerampRemoteSave",
+          "host": host,
+          "name": name,
+          "port": port,
+          "scheme": "http",
+          "token": token,
+        ])
+        dismiss()
+      } label: {
+        Label(english ? "Save connection" : "保存连接", systemImage: "checkmark")
+          .font(.system(size: 14, weight: .bold))
+          .frame(maxWidth: .infinity, minHeight: 46)
+          .echoGlass(tint: echoAccent.opacity(0.16), clear: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+      }
+      .buttonStyle(.plain)
+      .disabled(host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+    .padding(20)
+    .foregroundColor(echoInk)
+    .background(echoWarmBackground.ignoresSafeArea())
+  }
+}
+
 private struct EchoNativePlaylistEditorSheet: View {
   let editor: EchoNativePlaylistEditorState
   let labels: EchoNativeLibraryLabels?
@@ -1771,7 +2209,6 @@ private struct EchoNativePlaylistEditorSheet: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
-    .preferredColorScheme(.light)
   }
 
   private var editorTitle: String {
@@ -1921,13 +2358,13 @@ private struct EchoNativePlaylistDetailSheet: View {
     .padding(20)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
-    .preferredColorScheme(.light)
     .onDisappear { onAction(["action": "playlistClose"]) }
   }
 }
 
 private struct EchoPairingScannerSheet: View {
   let language: String
+  let serviceName: String
   let onCode: (String) -> Void
   @Environment(\.dismiss) private var dismiss
   @State private var cameraUnavailable = false
@@ -1950,7 +2387,7 @@ private struct EchoPairingScannerSheet: View {
           VStack(alignment: .leading, spacing: 3) {
             Text(language == "en" ? "Scan Pairing Code" : "扫描配对二维码")
               .font(.system(size: 22, weight: .bold, design: .rounded))
-            Text(language == "en" ? "Point the camera at the QR code shown by ECHO." : "将 ECHO 显示的二维码放入取景框。")
+            Text(language == "en" ? "Point the camera at the QR code shown by \(serviceName)." : "将 \(serviceName) 显示的二维码放入取景框。")
               .font(.system(size: 11, weight: .semibold))
               .foregroundColor(.white.opacity(0.7))
           }
@@ -1991,7 +2428,7 @@ private struct EchoPairingScannerSheet: View {
           }
           .buttonStyle(.plain)
 
-          Text(language == "en" ? "The connection is saved automatically after a successful scan." : "识别成功后会自动保存连接信息。")
+          Text(language == "en" ? "The \(serviceName) connection is saved after a successful scan." : "识别成功后会自动保存 \(serviceName) 连接信息。")
             .font(.system(size: 12, weight: .semibold))
             .foregroundColor(.white.opacity(0.76))
             .multilineTextAlignment(.center)
@@ -2053,7 +2490,7 @@ private struct EchoPairingScannerSheet: View {
     .alert(language == "en" ? "No QR code found" : "未识别到二维码", isPresented: $photoError) {
       Button(language == "en" ? "OK" : "好", role: .cancel) {}
     } message: {
-      Text(language == "en" ? "Choose a clear image containing an ECHO pairing QR code." : "请选择包含清晰 ECHO 配对二维码的图片。")
+      Text(language == "en" ? "Choose a clear image containing a \(serviceName) pairing QR code." : "请选择包含清晰 \(serviceName) 配对二维码的图片。")
     }
   }
 }
@@ -2312,9 +2749,12 @@ private struct EchoNativeMediaGridCard<Accessory: View>: View {
     VStack(alignment: .leading, spacing: 8) {
       ZStack(alignment: .topTrailing) {
         Button(action: onSelect) {
-          EchoNativeArtwork(urlString: artworkUrl, onError: onArtworkError)
-            .frame(maxWidth: .infinity)
-            .aspectRatio(1, contentMode: .fill)
+          ZStack {
+            EchoNativeArtwork(urlString: artworkUrl, onError: onArtworkError)
+              .frame(maxWidth: .infinity, maxHeight: .infinity)
+          }
+            .aspectRatio(1, contentMode: .fit)
+            .clipped()
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)

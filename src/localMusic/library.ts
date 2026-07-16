@@ -95,6 +95,7 @@ const trackFromFileName = async (fileName: string): Promise<LocalMusicTrack> => 
     bitDepth: metadata.bitDepth ?? null,
     canPlayOnPhone: true,
     codec: metadata.codec ?? (extension || null),
+    discNo: metadata.discNo ?? null,
     durationMs: metadata.durationMs ?? 0,
     fileName,
     fileSize,
@@ -104,6 +105,7 @@ const trackFromFileName = async (fileName: string): Promise<LocalMusicTrack> => 
     sampleRate: metadata.sampleRate ?? null,
     sourceLabel: 'Local Library',
     title,
+    trackNo: metadata.trackNo ?? null,
     uri,
   };
 };

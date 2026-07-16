@@ -19,6 +19,8 @@ export type EchoLinkTrackPreview = {
   sampleRate?: number | null;
   bitDepth?: number | null;
   bitrate?: number | null;
+  trackNo?: number | null;
+  discNo?: number | null;
 };
 
 export type EchoLinkAlbumPreview = {

@@ -2,6 +2,211 @@ import AVFoundation
 import AVFAudio
 import AudioToolbox
 import ExpoModulesCore
+import Foundation
+import MediaPlayer
+import UIKit
+
+private enum NowPlayingRemoteCommand: String {
+  case next
+  case pause
+  case play
+  case previous
+  case seek
+  case toggle
+}
+
+private struct NowPlayingMetadata {
+  let album: String
+  let artist: String
+  let duration: Double
+  let isPlaying: Bool
+  let position: Double
+  let title: String
+}
+
+private final class NowPlayingController {
+  typealias CommandHandler = (NowPlayingRemoteCommand, Double?) -> Void
+
+  private let commandCenter = MPRemoteCommandCenter.shared()
+  private let onCommand: CommandHandler
+  private var artwork: MPMediaItemArtwork?
+  private var artworkFetchTask: URLSessionDataTask?
+  private var artworkURL = ""
+  private var isActive = false
+  private var metadata: NowPlayingMetadata?
+  private var targetTokens: [(MPRemoteCommand, Any)] = []
+
+  init(onCommand: @escaping CommandHandler) {
+    self.onCommand = onCommand
+    configureRemoteCommands()
+  }
+
+  deinit {
+    artworkFetchTask?.cancel()
+    targetTokens.forEach { command, token in
+      command.removeTarget(token)
+    }
+  }
+
+  func update(
+    title: String,
+    artist: String,
+    album: String,
+    artworkURL: String,
+    duration: Double,
+    position: Double,
+    isPlaying: Bool
+  ) {
+    isActive = true
+    setRemoteCommandsEnabled(true)
+    metadata = NowPlayingMetadata(
+      album: album,
+      artist: artist,
+      duration: max(0, duration),
+      isPlaying: isPlaying,
+      position: max(0, position),
+      title: title
+    )
+    activateAudioSession()
+
+    let nextArtworkURL = artworkURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    if nextArtworkURL != self.artworkURL {
+      self.artworkURL = nextArtworkURL
+      artwork = nil
+      artworkFetchTask?.cancel()
+      artworkFetchTask = nil
+      loadArtwork(from: nextArtworkURL)
+    }
+    publish()
+  }
+
+  func clear() {
+    isActive = false
+    setRemoteCommandsEnabled(false)
+    metadata = nil
+    artwork = nil
+    artworkURL = ""
+    artworkFetchTask?.cancel()
+    artworkFetchTask = nil
+    DispatchQueue.main.async {
+      MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+  }
+
+  private func configureRemoteCommands() {
+    addTarget(commandCenter.playCommand, action: .play)
+    addTarget(commandCenter.pauseCommand, action: .pause)
+    addTarget(commandCenter.togglePlayPauseCommand, action: .toggle)
+    addTarget(commandCenter.nextTrackCommand, action: .next)
+    addTarget(commandCenter.previousTrackCommand, action: .previous)
+
+    let seekToken = commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+      guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+        return .commandFailed
+      }
+      return self?.handle(.seek, position: event.positionTime) ?? .commandFailed
+    }
+    targetTokens.append((commandCenter.changePlaybackPositionCommand, seekToken))
+    setRemoteCommandsEnabled(false)
+  }
+
+  private func addTarget(_ command: MPRemoteCommand, action: NowPlayingRemoteCommand) {
+    let token = command.addTarget { [weak self] _ in
+      self?.handle(action) ?? .commandFailed
+    }
+    targetTokens.append((command, token))
+  }
+
+  private func setRemoteCommandsEnabled(_ enabled: Bool) {
+    commandCenter.playCommand.isEnabled = enabled
+    commandCenter.pauseCommand.isEnabled = enabled
+    commandCenter.togglePlayPauseCommand.isEnabled = enabled
+    commandCenter.nextTrackCommand.isEnabled = enabled
+    commandCenter.previousTrackCommand.isEnabled = enabled
+    commandCenter.changePlaybackPositionCommand.isEnabled = enabled
+  }
+
+  private func handle(_ command: NowPlayingRemoteCommand, position: Double? = nil) -> MPRemoteCommandHandlerStatus {
+    guard isActive else {
+      return .commandFailed
+    }
+    let handler = onCommand
+    DispatchQueue.main.async {
+      handler(command, position)
+    }
+    return .success
+  }
+
+  private func publish() {
+    guard isActive, let metadata else {
+      return
+    }
+    let duration = metadata.duration
+    let position = duration > 0
+      ? min(max(0, metadata.position), duration)
+      : max(0, metadata.position)
+    var nowPlayingInfo: [String: Any] = [
+      MPMediaItemPropertyTitle: metadata.title,
+      MPMediaItemPropertyPlaybackDuration: duration,
+      MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
+      MPNowPlayingInfoPropertyPlaybackRate: metadata.isPlaying ? 1.0 : 0.0,
+      MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+    ]
+    if !metadata.artist.isEmpty {
+      nowPlayingInfo[MPMediaItemPropertyArtist] = metadata.artist
+    }
+    if !metadata.album.isEmpty {
+      nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = metadata.album
+    }
+    if let artwork {
+      nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
+    }
+    DispatchQueue.main.async {
+      MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+    }
+  }
+
+  private func loadArtwork(from rawURL: String) {
+    guard !rawURL.isEmpty, let url = URL(string: rawURL) else {
+      return
+    }
+    if url.isFileURL {
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else {
+          return
+        }
+        self?.setArtwork(image, for: rawURL)
+      }
+      return
+    }
+
+    artworkFetchTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+      guard let data, let image = UIImage(data: data) else {
+        return
+      }
+      self?.setArtwork(image, for: rawURL)
+    }
+    artworkFetchTask?.resume()
+  }
+
+  private func setArtwork(_ image: UIImage, for url: String) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.isActive, self.artworkURL == url else {
+        return
+      }
+      self.artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+      self.publish()
+    }
+  }
+
+  private func activateAudioSession() {
+    #if os(iOS) || os(tvOS)
+    let session = AVAudioSession.sharedInstance()
+    try? session.setCategory(.playback, mode: .default, options: [])
+    try? session.setActive(true)
+    #endif
+  }
+}
 
 private final class DspPlaybackEngine {
   private let engine = AVAudioEngine()
@@ -252,9 +457,17 @@ private enum DspError: Error {
 
 public final class EchoAudioDspModule: Module {
   private let playbackEngine = DspPlaybackEngine()
+  private lazy var nowPlayingController = NowPlayingController { [weak self] command, position in
+    var payload: [String: Any?] = ["action": command.rawValue]
+    if let position {
+      payload["positionSeconds"] = position
+    }
+    self?.sendEvent("onRemoteCommand", payload)
+  }
 
   public func definition() -> ModuleDefinition {
     Name("EchoAudioDsp")
+    Events("onRemoteCommand")
 
     View(EchoNativePlayerView.self) {
       Events("onAction")
@@ -271,6 +484,7 @@ public final class EchoAudioDspModule: Module {
       Prop("externalSourcePickerPayload") { (view: EchoNativePlayerView, value: String) in
         view.model.updateExternalSourcePicker(payloadJSON: value)
       }
+      Prop("isFavorite") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.isFavorite, value) }
       Prop("eqGains") { (view: EchoNativePlayerView, value: [Double]) in
         let gains = normalizedNativeEqGains(value)
         setIfChanged(view.model.equalizer, \.gains, gains)
@@ -354,12 +568,37 @@ public final class EchoAudioDspModule: Module {
       self.playbackEngine.setLoudness(enabled)
     }
 
+    AsyncFunction("updateNowPlaying") { (
+      title: String,
+      artist: String,
+      album: String,
+      artworkURL: String,
+      duration: Double,
+      position: Double,
+      isPlaying: Bool
+    ) in
+      self.nowPlayingController.update(
+        title: title,
+        artist: artist,
+        album: album,
+        artworkURL: artworkURL,
+        duration: duration,
+        position: position,
+        isPlaying: isPlaying
+      )
+    }
+
+    AsyncFunction("clearNowPlaying") {
+      self.nowPlayingController.clear()
+    }
+
     AsyncFunction("getStatus") { () -> [String: Any] in
       self.playbackEngine.status()
     }
 
     OnDestroy {
       self.playbackEngine.stop()
+      self.nowPlayingController.clear()
     }
   }
 }

@@ -1,6 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type SavedLocalMusicState = {
+  echoFavoriteTrackIds: string[];
+  echoRecentTrackIds: string[];
   favoriteTrackIds: string[];
   playlists: SavedPlaylist[];
   queueActive: boolean;
@@ -16,7 +18,7 @@ export type SavedPlaylistTrack = {
   canPlayOnPhone: boolean;
   durationMs: number;
   id: string;
-  source: 'echo' | 'local';
+  source: 'echo' | 'local' | 'remote';
   sourceLabel: string;
   title: string;
 };
@@ -33,6 +35,8 @@ export type SavedPlaylist = {
 const storageKey = 'echo.ios.localMusic.v1';
 
 const emptyState: SavedLocalMusicState = {
+  echoFavoriteTrackIds: [],
+  echoRecentTrackIds: [],
   favoriteTrackIds: [],
   playlists: [],
   queueActive: false,
@@ -53,7 +57,7 @@ const playlists = (value: unknown): SavedPlaylist[] => {
     const tracks = Array.isArray(playlist.tracks) ? playlist.tracks.flatMap((value) => {
       if (!value || typeof value !== 'object') return [];
       const track = value as Partial<SavedPlaylistTrack>;
-      if (typeof track.id !== 'string' || typeof track.title !== 'string' || (track.source !== 'echo' && track.source !== 'local')) return [];
+      if (typeof track.id !== 'string' || typeof track.title !== 'string' || (track.source !== 'echo' && track.source !== 'local' && track.source !== 'remote')) return [];
       return [{
         album: typeof track.album === 'string' ? track.album : '',
         albumArtist: typeof track.albumArtist === 'string' ? track.albumArtist : '',
@@ -86,6 +90,8 @@ export const loadSavedLocalMusicState = async (): Promise<SavedLocalMusicState> 
     }
     const parsed = JSON.parse(raw) as Partial<SavedLocalMusicState>;
     return {
+      echoFavoriteTrackIds: stringArray(parsed.echoFavoriteTrackIds),
+      echoRecentTrackIds: stringArray(parsed.echoRecentTrackIds),
       favoriteTrackIds: stringArray(parsed.favoriteTrackIds),
       playlists: playlists(parsed.playlists),
       queueActive: parsed.queueActive === true || stringArray(parsed.queueTrackIds).length > 0,

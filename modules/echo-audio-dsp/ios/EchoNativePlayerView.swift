@@ -27,15 +27,30 @@ extension UIView {
   }
 }
 
-let echoInk = Color(red: 0.17, green: 0.10, blue: 0.09)
+private func echoAdaptiveColor(light: UIColor, dark: UIColor) -> Color {
+  Color(uiColor: UIColor { traits in
+    traits.userInterfaceStyle == .dark ? dark : light
+  })
+}
+
+let echoInk = Color(uiColor: .label)
 let echoAccent = Color(red: 0.67, green: 0.12, blue: 0.14)
 let echoGold = Color(red: 0.82, green: 0.55, blue: 0.08)
 var echoWarmBackground: LinearGradient {
   LinearGradient(
     colors: [
-      Color(red: 0.97, green: 0.79, blue: 0.73),
-      Color(red: 0.99, green: 0.88, blue: 0.69),
-      Color(red: 0.96, green: 0.82, blue: 0.80),
+      echoAdaptiveColor(
+        light: UIColor(red: 0.97, green: 0.79, blue: 0.73, alpha: 1),
+        dark: UIColor(red: 0.13, green: 0.09, blue: 0.13, alpha: 1)
+      ),
+      echoAdaptiveColor(
+        light: UIColor(red: 0.99, green: 0.88, blue: 0.69, alpha: 1),
+        dark: UIColor(red: 0.20, green: 0.12, blue: 0.16, alpha: 1)
+      ),
+      echoAdaptiveColor(
+        light: UIColor(red: 0.96, green: 0.82, blue: 0.80, alpha: 1),
+        dark: UIColor(red: 0.10, green: 0.11, blue: 0.16, alpha: 1)
+      ),
     ],
     startPoint: .topLeading,
     endPoint: .bottomTrailing
@@ -211,6 +226,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var controlsEnabled = false
   @Published var durationMs = 0.0
   @Published var externalSourcePicker: EchoNativeExternalSourcePickerPayload?
+  @Published var isFavorite = false
   @Published var isPlaying = false
   @Published var language = "zh"
   @Published var lyricTexts: [String] = []
@@ -369,7 +385,6 @@ private struct EchoNativeAppScreen: View {
       }
       .tint(echoAccent)
     }
-    .preferredColorScheme(.light)
     .sheet(item: $playerModel.externalSourcePicker) { payload in
       EchoNativeExternalSourcePicker(payload: payload, onAction: onAction)
         .echoMediumSheet()
@@ -460,6 +475,8 @@ private struct EchoNativeAppScreen: View {
     ZStack {
       if playerBackground {
         EchoNativeArtworkBackdrop(
+          enabled: playerModel.artworkBackgroundEnabled,
+          identity: "\(playerModel.title)::\(playerModel.artist)",
           urlString: playerModel.artworkBackgroundEnabled ? playerModel.artworkUrl : ""
         ) {
           onAction(["action": "artworkError", "url": playerModel.artworkUrl])
@@ -516,7 +533,6 @@ struct EchoNativePlayerScreen: View {
       .background(Color.clear)
     }
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: model.lyricsVisible)
-    .preferredColorScheme(.light)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
     }
@@ -558,7 +574,7 @@ struct EchoNativePlayerScreen: View {
     }
     .padding(.horizontal, 16)
     .padding(.vertical, compact ? 8 : 12)
-    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
   }
 
   private func lyricsLayout(geometry: GeometryProxy) -> some View {
@@ -917,6 +933,13 @@ struct EchoNativePlayerScreen: View {
         .buttonStyle(.plain)
         .accessibilityLabel(model.language == "en" ? "Equalizer" : "均衡器")
         iconButton(
+          symbol: model.isFavorite ? "heart.fill" : "heart",
+          label: model.language == "en" ? (model.isFavorite ? "Remove favorite" : "Favorite") : (model.isFavorite ? "取消收藏" : "收藏"),
+          active: model.isFavorite
+        ) {
+          onAction(["action": "trackFavoriteCurrent"])
+        }
+        iconButton(
           symbol: "arrow.clockwise",
           label: model.language == "en" ? "Refresh external metadata" : "重新获取外源数据",
           active: false
@@ -969,6 +992,7 @@ struct EchoNativePlayerScreen: View {
       Text(model.language == "en" ? "Media" : "流媒体").tag("streaming")
       Text(model.language == "en" ? "Control" : "控制").tag("pc")
       Text(model.language == "en" ? "Stream" : "串流").tag("phone")
+      Text(model.language == "en" ? "Poweramp" : "远程").tag("remoteStream")
     }
     .pickerStyle(.segmented)
     .tint(echoAccent)
@@ -1039,47 +1063,99 @@ private struct EchoNativeArtworkLoadingBadge: View {
 }
 
 private struct EchoNativeArtworkBackdrop: View {
+  let enabled: Bool
+  let identity: String
   let urlString: String
   let onError: () -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var stableIdentity = ""
+  @State private var stableUrl = ""
 
   var body: some View {
     GeometryReader { geometry in
       ZStack {
         echoWarmBackground
 
-        if !urlString.isEmpty {
-          ZStack {
-            EchoNativeArtwork(urlString: urlString, squarePreview: false, onError: onError)
-              .frame(width: geometry.size.width, height: geometry.size.height)
-              .scaledToFill()
-              .scaleEffect(1.06)
-              .saturation(1.04)
-              .blur(radius: 18, opaque: true)
-              .clipped()
-
-            LinearGradient(
-              colors: [
-                Color.white.opacity(0.18),
-                Color(red: 0.98, green: 0.90, blue: 0.86).opacity(0.12),
-                Color.white.opacity(0.1),
-              ],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
-            )
-          }
-          .frame(width: geometry.size.width, height: geometry.size.height)
-          .clipped()
-          .id(urlString)
-          .transition(.opacity)
+        if !stableUrl.isEmpty {
+          artworkLayer(url: stableUrl, size: geometry.size, showsPlaceholder: false)
+            .transition(.opacity)
         }
+
+        if !urlString.isEmpty && (urlString != stableUrl || identity != stableIdentity) {
+          artworkLayer(
+            url: urlString,
+            size: geometry.size,
+            showsPlaceholder: false,
+            onLoad: {
+              stableIdentity = identity
+              stableUrl = urlString
+            },
+            onFailure: {
+              if stableIdentity != identity {
+                stableIdentity = identity
+                stableUrl = ""
+              }
+              onError()
+            }
+          )
+          .id("\(identity)::\(urlString)")
+        }
+
+        LinearGradient(
+          colors: [
+            Color.white.opacity(0.18),
+            Color(red: 0.98, green: 0.90, blue: 0.86).opacity(0.12),
+            Color.white.opacity(0.1),
+          ],
+          startPoint: .topLeading,
+          endPoint: .bottomTrailing
+        )
       }
       .frame(width: geometry.size.width, height: geometry.size.height)
       .clipped()
     }
-    .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: urlString)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.5), value: stableUrl)
+    .onChange(of: identity) { _ in
+      if urlString.isEmpty {
+        stableIdentity = identity
+        stableUrl = ""
+      }
+    }
+    .onChange(of: urlString) { value in
+      if value.isEmpty && (!enabled || stableIdentity != identity) {
+        stableIdentity = identity
+        stableUrl = ""
+      }
+    }
+    .onChange(of: enabled) { value in
+      if !value {
+        stableIdentity = identity
+        stableUrl = ""
+      }
+    }
   }
 
+  private func artworkLayer(
+    url: String,
+    size: CGSize,
+    showsPlaceholder: Bool,
+    onLoad: @escaping () -> Void = {},
+    onFailure: @escaping () -> Void = {}
+  ) -> some View {
+    EchoNativeArtwork(
+      urlString: url,
+      squarePreview: false,
+      showsPlaceholder: showsPlaceholder,
+      onLoad: onLoad,
+      onError: onFailure
+    )
+    .frame(width: size.width, height: size.height)
+    .scaledToFill()
+    .scaleEffect(1.06)
+    .saturation(1.04)
+    .blur(radius: 18, opaque: true)
+    .clipped()
+  }
 }
 
 private struct EchoNativeExternalSourcePicker: View {
@@ -1208,7 +1284,6 @@ private struct EchoNativeExternalSourcePicker: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
-    .preferredColorScheme(.light)
     .interactiveDismissDisabled()
     .onAppear {
       for field in requiredFields where selectedSources[field] == nil {
@@ -1410,7 +1485,6 @@ private struct EchoNativeQueueSheet: View {
     .padding(20)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
-    .preferredColorScheme(.light)
     .confirmationDialog(
       model.language == "en" ? "Clear this playlist?" : "清空这个歌单？",
       isPresented: $showClearConfirmation,
@@ -1456,6 +1530,8 @@ private struct EchoNativeQueueSheet: View {
 struct EchoNativeArtwork: View {
   let urlString: String
   var squarePreview = true
+  var showsPlaceholder = true
+  var onLoad: () -> Void = {}
   let onError: () -> Void
   @StateObject private var localLoader = EchoNativeLocalArtworkLoader()
 
@@ -1479,9 +1555,9 @@ struct EchoNativeArtwork: View {
     if let url = URL(string: urlString), url.isFileURL {
       Group {
         if let image = localLoader.image {
-          Image(uiImage: image).resizable().scaledToFill()
+          Image(uiImage: image).resizable().scaledToFill().onAppear(perform: onLoad)
         } else {
-          placeholder
+          fallback
         }
       }
       .onAppear { localLoader.load(url) }
@@ -1493,16 +1569,21 @@ struct EchoNativeArtwork: View {
       AsyncImage(url: url) { phase in
         switch phase {
         case .success(let image):
-          image.resizable().scaledToFill()
+          image.resizable().scaledToFill().onAppear(perform: onLoad)
         case .failure:
-          placeholder.onAppear(perform: onError)
+          fallback.onAppear(perform: onError)
         default:
-          placeholder
+          fallback
         }
       }
     } else {
-      placeholder
+      fallback
     }
+  }
+
+  @ViewBuilder
+  private var fallback: some View {
+    if showsPlaceholder { placeholder } else { Color.clear }
   }
 
   private var placeholder: some View {
@@ -1591,7 +1672,6 @@ private struct EchoNativeEqLauncherScreen: View {
     }
     .buttonStyle(.plain)
     .accessibilityLabel("\(model.title), \(model.label)")
-    .preferredColorScheme(.dark)
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
     }
@@ -1717,7 +1797,6 @@ struct EchoNativeEqualizerSheet: View {
     .padding(20)
     .foregroundColor(echoInk)
     .background(echoWarmBackground.ignoresSafeArea())
-    .preferredColorScheme(.light)
   }
 
   private func frequencyLabel(_ index: Int) -> String {

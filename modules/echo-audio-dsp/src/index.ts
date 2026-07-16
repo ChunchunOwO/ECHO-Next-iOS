@@ -1,5 +1,5 @@
 import { Platform } from 'react-native';
-import { requireNativeModule } from 'expo-modules-core';
+import { requireNativeModule, type EventSubscription } from 'expo-modules-core';
 
 export {
   EchoNativeEqLauncherView,
@@ -15,7 +15,27 @@ export type EchoAudioDspStatus = {
   volume: number;
 };
 
+export type EchoAudioDspRemoteCommand = {
+  action: 'next' | 'pause' | 'play' | 'previous' | 'seek' | 'toggle';
+  positionSeconds?: number;
+};
+
+export type EchoAudioDspNowPlaying = {
+  album: string;
+  artist: string;
+  artworkUrl: string;
+  durationSeconds: number;
+  isPlaying: boolean;
+  positionSeconds: number;
+  title: string;
+};
+
 type EchoAudioDspNativeModule = {
+  addListener(
+    eventName: 'onRemoteCommand',
+    listener: (command: EchoAudioDspRemoteCommand) => void,
+  ): EventSubscription;
+  clearNowPlaying(): Promise<void>;
   getStatus(): Promise<EchoAudioDspStatus>;
   pause(): Promise<void>;
   playFile(uri: string, positionMs: number, volume: number, gains: number[], loudnessEnabled: boolean): Promise<void>;
@@ -25,6 +45,15 @@ type EchoAudioDspNativeModule = {
   setLoudness(enabled: boolean): Promise<void>;
   setVolume(volume: number): Promise<void>;
   stop(): Promise<void>;
+  updateNowPlaying(
+    title: string,
+    artist: string,
+    album: string,
+    artworkUrl: string,
+    durationSeconds: number,
+    positionSeconds: number,
+    isPlaying: boolean,
+  ): Promise<void>;
 };
 
 const loadNativeModule = (): EchoAudioDspNativeModule | null => {
@@ -44,6 +73,10 @@ const unavailable = async (): Promise<never> => {
 };
 
 export const echoAudioDsp = {
+  addRemoteCommandListener: (listener: (command: EchoAudioDspRemoteCommand) => void): EventSubscription | null => (
+    nativeModule?.addListener('onRemoteCommand', listener) ?? null
+  ),
+  clearNowPlaying: () => nativeModule?.clearNowPlaying() ?? unavailable(),
   isAvailable: Boolean(nativeModule),
   getStatus: () => nativeModule?.getStatus() ?? unavailable(),
   pause: () => nativeModule?.pause() ?? unavailable(),
@@ -65,4 +98,13 @@ export const echoAudioDsp = {
   setLoudness: (enabled: boolean) => nativeModule?.setLoudness(enabled) ?? unavailable(),
   setVolume: (volume: number) => nativeModule?.setVolume(volume) ?? unavailable(),
   stop: () => nativeModule?.stop() ?? unavailable(),
+  updateNowPlaying: (metadata: EchoAudioDspNowPlaying) => nativeModule?.updateNowPlaying(
+    metadata.title,
+    metadata.artist,
+    metadata.album,
+    metadata.artworkUrl,
+    metadata.durationSeconds,
+    metadata.positionSeconds,
+    metadata.isPlaying,
+  ) ?? unavailable(),
 };

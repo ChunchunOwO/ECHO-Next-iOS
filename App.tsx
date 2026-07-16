@@ -28,6 +28,7 @@ import {
   echoAudioDsp,
   EchoNativeEqLauncherView,
   EchoNativePlayerView,
+  type EchoAudioDspRemoteCommand,
   type EchoAudioDspStatus,
   type EchoNativeAction,
 } from 'echo-audio-dsp';
@@ -42,6 +43,15 @@ import {
 } from './src/echoLink/client';
 import type { EchoLinkAlbumPreview, EchoLinkStatusResponse, EchoLinkTrackPreview } from './src/echoLink/types';
 import { parsePairingUri } from './src/echoLink/pairing';
+import {
+  createPowerampRemoteClient,
+  normalizePowerampRemoteHost,
+  normalizePowerampRemoteToken,
+  type PowerampRemoteClient,
+  type PowerampRemoteConnection,
+} from './src/powerampRemote/client';
+import { parsePowerampPairingUri } from './src/powerampRemote/pairing';
+import type { PowerampRemoteAlbum, PowerampRemoteStatus, PowerampRemoteTrack } from './src/powerampRemote/types';
 import {
   deleteLocalMusicTrack,
   getLocalMusicStorageUsage,
@@ -59,6 +69,7 @@ import {
   type SavedPlaylistTrack,
 } from './src/storage/localMusicStore';
 import { loadSavedSettings, saveSettings, type SavedSettings } from './src/storage/settingsStore';
+import { loadPowerampRemoteState, savePowerampRemoteState } from './src/storage/powerampRemoteStore';
 import { SuperconIcon } from './src/components/SuperconIcon';
 import {
   checkNeteaseQrLogin,
@@ -82,13 +93,13 @@ import {
 } from './src/storage/streamingStore';
 
 type AppPage = 'control' | 'library' | 'search' | 'connect' | 'settings';
-type ConnectPanelMode = 'echo' | 'streaming';
-type PlaybackOutputMode = 'local' | 'pc' | 'phone' | 'streaming';
+type ConnectPanelMode = 'echo' | 'remote' | 'streaming';
+type PlaybackOutputMode = 'local' | 'pc' | 'phone' | 'remoteControl' | 'remoteStream' | 'streaming';
 type LibraryFilter = 'all' | 'streamable' | 'local';
-type LibrarySource = 'all' | 'echo' | 'local' | 'streaming';
-type LibraryAlbumSort = 'artist' | 'default' | 'duration' | 'title';
+type LibrarySource = 'all' | 'echo' | 'local' | 'remote' | 'streaming';
+type LibraryAlbumSort = 'artist' | 'default' | 'duration' | 'title' | 'track';
 type StreamingLibraryMode = 'playlists' | 'search';
-type EchoLibraryView = 'albums' | 'artists' | 'songs';
+type EchoLibraryView = 'albums' | 'artists' | 'favorites' | 'recent' | 'songs';
 type LibraryCollectionPreview = {
   artworkUrl: string | null;
   id: string;
@@ -97,7 +108,7 @@ type LibraryCollectionPreview = {
   title: string;
 };
 type LocalLibraryView = 'albums' | 'artists' | 'favorites' | 'formats' | 'recent' | 'songs';
-type SettingsSectionKey = 'audioTags' | 'externalData' | 'interface' | 'library' | 'playback' | 'storage';
+type SettingsSectionKey = 'audioTags' | 'externalData' | 'interface' | 'library' | 'playback' | 'remote' | 'storage';
 type EqPreset = 'bass' | 'clarity' | 'custom' | 'flat' | 'lateNight' | 'vocal' | 'warm';
 type AppLanguage = 'zh' | 'en';
 type AudioTagKey = 'output' | 'source' | 'streamability' | 'quality' | 'bitrate' | 'duration';
@@ -134,7 +145,7 @@ type PendingExternalMetadataSelection = {
   id: string;
   metadataKey: string;
 };
-type PlaybackListTrack = EchoLinkTrackPreview & { source?: 'echo' | 'local' | 'streaming' };
+type PlaybackListTrack = EchoLinkTrackPreview & { source?: 'echo' | 'local' | 'remote' | 'streaming' };
 type MotionKey = boolean | number | string | null | undefined;
 type AnimatedButtonContentProps = {
   children: ReactNode;
@@ -368,7 +379,7 @@ const localLibraryViewOptions: LocalLibraryView[] = [
   'favorites',
   'recent',
 ];
-const echoLibraryViewOptions: EchoLibraryView[] = ['songs', 'albums', 'artists'];
+const echoLibraryViewOptions: EchoLibraryView[] = ['songs', 'albums', 'artists', 'favorites', 'recent'];
 const eqPresetOptions: Array<{
   descriptionEn: string;
   descriptionZh: string;
@@ -399,12 +410,16 @@ const defaultSettings: SavedSettings = {
   echoConnectionEnabled: false,
   eqGains: [...defaultEqOption.gains],
   eqPreset: 'flat',
+  externalMetadataSearchEnabled: false,
+  externalMetadataSkipExisting: true,
   lrcApiExternalDataEnabled: false,
   lrclibExternalDataEnabled: false,
   externalDataSelectionMode: 'ask',
   neteaseAccessMode: 'direct',
   neteaseExternalDataEnabled: false,
   loudnessNormalizationEnabled: false,
+  powerampRemoteEnabled: false,
+  showPowerampRemoteConnection: false,
   showArtworkGlow: true,
 };
 
@@ -590,7 +605,7 @@ const externalMetadataKeyForTrack = (track: EchoLinkTrackPreview | null | undefi
 
 const playlistTrackFromPreview = (
   track: EchoLinkTrackPreview,
-  source: 'echo' | 'local',
+  source: 'echo' | 'local' | 'remote',
 ): SavedPlaylistTrack => ({
   album: track.album,
   albumArtist: track.albumArtist,
@@ -628,6 +643,15 @@ const sortTracksBy = <T extends EchoLinkTrackPreview>(
   label: (track: T) => string,
 ): T[] => [...tracks].sort((a, b) => label(a).localeCompare(label(b)) || a.title.localeCompare(b.title));
 
+const sortTracksByAlbumOrder = <T extends EchoLinkTrackPreview>(tracks: T[]): T[] => (
+  [...tracks].sort((left, right) => {
+    const disc = (left.discNo ?? 1) - (right.discNo ?? 1);
+    if (disc) return disc;
+    const track = (left.trackNo ?? Number.MAX_SAFE_INTEGER) - (right.trackNo ?? Number.MAX_SAFE_INTEGER);
+    return track || left.title.localeCompare(right.title);
+  })
+);
+
 const buildTrackCollections = <T extends EchoLinkTrackPreview>(
   tracks: T[],
   titleForTrack: (track: T) => string | string[],
@@ -662,15 +686,28 @@ const artistNamesForTrack = (track: EchoLinkTrackPreview, fallback: string): str
 };
 
 const fetchAllPages = async <T extends { id: string }>(
-  fetchPage: (page: number, pageSize: number) => Promise<{ items: T[]; totalCount: number }>,
+  fetchPage: (page: number, pageSize: number) => Promise<{ items: T[] }>,
 ): Promise<T[]> => {
   const items = new Map<string, T>();
-  const pageSize = 100;
+  let pageSize = 100;
   let page = 1;
-  let totalCount = Number.POSITIVE_INFINITY;
-  while (items.size < totalCount) {
-    const response = await fetchPage(page, pageSize);
-    totalCount = response.totalCount;
+  const maxPages = 500;
+
+  // Match an older server's first-page cap so subsequent page offsets stay contiguous.
+  // Continue until the endpoint is exhausted instead of trusting a possibly capped total.
+  while (page <= maxPages) {
+    let response: { items: T[] };
+    try {
+      response = await fetchPage(page, pageSize);
+    } catch (error) {
+      if (page > 1 && error instanceof EchoLinkHttpError && [400, 404, 416].includes(error.statusCode)) {
+        break;
+      }
+      throw error;
+    }
+    if (page === 1 && response.items.length > 0 && response.items.length < pageSize) {
+      pageSize = response.items.length;
+    }
     const previousSize = items.size;
     response.items.forEach((item) => items.set(item.id, item));
     if (response.items.length === 0 || items.size === previousSize) break;
@@ -687,6 +724,20 @@ const fetchAllEchoTracks = (client: EchoLinkClient): Promise<EchoLinkTrackPrevie
 );
 
 const fetchAllEchoAlbums = (client: EchoLinkClient): Promise<EchoLinkAlbumPreview[]> => (
+  fetchAllPages(async (page, pageSize) => {
+    const response = await client.getLibraryAlbums({ page, pageSize });
+    return { items: response.albums, totalCount: response.totalCount };
+  })
+);
+
+const fetchAllPowerampTracks = (client: PowerampRemoteClient): Promise<PowerampRemoteTrack[]> => (
+  fetchAllPages(async (page, pageSize) => {
+    const response = await client.getLibraryTracks({ page, pageSize });
+    return { items: response.tracks, totalCount: response.totalCount };
+  })
+);
+
+const fetchAllPowerampAlbums = (client: PowerampRemoteClient): Promise<PowerampRemoteAlbum[]> => (
   fetchAllPages(async (page, pageSize) => {
     const response = await client.getLibraryAlbums({ page, pageSize });
     return { items: response.albums, totalCount: response.totalCount };
@@ -954,6 +1005,17 @@ const connectionDraftFrom = (connection: EchoLinkConnection): EchoLinkConnection
   port: String(connection.port),
 });
 
+type PowerampRemoteConnectionDraft = Omit<PowerampRemoteConnection, 'port'> & { port: string };
+const powerampConnectionDraftFrom = (
+  connection: PowerampRemoteConnection | null,
+): PowerampRemoteConnectionDraft => ({
+  host: connection?.host ?? '',
+  name: connection?.name ?? 'Poweramp',
+  port: String(connection?.port ?? 27806),
+  scheme: connection?.scheme ?? 'http',
+  token: connection?.token ?? '',
+});
+
 const formatRequestError = (error: unknown): string => {
   if (error instanceof EchoLinkNetworkError) {
     return error.message;
@@ -1072,9 +1134,17 @@ function EchoLinkApp(): ReactElement {
   const [pairingText, setPairingText] = useState('');
   const [status, setStatus] = useState<EchoLinkStatusResponse | null>(null);
   const [statusReceivedAtMs, setStatusReceivedAtMs] = useState(() => Date.now());
+  const [powerampStatus, setPowerampStatus] = useState<PowerampRemoteStatus | null>(null);
+  const [powerampStatusReceivedAtMs, setPowerampStatusReceivedAtMs] = useState(() => Date.now());
   const [clockMs, setClockMs] = useState(() => Date.now());
   const [tracks, setTracks] = useState<EchoLinkTrackPreview[]>([]);
   const [albums, setAlbums] = useState<EchoLinkAlbumPreview[]>([]);
+  const [powerampTracks, setPowerampTracks] = useState<PowerampRemoteTrack[]>([]);
+  const [powerampAlbums, setPowerampAlbums] = useState<PowerampRemoteAlbum[]>([]);
+  const [powerampConnection, setPowerampConnection] = useState<PowerampRemoteConnection | null>(null);
+  const [powerampConnectionDraft, setPowerampConnectionDraft] = useState<PowerampRemoteConnectionDraft>(() => powerampConnectionDraftFrom(null));
+  const [powerampBusy, setPowerampBusy] = useState(false);
+  const [powerampError, setPowerampError] = useState<string | null>(null);
   const [localTracks, setLocalTracks] = useState<LocalMusicTrack[]>([]);
   const [localStorageBytes, setLocalStorageBytes] = useState(0);
   const [query, setQuery] = useState('');
@@ -1085,9 +1155,14 @@ function EchoLinkApp(): ReactElement {
   const [libraryPageIndex, setLibraryPageIndex] = useState(0);
   const [selectedLibraryCollectionId, setSelectedLibraryCollectionId] = useState('');
   const [echoLibraryView, setEchoLibraryView] = useState<EchoLibraryView>('songs');
+  const [powerampLibraryView, setPowerampLibraryView] = useState<EchoLibraryView>('songs');
   const [localLibraryView, setLocalLibraryView] = useState<LocalLibraryView>('songs');
+  const [favoriteEchoTrackIds, setFavoriteEchoTrackIds] = useState<string[]>([]);
+  const [recentEchoTrackIds, setRecentEchoTrackIds] = useState<string[]>([]);
   const [favoriteLocalTrackIds, setFavoriteLocalTrackIds] = useState<string[]>([]);
   const [recentLocalTrackIds, setRecentLocalTrackIds] = useState<string[]>([]);
+  const [favoritePowerampTrackIds, setFavoritePowerampTrackIds] = useState<string[]>([]);
+  const [recentPowerampTrackIds, setRecentPowerampTrackIds] = useState<string[]>([]);
   const [localQueueTrackIds, setLocalQueueTrackIds] = useState<string[]>([]);
   const [localQueueActive, setLocalQueueActive] = useState(false);
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
@@ -1113,6 +1188,7 @@ function EchoLinkApp(): ReactElement {
   const [pinnedStreamingPlaylistIds, setPinnedStreamingPlaylistIds] = useState<string[]>([]);
   const [selectedStreamingPlaylistId, setSelectedStreamingPlaylistId] = useState<string | null>(null);
   const [streamingPreferencesLoaded, setStreamingPreferencesLoaded] = useState(false);
+  const [powerampRemoteStateLoaded, setPowerampRemoteStateLoaded] = useState(false);
   const [localMusicStateLoaded, setLocalMusicStateLoaded] = useState(false);
   const [localLibraryLoaded, setLocalLibraryLoaded] = useState(false);
   const [appLanguage, setAppLanguage] = useState<AppLanguage>('zh');
@@ -1121,6 +1197,8 @@ function EchoLinkApp(): ReactElement {
   const [defaultLibrarySource, setDefaultLibrarySource] = useState<LibrarySource>(defaultSettings.defaultLibrarySource);
   const [defaultLocalLibraryView, setDefaultLocalLibraryView] = useState<LocalLibraryView>(defaultSettings.defaultLocalLibraryView);
   const [echoConnectionEnabled, setEchoConnectionEnabled] = useState(defaultSettings.echoConnectionEnabled);
+  const [powerampRemoteEnabled, setPowerampRemoteEnabled] = useState(defaultSettings.powerampRemoteEnabled);
+  const [showPowerampRemoteConnection, setShowPowerampRemoteConnection] = useState(defaultSettings.showPowerampRemoteConnection);
   const [autoOpenLyricsForLocalTracks, setAutoOpenLyricsForLocalTracks] = useState(defaultSettings.autoOpenLyricsForLocalTracks);
   const [autoQueueImportedLocalTracks, setAutoQueueImportedLocalTracks] = useState(defaultSettings.autoQueueImportedLocalTracks);
   const [confirmBeforeDeletingLocalTracks, setConfirmBeforeDeletingLocalTracks] = useState(defaultSettings.confirmBeforeDeletingLocalTracks);
@@ -1129,6 +1207,8 @@ function EchoLinkApp(): ReactElement {
   const [eqPanelOpen, setEqPanelOpen] = useState(false);
   const [eqPanelVisible, setEqPanelVisible] = useState(false);
   const [activeEqBand, setActiveEqBand] = useState(4);
+  const [externalMetadataSearchEnabled, setExternalMetadataSearchEnabled] = useState(defaultSettings.externalMetadataSearchEnabled);
+  const [externalMetadataSkipExisting, setExternalMetadataSkipExisting] = useState(defaultSettings.externalMetadataSkipExisting);
   const [lrcApiExternalDataEnabled, setLrcApiExternalDataEnabled] = useState(defaultSettings.lrcApiExternalDataEnabled);
   const [lrclibExternalDataEnabled, setLrclibExternalDataEnabled] = useState(defaultSettings.lrclibExternalDataEnabled);
   const [neteaseExternalDataEnabled, setNeteaseExternalDataEnabled] = useState(defaultSettings.neteaseExternalDataEnabled);
@@ -1156,6 +1236,7 @@ function EchoLinkApp(): ReactElement {
   const [playbackOutputMode, setPlaybackOutputMode] = useState<PlaybackOutputMode>('pc');
   const [localTrack, setLocalTrack] = useState<LocalMusicTrack | null>(null);
   const [phoneTrack, setPhoneTrack] = useState<EchoLinkTrackPreview | null>(null);
+  const [powerampStreamTrack, setPowerampStreamTrack] = useState<PowerampRemoteTrack | null>(null);
   const [phoneAudioBusy, setPhoneAudioBusy] = useState(false);
   const [phoneAudioError, setPhoneAudioError] = useState<string | null>(null);
   const [dspStatus, setDspStatus] = useState<EchoAudioDspStatus>({
@@ -1165,6 +1246,7 @@ function EchoLinkApp(): ReactElement {
     playing: false,
     volume: 1,
   });
+  const [dspPlaybackActive, setDspPlaybackActive] = useState(false);
   const [externalMetadataByKey, setExternalMetadataByKey] = useState<Record<string, ExternalTrackMetadata>>({});
   const [externalMetadataFieldSourcesByKey, setExternalMetadataFieldSourcesByKey] = useState<Record<
     string,
@@ -1196,11 +1278,15 @@ function EchoLinkApp(): ReactElement {
   const phoneAutoAdvanceArmedRef = useRef(true);
   const phoneRepeatArmedRef = useRef(true);
   const devicePlaybackRequestRef = useRef(0);
+  const nativeNowPlayingPublishedRef = useRef(false);
+  const nativeNowPlayingSnapshotRef = useRef('');
+  const nativeRemoteCommandHandlerRef = useRef<(command: EchoAudioDspRemoteCommand) => void>(() => undefined);
   const activeExternalMetadataKeyRef = useRef<string | null>(null);
   const externalMetadataLookupKeysRef = useRef<Set<string>>(new Set());
   const ignoredExternalMetadataKeysRef = useRef<Set<string>>(new Set());
   const libraryArtworkLookupKeysRef = useRef<Set<string>>(new Set());
   const [externalMetadataRefreshToken, setExternalMetadataRefreshToken] = useState(0);
+  const [externalMetadataManualRefreshKey, setExternalMetadataManualRefreshKey] = useState<string | null>(null);
   const busyCountRef = useRef(0);
   const streamingBusyCountRef = useRef(0);
   const beginBusy = useCallback(() => {
@@ -1219,6 +1305,19 @@ function EchoLinkApp(): ReactElement {
     streamingBusyCountRef.current = Math.max(0, streamingBusyCountRef.current - 1);
     setStreamingBusy(streamingBusyCountRef.current > 0);
   }, []);
+  const clearNativeNowPlaying = useCallback(async () => {
+    nativeNowPlayingPublishedRef.current = false;
+    nativeNowPlayingSnapshotRef.current = '';
+    if (echoAudioDsp.isAvailable) {
+      await echoAudioDsp.clearNowPlaying().catch(() => undefined);
+    }
+  }, []);
+  const stopDspPlayback = useCallback(async () => {
+    setDspPlaybackActive(false);
+    if (echoAudioDsp.isAvailable) {
+      await echoAudioDsp.stop().catch(() => undefined);
+    }
+  }, []);
 
   const client = useMemo(() => (
     echoConnectionEnabled && connection.host.trim() && connection.token.trim()
@@ -1227,6 +1326,16 @@ function EchoLinkApp(): ReactElement {
   ), [connection, echoConnectionEnabled]);
   const activeClientRef = useRef<EchoLinkClient | null>(client);
   activeClientRef.current = client;
+  const powerampClient = useMemo(() => (
+    powerampRemoteEnabled
+      && powerampConnection
+      && normalizePowerampRemoteHost(powerampConnection.host)
+      && normalizePowerampRemoteToken(powerampConnection.token)
+      ? createPowerampRemoteClient(powerampConnection)
+      : null
+  ), [powerampConnection, powerampRemoteEnabled]);
+  const activePowerampClientRef = useRef<PowerampRemoteClient | null>(powerampClient);
+  activePowerampClientRef.current = powerampClient;
   const connectionDraftDirty = normalizeEchoLinkHost(connectionDraft.host) !== connection.host
     || normalizeEchoLinkToken(connectionDraft.token) !== connection.token
     || Number(connectionDraft.port) !== connection.port;
@@ -1279,11 +1388,11 @@ function EchoLinkApp(): ReactElement {
       return null;
     }
     try {
-      return new URL(value, client?.baseUrl).toString();
+      return new URL(value, powerampClient?.baseUrl ?? client?.baseUrl).toString();
     } catch {
       return value;
     }
-  }, [client?.baseUrl]);
+  }, [client?.baseUrl, powerampClient?.baseUrl]);
 
   const showErrorAlert = useCallback((title: string, message: string, alertKey = `${title}:${message}`) => {
     if (shownAlertKeysRef.has(alertKey)) {
@@ -1422,6 +1531,16 @@ function EchoLinkApp(): ReactElement {
     queue: 'Queue',
     queueEmpty: 'The current queue is empty.',
     recent: 'Recent',
+    remoteLibrary: 'Remote',
+    powerampRemote: 'Poweramp Remote',
+    powerampRemoteDescription: 'Connect an Android Poweramp bridge for control and LAN streaming.',
+    powerampRemoteEnabled: 'Enable Poweramp compatibility',
+    powerampRemoteEnabledDescription: 'When enabled, ECHO iPhone can connect to the configured Android Poweramp service.',
+    powerampRemoteVisibility: 'Show Poweramp Remote',
+    powerampRemoteVisibilityDescription: 'Show the Poweramp connection option on the Connect page.',
+    powerampRemoteSetup: 'Poweramp service',
+    powerampRemoteSetupDescription: 'Set the Android address, port, and pairing token.',
+    powerampRemoteNotConfigured: 'Not configured',
     removeFromQueue: 'Remove from queue',
     resetTags: 'Reset tags',
     resetTagsDescription: 'Restore the default visible audio tags.',
@@ -1597,6 +1716,16 @@ function EchoLinkApp(): ReactElement {
     queue: '队列',
     queueEmpty: '当前播放队列暂无内容。',
     recent: '最近',
+    remoteLibrary: '远程',
+    powerampRemote: 'Poweramp 远程',
+    powerampRemoteDescription: '连接安卓 Poweramp 服务，支持控制与局域网串流。',
+    powerampRemoteEnabled: '兼容 Poweramp',
+    powerampRemoteEnabledDescription: '开启后，ECHO iPhone 会连接已配置的安卓 Poweramp 服务。',
+    powerampRemoteVisibility: '显示 Poweramp 远程',
+    powerampRemoteVisibilityDescription: '在连接页显示 Poweramp 远程连接入口。',
+    powerampRemoteSetup: 'Poweramp 服务',
+    powerampRemoteSetupDescription: '设置安卓地址、端口与配对令牌。',
+    powerampRemoteNotConfigured: '未配置',
     removeFromQueue: '从队列移除',
     resetTags: '重置标签',
     resetTagsDescription: '恢复默认显示的音频 tag。',
@@ -1766,6 +1895,28 @@ function EchoLinkApp(): ReactElement {
     }
   }, [applyStatus, beginBusy, client, endBusy]);
 
+  const refreshPowerampRemote = useCallback(async () => {
+    if (!powerampClient) return;
+    setPowerampBusy(true);
+    setPowerampError(null);
+    try {
+      const [nextStatus, tracksResult, albumsResult] = await Promise.all([
+        powerampClient.getStatus(),
+        fetchAllPowerampTracks(powerampClient),
+        fetchAllPowerampAlbums(powerampClient),
+      ]);
+      if (activePowerampClientRef.current !== powerampClient) return;
+      setPowerampStatus(nextStatus);
+      setPowerampStatusReceivedAtMs(Date.now());
+      setPowerampTracks(tracksResult);
+      setPowerampAlbums(albumsResult);
+    } catch (remoteError) {
+      if (activePowerampClientRef.current === powerampClient) setPowerampError(formatRequestError(remoteError));
+    } finally {
+      if (activePowerampClientRef.current === powerampClient) setPowerampBusy(false);
+    }
+  }, [powerampClient]);
+
   const refreshLocalLibrary = useCallback(async () => {
     setLocalLibraryBusy(true);
     setLocalLibraryError(null);
@@ -1783,17 +1934,19 @@ function EchoLinkApp(): ReactElement {
   const refreshFromPull = useCallback(async () => {
     setPullRefreshing(true);
     try {
-      if (page === 'library' && librarySource === 'local') {
+      if (page === 'library' && librarySource === 'remote') {
+        await refreshPowerampRemote();
+      } else if (page === 'library' && librarySource === 'local') {
         await refreshLocalLibrary();
       } else if ((page === 'library' && librarySource === 'all') || page === 'search') {
-        await Promise.all([refresh(), refreshLocalLibrary()]);
+        await Promise.all([refresh(), refreshLocalLibrary(), refreshPowerampRemote()]);
       } else {
         await refresh();
       }
     } finally {
       setPullRefreshing(false);
     }
-  }, [librarySource, page, refresh, refreshLocalLibrary]);
+  }, [librarySource, page, refresh, refreshLocalLibrary, refreshPowerampRemote]);
 
   useEffect(() => {
     let mounted = true;
@@ -1803,7 +1956,8 @@ function EchoLinkApp(): ReactElement {
       loadSavedLocalMusicState(),
       loadStreamingPreferences(),
       loadNeteaseSession(),
-    ]).then(([savedConn, savedSettings, savedLocalMusic, savedStreaming, savedSession]) => {
+      loadPowerampRemoteState(),
+    ]).then(([savedConn, savedSettings, savedLocalMusic, savedStreaming, savedSession, savedPoweramp]) => {
       if (!mounted) {
         return;
       }
@@ -1833,7 +1987,7 @@ function EchoLinkApp(): ReactElement {
         setDefaultPage(savedSettings.defaultPage);
         setPage(savedSettings.defaultPage);
       }
-      if (savedSettings.defaultLibrarySource && ['all', 'echo', 'local', 'streaming'].includes(savedSettings.defaultLibrarySource)) {
+      if (savedSettings.defaultLibrarySource && ['all', 'echo', 'local', 'remote', 'streaming'].includes(savedSettings.defaultLibrarySource)) {
         setDefaultLibrarySource(savedSettings.defaultLibrarySource);
         setLibrarySource(savedSettings.defaultLibrarySource);
       }
@@ -1853,6 +2007,12 @@ function EchoLinkApp(): ReactElement {
       if (typeof savedSettings.echoConnectionEnabled === 'boolean') {
         setEchoConnectionEnabled(savedSettings.echoConnectionEnabled);
       }
+      if (typeof savedSettings.powerampRemoteEnabled === 'boolean') {
+        setPowerampRemoteEnabled(savedSettings.powerampRemoteEnabled);
+      }
+      if (typeof savedSettings.showPowerampRemoteConnection === 'boolean') {
+        setShowPowerampRemoteConnection(savedSettings.showPowerampRemoteConnection);
+      }
       if (savedSettings.eqPreset === 'custom') {
         setEqPreset('custom');
         setEqGains(normalizeEqGains(savedSettings.eqGains));
@@ -1865,6 +2025,12 @@ function EchoLinkApp(): ReactElement {
       }
       if (typeof savedSettings.lrcApiExternalDataEnabled === 'boolean') {
         setLrcApiExternalDataEnabled(savedSettings.lrcApiExternalDataEnabled);
+      }
+      if (typeof savedSettings.externalMetadataSearchEnabled === 'boolean') {
+        setExternalMetadataSearchEnabled(savedSettings.externalMetadataSearchEnabled);
+      }
+      if (typeof savedSettings.externalMetadataSkipExisting === 'boolean') {
+        setExternalMetadataSkipExisting(savedSettings.externalMetadataSkipExisting);
       }
       if (typeof savedSettings.lrclibExternalDataEnabled === 'boolean') {
         setLrclibExternalDataEnabled(savedSettings.lrclibExternalDataEnabled);
@@ -1885,6 +2051,13 @@ function EchoLinkApp(): ReactElement {
         setArtworkBackgroundEnabled(savedSettings.artworkBackgroundEnabled);
       }
       setSettingsLoaded(true);
+      setPowerampConnection(savedPoweramp.connection);
+      setPowerampConnectionDraft(powerampConnectionDraftFrom(savedPoweramp.connection));
+      setFavoritePowerampTrackIds(savedPoweramp.favoriteTrackIds);
+      setRecentPowerampTrackIds(savedPoweramp.recentTrackIds);
+      setPowerampRemoteStateLoaded(true);
+      setFavoriteEchoTrackIds(savedLocalMusic.echoFavoriteTrackIds);
+      setRecentEchoTrackIds(savedLocalMusic.echoRecentTrackIds);
       setFavoriteLocalTrackIds(savedLocalMusic.favoriteTrackIds);
       setLocalQueueActive(savedLocalMusic.queueActive);
       setLocalQueueTrackIds(savedLocalMusic.queueTrackIds);
@@ -1926,6 +2099,49 @@ function EchoLinkApp(): ReactElement {
   }, [client, refresh]);
 
   useEffect(() => {
+    if (powerampClient) void refreshPowerampRemote();
+  }, [powerampClient, refreshPowerampRemote]);
+
+  useEffect(() => {
+    if (!powerampClient) {
+      setPowerampBusy(false);
+      setPowerampStatus(null);
+      setPowerampError(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = () => {
+      void powerampClient.getStatus()
+        .then((nextStatus) => {
+          if (!cancelled && activePowerampClientRef.current === powerampClient) {
+            setPowerampStatus(nextStatus);
+            setPowerampStatusReceivedAtMs(Date.now());
+          }
+        })
+        .catch((pollError) => {
+          if (!cancelled && activePowerampClientRef.current === powerampClient) setPowerampError(formatRequestError(pollError));
+        });
+    };
+    poll();
+    const interval = setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [powerampClient]);
+
+  useEffect(() => {
+    if (!echoConnectionEnabled && librarySource === 'echo') setLibrarySource('local');
+    if (!powerampRemoteEnabled && librarySource === 'remote') setLibrarySource('local');
+    if (!echoConnectionEnabled && defaultLibrarySource === 'echo') setDefaultLibrarySource('local');
+    if (!powerampRemoteEnabled && defaultLibrarySource === 'remote') setDefaultLibrarySource('local');
+  }, [defaultLibrarySource, echoConnectionEnabled, librarySource, powerampRemoteEnabled]);
+
+  useEffect(() => {
+    if (!showPowerampRemoteConnection && connectPanelMode === 'remote') setConnectPanelMode('echo');
+  }, [connectPanelMode, showPowerampRemoteConnection]);
+
+  useEffect(() => {
     if (echoConnectionEnabled) {
       return;
     }
@@ -1952,12 +2168,16 @@ function EchoLinkApp(): ReactElement {
       echoConnectionEnabled,
       eqGains,
       eqPreset,
+      externalMetadataSearchEnabled,
+      externalMetadataSkipExisting,
       lrcApiExternalDataEnabled,
       lrclibExternalDataEnabled,
       externalDataSelectionMode,
       loudnessNormalizationEnabled,
       neteaseExternalDataEnabled,
       neteaseAccessMode,
+      powerampRemoteEnabled,
+      showPowerampRemoteConnection,
       showArtworkGlow,
     }).catch((saveError) => {
       showErrorAlert(
@@ -1979,13 +2199,17 @@ function EchoLinkApp(): ReactElement {
     echoConnectionEnabled,
     eqGains,
     eqPreset,
+    externalMetadataSearchEnabled,
+    externalMetadataSkipExisting,
     lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     externalDataSelectionMode,
     loudnessNormalizationEnabled,
     neteaseExternalDataEnabled,
     neteaseAccessMode,
+    powerampRemoteEnabled,
     settingsLoaded,
+    showPowerampRemoteConnection,
     showArtworkGlow,
     showErrorAlert,
   ]);
@@ -1995,6 +2219,8 @@ function EchoLinkApp(): ReactElement {
       return;
     }
     void saveLocalMusicState({
+      echoFavoriteTrackIds: favoriteEchoTrackIds,
+      echoRecentTrackIds: recentEchoTrackIds,
       favoriteTrackIds: favoriteLocalTrackIds,
       playlists,
       queueActive: localQueueActive,
@@ -2007,7 +2233,22 @@ function EchoLinkApp(): ReactElement {
         'local-library-save-error',
       );
     });
-  }, [favoriteLocalTrackIds, languageIsEnglish, localMusicStateLoaded, localQueueActive, localQueueTrackIds, playlists, recentLocalTrackIds, showErrorAlert]);
+  }, [favoriteEchoTrackIds, favoriteLocalTrackIds, languageIsEnglish, localMusicStateLoaded, localQueueActive, localQueueTrackIds, playlists, recentEchoTrackIds, recentLocalTrackIds, showErrorAlert]);
+
+  useEffect(() => {
+    if (!powerampRemoteStateLoaded) return;
+    void savePowerampRemoteState({
+      connection: powerampConnection,
+      favoriteTrackIds: favoritePowerampTrackIds,
+      recentTrackIds: recentPowerampTrackIds,
+    }).catch((saveError) => {
+      showErrorAlert(
+        languageIsEnglish ? 'Remote settings not saved' : '远程设置未保存',
+        formatRequestError(saveError),
+        'poweramp-remote-save-error',
+      );
+    });
+  }, [favoritePowerampTrackIds, languageIsEnglish, powerampConnection, powerampRemoteStateLoaded, recentPowerampTrackIds, showErrorAlert]);
 
   useEffect(() => {
     if (!localLibraryLoaded || !localMusicStateLoaded) return;
@@ -2272,6 +2513,21 @@ function EchoLinkApp(): ReactElement {
     await applyPairingValue(pairingText);
   }, [applyPairingValue, pairingText]);
 
+  const applyPowerampPairingValue = useCallback((value: string) => {
+    try {
+      const nextConnection = parsePowerampPairingUri(value);
+      setPowerampConnection(nextConnection);
+      setPowerampConnectionDraft(powerampConnectionDraftFrom(nextConnection));
+      setPowerampRemoteEnabled(true);
+      setPowerampError(null);
+    } catch (pairingError) {
+      Alert.alert(
+        languageIsEnglish ? 'Poweramp pairing failed' : 'Poweramp 配对失败',
+        pairingError instanceof Error ? pairingError.message : String(pairingError),
+      );
+    }
+  }, [languageIsEnglish]);
+
   const saveManualConnection = useCallback(async () => {
     const host = normalizeEchoLinkHost(connectionDraft.host);
     const token = normalizeEchoLinkToken(connectionDraft.token);
@@ -2307,6 +2563,32 @@ function EchoLinkApp(): ReactElement {
     }
   }, [connectionDraft, languageIsEnglish, switchPage, text.connectionErrorTitle]);
 
+  const savePowerampRemoteConnection = useCallback(() => {
+    const host = normalizePowerampRemoteHost(powerampConnectionDraft.host);
+    const token = normalizePowerampRemoteToken(powerampConnectionDraft.token);
+    const port = Number(powerampConnectionDraft.port);
+    if (!host || !token || !Number.isInteger(port) || port < 1 || port > 65535) {
+      Alert.alert(
+        text.connectionErrorTitle,
+        languageIsEnglish
+          ? 'Enter a valid Poweramp Remote address, port (1-65535), and pairing token.'
+          : '请输入有效的 Poweramp 远程地址、端口（1-65535）和配对令牌。',
+      );
+      return;
+    }
+    const nextConnection: PowerampRemoteConnection = {
+      host,
+      name: powerampConnectionDraft.name.trim() || 'Poweramp',
+      port,
+      scheme: powerampConnectionDraft.scheme === 'https' ? 'https' : 'http',
+      token,
+    };
+    setPowerampConnection(nextConnection);
+    setPowerampConnectionDraft(powerampConnectionDraftFrom(nextConnection));
+    setPowerampRemoteEnabled(true);
+    setPowerampError(null);
+  }, [languageIsEnglish, powerampConnectionDraft, text.connectionErrorTitle]);
+
   const startNeteaseLogin = useCallback(async () => {
     beginStreamingBusy();
     setStreamingQrCookie('');
@@ -2333,7 +2615,7 @@ function EchoLinkApp(): ReactElement {
       setPhoneAudioBusy(false);
       phonePlayer.pause();
       phonePlayer.clearLockScreenControls();
-      if (echoAudioDsp.isAvailable) await echoAudioDsp.stop().catch(() => undefined);
+      await stopDspPlayback();
       setDspStatus((current) => ({ ...current, currentTime: 0, didJustFinish: false, playing: false }));
       setPlaybackOutputMode('local');
     }
@@ -2347,7 +2629,7 @@ function EchoLinkApp(): ReactElement {
     setStreamingQrKey('');
     setStreamingQrUrl('');
     setStreamingStatusText('');
-  }, [phonePlayer, playbackOutputMode]);
+  }, [phonePlayer, playbackOutputMode, stopDspPlayback]);
 
   useEffect(() => {
     if (!streamingApiBaseUrl || !streamingQrKey) return;
@@ -2441,11 +2723,31 @@ function EchoLinkApp(): ReactElement {
     setRecentLocalTrackIds((current) => [trackId, ...current.filter((id) => id !== trackId)].slice(0, 50));
   }, []);
 
+  const markEchoTrackPlayed = useCallback((trackId: string) => {
+    setRecentEchoTrackIds((current) => [trackId, ...current.filter((id) => id !== trackId)].slice(0, 50));
+  }, []);
+
+  const markPowerampTrackPlayed = useCallback((trackId: string) => {
+    setRecentPowerampTrackIds((current) => [trackId, ...current.filter((id) => id !== trackId)].slice(0, 50));
+  }, []);
+
   const toggleLocalFavorite = useCallback((track: LocalMusicTrack) => {
     setFavoriteLocalTrackIds((current) => (
       current.includes(track.id)
         ? current.filter((id) => id !== track.id)
         : [track.id, ...current]
+    ));
+  }, []);
+
+  const toggleEchoFavorite = useCallback((trackId: string) => {
+    setFavoriteEchoTrackIds((current) => (
+      current.includes(trackId) ? current.filter((id) => id !== trackId) : [trackId, ...current]
+    ));
+  }, []);
+
+  const togglePowerampFavorite = useCallback((trackId: string) => {
+    setFavoritePowerampTrackIds((current) => (
+      current.includes(trackId) ? current.filter((id) => id !== trackId) : [trackId, ...current]
     ));
   }, []);
 
@@ -2484,7 +2786,7 @@ function EchoLinkApp(): ReactElement {
         devicePlaybackRequestRef.current += 1;
         phonePlayer.pause();
         phonePlayer.clearLockScreenControls();
-        if (echoAudioDsp.isAvailable) await echoAudioDsp.stop().catch(() => undefined);
+        await stopDspPlayback();
       }
       const nextTracks = await deleteLocalMusicTrack(track);
       setLocalTracks(nextTracks);
@@ -2506,7 +2808,7 @@ function EchoLinkApp(): ReactElement {
     } finally {
       setLocalLibraryBusy(false);
     }
-  }, [localTrack?.id, phonePlayer]);
+  }, [localTrack?.id, phonePlayer, stopDspPlayback]);
 
   const deleteLocalTrack = useCallback((track: LocalMusicTrack) => {
     if (!confirmBeforeDeletingLocalTracks) {
@@ -2570,6 +2872,24 @@ function EchoLinkApp(): ReactElement {
     }
   }, [applyStatus, beginBusy, client, endBusy]);
 
+  const sendPowerampCommand = useCallback(async (command: Parameters<NonNullable<typeof powerampClient>['sendCommand']>[0]) => {
+    if (!powerampClient) return null;
+    setPowerampBusy(true);
+    setPowerampError(null);
+    try {
+      const nextStatus = await powerampClient.sendCommand(command);
+      if (activePowerampClientRef.current !== powerampClient) return null;
+      setPowerampStatus(nextStatus);
+      setPowerampStatusReceivedAtMs(Date.now());
+      return nextStatus;
+    } catch (commandError) {
+      if (activePowerampClientRef.current === powerampClient) setPowerampError(formatRequestError(commandError));
+      return null;
+    } finally {
+      if (activePowerampClientRef.current === powerampClient) setPowerampBusy(false);
+    }
+  }, [powerampClient]);
+
   const playTrackOnPc = useCallback((track: EchoLinkTrackPreview) => {
     if (!client) {
       setConnectPanelMode('echo');
@@ -2582,20 +2902,24 @@ function EchoLinkApp(): ReactElement {
       if (!nextStatus || devicePlaybackRequestRef.current !== requestId) return;
       phonePlayer.pause();
       phonePlayer.clearLockScreenControls();
-      if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+      void stopDspPlayback();
       setPhoneSeekPreviewMs(null);
       setPhoneAudioError(null);
       setPlaybackOutputMode('pc');
+      markEchoTrackPlayed(track.id);
     });
-  }, [client, phonePlayer, sendCommand, switchPage]);
+  }, [client, markEchoTrackPlayed, phonePlayer, sendCommand, stopDspPlayback, switchPage]);
 
   const nowPlaying = status?.playback.track;
+  const powerampNowPlaying = powerampStatus?.playback.track;
   const playbackQueue = status?.playback.queue;
   const isLocalOutput = playbackOutputMode === 'local';
   const isPhoneOutput = playbackOutputMode === 'phone';
+  const isPowerampControlOutput = playbackOutputMode === 'remoteControl';
+  const isPowerampStreamOutput = playbackOutputMode === 'remoteStream';
   const isStreamingOutput = playbackOutputMode === 'streaming';
-  const isDeviceOutput = isLocalOutput || isPhoneOutput || isStreamingOutput;
-  const useDspPlayback = echoAudioDsp.isAvailable && (isLocalOutput || isPhoneOutput || isStreamingOutput);
+  const isDeviceOutput = isLocalOutput || isPhoneOutput || isPowerampStreamOutput || isStreamingOutput;
+  const useDspPlayback = echoAudioDsp.isAvailable && dspPlaybackActive;
   const nativePlayerEnabled = Platform.OS === 'ios' && echoAudioDsp.isAvailable;
   const currentEqOption = useMemo(() => (
     eqPresetOptions.find((option) => option.key === eqPreset) ?? defaultEqOption
@@ -2605,6 +2929,10 @@ function EchoLinkApp(): ReactElement {
     : languageIsEnglish ? currentEqOption.labelEn : currentEqOption.labelZh;
   const localTrackById = useMemo(() => new Map(localTracks.map((track) => [track.id, track])), [localTracks]);
   const echoTrackById = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
+  const powerampTrackById = useMemo(() => new Map(powerampTracks.map((track) => [track.id, track])), [powerampTracks]);
+  const favoriteEchoTrackIdSet = useMemo(() => new Set(favoriteEchoTrackIds), [favoriteEchoTrackIds]);
+  const favoriteLocalTrackIdSet = useMemo(() => new Set(favoriteLocalTrackIds), [favoriteLocalTrackIds]);
+  const favoritePowerampTrackIdSet = useMemo(() => new Set(favoritePowerampTrackIds), [favoritePowerampTrackIds]);
   const localQueueTracks = useMemo(() => (
     localQueueTrackIds
       .map((id) => localTrackById.get(id))
@@ -2618,7 +2946,9 @@ function EchoLinkApp(): ReactElement {
     ? activePlaybackPlaylist.tracks
     : isLocalOutput
       ? localPlaybackItems
-      : isStreamingOutput ? streamingTracks : playbackQueue?.items ?? [];
+      : isStreamingOutput ? streamingTracks
+        : isPowerampStreamOutput ? powerampTracks
+          : isPowerampControlOutput ? (powerampNowPlaying ? [powerampNowPlaying] : []) : playbackQueue?.items ?? [];
   const activeStreamingPlaylist = selectedStreamingPlaylistId
     ? streamingPlaylists.find((playlist) => playlist.id === selectedStreamingPlaylistId) ?? null
     : null;
@@ -2626,15 +2956,18 @@ function EchoLinkApp(): ReactElement {
     activePlaybackPlaylist
     || isLocalOutput
     || isStreamingOutput
+    || isPowerampStreamOutput
     || (playbackOutputMode === 'pc' && client && playlistItems.length > 0)
   );
-  const queueSource: 'echo' | 'local' | 'streaming' = isStreamingOutput
+  const queueSource: 'echo' | 'local' | 'remote' | 'streaming' = isStreamingOutput
     ? 'streaming'
-    : isLocalOutput ? 'local' : 'echo';
+    : isPowerampStreamOutput || isPowerampControlOutput ? 'remote' : isLocalOutput ? 'local' : 'echo';
   const queueSubtitle = activePlaybackPlaylist
     ? `${languageIsEnglish ? 'Playlist' : '歌单'} · ${activePlaybackPlaylist.name}`
     : isStreamingOutput && activeStreamingPlaylist
       ? `${languageIsEnglish ? 'NetEase' : '网易云'} · ${activeStreamingPlaylist.name}`
+      : isPowerampStreamOutput || isPowerampControlOutput
+        ? `${languageIsEnglish ? 'Poweramp' : 'Poweramp'} · ${powerampConnection?.name ?? 'Android'}`
       : isLocalOutput
         ? (localQueueActive
           ? (languageIsEnglish ? 'Local queue' : '本地播放队列')
@@ -2646,7 +2979,29 @@ function EchoLinkApp(): ReactElement {
   const hiddenPlaylistItemCount = Math.max(0, playlistItems.length - visiblePlaylistItems.length);
   const displayTrack = isLocalOutput
     ? localTrack
-    : isStreamingOutput ? streamingTrack : isPhoneOutput ? phoneTrack ?? nowPlaying : nowPlaying;
+    : isStreamingOutput ? streamingTrack
+      : isPowerampStreamOutput ? powerampStreamTrack
+        : isPowerampControlOutput ? powerampNowPlaying : isPhoneOutput ? phoneTrack ?? nowPlaying : nowPlaying;
+  const currentTrackFavorite = Boolean(displayTrack && (
+    isLocalOutput
+      ? favoriteLocalTrackIdSet.has(displayTrack.id)
+      : isPowerampStreamOutput || isPowerampControlOutput
+        ? favoritePowerampTrackIdSet.has(displayTrack.id)
+        : isStreamingOutput ? false : favoriteEchoTrackIdSet.has(displayTrack.id)
+  ));
+  const toggleCurrentFavorite = useCallback(() => {
+    if (!displayTrack) return;
+    if (isLocalOutput) {
+      const track = localTrackById.get(displayTrack.id);
+      if (track) toggleLocalFavorite(track);
+      return;
+    }
+    if (isPowerampStreamOutput || isPowerampControlOutput) {
+      togglePowerampFavorite(displayTrack.id);
+      return;
+    }
+    if (!isStreamingOutput) toggleEchoFavorite(displayTrack.id);
+  }, [displayTrack, isLocalOutput, isPowerampControlOutput, isPowerampStreamOutput, isStreamingOutput, localTrackById, toggleEchoFavorite, toggleLocalFavorite, togglePowerampFavorite]);
   const replaceEchoQueue = useCallback((items: PlaybackListTrack[], startTrackId: string | null = displayTrack?.id ?? null) => {
     if (!client) return;
     const requestId = ++devicePlaybackRequestRef.current;
@@ -2660,12 +3015,12 @@ function EchoLinkApp(): ReactElement {
       if (!nextStatus || devicePlaybackRequestRef.current !== requestId) return;
       phonePlayer.pause();
       phonePlayer.clearLockScreenControls();
-      if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+      void stopDspPlayback();
       setPhoneSeekPreviewMs(null);
       setPhoneAudioError(null);
       setPlaybackOutputMode('pc');
     });
-  }, [client, displayTrack?.id, phonePlayer, sendCommand]);
+  }, [client, displayTrack?.id, phonePlayer, sendCommand, stopDspPlayback]);
   const reorderEchoQueue = useCallback((items: PlaybackListTrack[], startTrackId: string | null = displayTrack?.id ?? null) => {
     if (items.length === 0) {
       void sendCommand({ command: 'queueClear', output: 'pc' });
@@ -2691,7 +3046,9 @@ function EchoLinkApp(): ReactElement {
       playTrackOnPc(track);
     }
   }, [client, playTrackOnPc, playlists, replaceEchoQueue]);
-  const deviceTrack = isLocalOutput ? localTrack : isStreamingOutput ? streamingTrack : isPhoneOutput ? phoneTrack : null;
+  const deviceTrack = isLocalOutput
+    ? localTrack
+    : isStreamingOutput ? streamingTrack : isPowerampStreamOutput ? powerampStreamTrack : isPhoneOutput ? phoneTrack : null;
   const externalMetadataKey = externalMetadataKeyForTrack(displayTrack);
   activeExternalMetadataKeyRef.current = externalMetadataKey;
   const currentExternalMetadata = externalMetadataKey ? externalMetadataByKey[externalMetadataKey] : undefined;
@@ -2705,15 +3062,33 @@ function EchoLinkApp(): ReactElement {
   const nativeArtworkVisible = artworkUrlIsVisible(nativeArtworkUrl);
   const externalArtworkUrl = resolveArtworkUrl(currentExternalMetadata?.albumArt);
   const externalArtworkVisible = artworkUrlIsVisible(externalArtworkUrl);
+  const lyricsTextIsUsable = lyricsTrackId === displayTrack?.id
+    && Boolean(lyricsText.trim())
+    && lyricsText !== text.noLyrics
+    && !lyricsError;
+  const hasExistingArtworkOrLyrics = nativeArtworkVisible
+    || externalArtworkVisible
+    || Boolean(currentExternalMetadata?.lyrics?.trim())
+    || Boolean(isLocalOutput && localTrack?.hasLyrics)
+    || lyricsTextIsUsable;
+  const hasManualExternalMetadataRefresh = Boolean(
+    externalMetadataKey && externalMetadataManualRefreshKey === externalMetadataKey,
+  );
   const displayArtworkUrl = currentExternalFieldSources?.albumArt && externalArtworkVisible
     ? externalArtworkUrl
     : nativeArtworkVisible
       ? nativeArtworkUrl
       : externalArtworkVisible ? externalArtworkUrl : null;
-  const shouldFetchExternalArtwork = Boolean(displayTrack && externalMetadataKey && !nativeArtworkVisible);
+  const shouldSearchExternalMetadata = (externalMetadataSearchEnabled || hasManualExternalMetadataRefresh)
+    && (!externalMetadataSkipExisting || hasManualExternalMetadataRefresh || !hasExistingArtworkOrLyrics);
   const echoConnectionBroken = echoConnectionEnabled && Boolean(error);
   const echoConnectionOnline = echoConnectionEnabled && Boolean(status && !echoConnectionBroken);
-  const connectedLabel = !echoConnectionEnabled
+  const powerampConnectionOnline = powerampRemoteEnabled && Boolean(powerampStatus && !powerampError);
+  const connectedLabel = isPowerampControlOutput || isPowerampStreamOutput
+    ? (powerampConnectionOnline
+      ? `${languageIsEnglish ? 'Connected to' : '已连接'} ${powerampConnection?.name ?? 'Poweramp'}`
+      : (languageIsEnglish ? 'Poweramp not connected' : 'Poweramp 未连接'))
+    : !echoConnectionEnabled
     ? text.echoOff
     : echoConnectionBroken
     ? text.echoNotConnected
@@ -2722,11 +3097,21 @@ function EchoLinkApp(): ReactElement {
       : client
         ? text.connectingLabel
         : text.echoNotConnected;
-  const playerConnectionDetail = status?.device.name ?? 'ECHO Link';
+  const playerConnectionDetail = isPowerampControlOutput || isPowerampStreamOutput
+    ? powerampConnection?.name ?? 'Poweramp'
+    : status?.device.name ?? 'ECHO Link';
   const pcPlaybackPositionMs = status
     ? Math.max(0, Math.min(
       status.playback.durationMs || Number.MAX_SAFE_INTEGER,
       status.playback.positionMs + (status.playback.state === 'playing' ? Math.max(0, clockMs - statusReceivedAtMs) : 0),
+    ))
+    : 0;
+  const powerampPlaybackPositionMs = powerampStatus
+    ? Math.max(0, Math.min(
+      powerampStatus.playback.durationMs || Number.MAX_SAFE_INTEGER,
+      powerampStatus.playback.positionMs + (powerampStatus.playback.state === 'playing'
+        ? Math.max(0, clockMs - powerampStatusReceivedAtMs)
+        : 0),
     ))
     : 0;
   const phonePlaybackPositionMs = useDspPlayback
@@ -2734,34 +3119,102 @@ function EchoLinkApp(): ReactElement {
     : Math.max(0, Math.round(phonePlayerStatus.currentTime * 1000));
   const playbackPositionMs = isDeviceOutput
     ? phoneSeekPreviewMs ?? phonePlaybackPositionMs
-    : pcPlaybackPositionMs;
+    : isPowerampControlOutput ? powerampPlaybackPositionMs : pcPlaybackPositionMs;
   const playbackDurationMs = isDeviceOutput
     ? Math.max(0, Math.round((useDspPlayback ? dspStatus.duration : phonePlayerStatus.duration) * 1000) || displayTrack?.durationMs || 0)
-    : status?.playback.durationMs ?? 0;
+    : isPowerampControlOutput ? powerampStatus?.playback.durationMs ?? 0 : status?.playback.durationMs ?? 0;
   const progressRatio = playbackDurationMs
     ? clamp01(playbackPositionMs / playbackDurationMs)
     : 0;
-  const outputVolume = isDeviceOutput ? phoneVolume : status?.playback.volume ?? 0;
+  const outputVolume = isDeviceOutput ? phoneVolume : isPowerampControlOutput ? powerampStatus?.playback.volume ?? 0 : status?.playback.volume ?? 0;
   const volumePercent = Math.round(outputVolume * 100);
   const isPlaybackActive = isDeviceOutput
     ? (useDspPlayback ? dspStatus.playing : phonePlayerStatus.playing)
-    : status?.playback.state === 'playing';
+    : isPowerampControlOutput ? powerampStatus?.playback.state === 'playing' : status?.playback.state === 'playing';
+  const remotePlaybackState = isPowerampControlOutput
+    ? powerampStatus?.playback.state
+    : status?.playback.state;
+  const shouldPublishNativeNowPlaying = Boolean(displayTrack) && (
+    isDeviceOutput
+      ? dspPlaybackActive
+      : Boolean(remotePlaybackState && remotePlaybackState !== 'idle' && remotePlaybackState !== 'stopped' && remotePlaybackState !== 'error')
+  );
+
+  useEffect(() => {
+    if (!echoAudioDsp.isAvailable) {
+      return;
+    }
+    if (!shouldPublishNativeNowPlaying || !displayTrack) {
+      if (nativeNowPlayingPublishedRef.current) {
+        void clearNativeNowPlaying();
+      }
+      return;
+    }
+
+    const artist = displayArtist || (languageIsEnglish ? 'Unknown Artist' : '未知艺术家');
+    const positionSeconds = Math.max(0, playbackPositionMs / 1000);
+    const signature = [
+      displayTrack.id,
+      displayTrack.title,
+      artist,
+      displayTrack.album,
+      displayArtworkUrl ?? '',
+      Math.round(playbackDurationMs),
+      Math.round(positionSeconds),
+      isPlaybackActive ? 'playing' : 'paused',
+    ].join('|');
+    if (nativeNowPlayingSnapshotRef.current === signature) {
+      return;
+    }
+
+    nativeNowPlayingPublishedRef.current = true;
+    nativeNowPlayingSnapshotRef.current = signature;
+    void echoAudioDsp.updateNowPlaying({
+      album: displayTrack.album?.trim() ?? '',
+      artist,
+      artworkUrl: displayArtworkUrl ?? '',
+      durationSeconds: playbackDurationMs / 1000,
+      isPlaying: isPlaybackActive,
+      positionSeconds,
+      title: displayTrack.title,
+    }).catch(() => {
+      nativeNowPlayingPublishedRef.current = false;
+    });
+  }, [
+    clearNativeNowPlaying,
+    displayArtist,
+    displayArtworkUrl,
+    displayTrack,
+    dspPlaybackActive,
+    isPlaybackActive,
+    languageIsEnglish,
+    playbackDurationMs,
+    playbackPositionMs,
+    shouldPublishNativeNowPlaying,
+  ]);
   const playbackControlsEnabled = !phoneAudioBusy && (isLocalOutput
     ? Boolean(localTrack || localTracks.length > 0)
     : isPhoneOutput
       ? Boolean(phoneTrack)
+      : isPowerampStreamOutput
+        ? Boolean(powerampStreamTrack)
       : isStreamingOutput
         ? Boolean(streamingTrack)
-        : Boolean(client));
+        : isPowerampControlOutput ? Boolean(powerampClient) : Boolean(client));
   const playbackTags = tagsForTrack(displayTrack, {
-    outputMode: isLocalOutput ? '本地' : isStreamingOutput ? '网易云' : isPhoneOutput ? '串流' : status?.playback.outputMode,
+    outputMode: isLocalOutput
+      ? '本地'
+      : isStreamingOutput ? '网易云'
+        : isPowerampStreamOutput ? 'Poweramp 串流'
+          : isPowerampControlOutput ? 'Poweramp 控制'
+            : isPhoneOutput ? '串流' : status?.playback.outputMode,
     visibleAudioTags: audioTagVisibility,
   });
 
   useEffect(() => {
-    const shouldLookupLrcApi = lrcApiExternalDataEnabled;
-    const shouldLookupLrclib = lrclibExternalDataEnabled;
-    const shouldLookupNetease = neteaseExternalDataEnabled || shouldFetchExternalArtwork;
+    const shouldLookupLrcApi = shouldSearchExternalMetadata && lrcApiExternalDataEnabled;
+    const shouldLookupLrclib = shouldSearchExternalMetadata && lrclibExternalDataEnabled;
+    const shouldLookupNetease = shouldSearchExternalMetadata && neteaseExternalDataEnabled;
     if ((!shouldLookupLrcApi && !shouldLookupLrclib && !shouldLookupNetease) || !displayTrack || !externalMetadataKey
       || ignoredExternalMetadataKeysRef.current.has(externalMetadataKey)) {
       return undefined;
@@ -2785,6 +3238,7 @@ function EchoLinkApp(): ReactElement {
     }));
 
     const lookupTrack = displayTrack;
+    let cancelled = false;
     void lookupExternalMetadataCandidates(lookupTrack, {
       lrcapi: shouldLookupLrcApi,
       lrclib: shouldLookupLrclib,
@@ -2793,6 +3247,7 @@ function EchoLinkApp(): ReactElement {
       includeNeteaseLyrics: neteaseExternalDataEnabled,
     })
       .then((candidates) => {
+        if (cancelled) return;
         if (candidates.length > 0 && externalDataSelectionMode === 'ask') {
           if (activeExternalMetadataKeyRef.current !== externalMetadataKey) {
             externalMetadataLookupKeysRef.current.delete(lookupKey);
@@ -2855,6 +3310,7 @@ function EchoLinkApp(): ReactElement {
         });
       })
       .catch((externalError) => {
+        if (cancelled) return;
         externalMetadataLookupKeysRef.current.delete(lookupKey);
         setExternalMetadataByKey((current) => {
           const existing = current[externalMetadataKey];
@@ -2871,18 +3327,29 @@ function EchoLinkApp(): ReactElement {
             },
           };
         });
+      })
+      .finally(() => {
+        setExternalMetadataManualRefreshKey((current) => (
+          current === externalMetadataKey ? null : current
+        ));
       });
-    return undefined;
+    return () => {
+      cancelled = true;
+      externalMetadataLookupKeysRef.current.delete(lookupKey);
+    };
   }, [
     displayTrack,
     externalDataSelectionMode,
     externalMetadataKey,
+    externalMetadataManualRefreshKey,
     externalMetadataRefreshToken,
+    externalMetadataSearchEnabled,
+    externalMetadataSkipExisting,
+    hasExistingArtworkOrLyrics,
     lrcApiExternalDataEnabled,
     lrclibExternalDataEnabled,
     neteaseExternalDataEnabled,
     nativeArtworkVisible,
-    shouldFetchExternalArtwork,
   ]);
 
   useEffect(() => {
@@ -2907,10 +3374,11 @@ function EchoLinkApp(): ReactElement {
     externalMetadataLookupKeysRef.current.clear();
     ignoredExternalMetadataKeysRef.current.clear();
     libraryArtworkLookupKeysRef.current.clear();
+    setExternalMetadataManualRefreshKey(null);
     setExternalMetadataByKey({});
     setExternalMetadataFieldSourcesByKey({});
     setPendingExternalMetadataSelection(null);
-  }, [externalDataSelectionMode, lrcApiExternalDataEnabled, lrclibExternalDataEnabled, neteaseExternalDataEnabled]);
+  }, [externalDataSelectionMode, externalMetadataSearchEnabled, lrcApiExternalDataEnabled, lrclibExternalDataEnabled, neteaseExternalDataEnabled]);
 
   useEffect(() => {
     if (!echoAudioDsp.isAvailable) {
@@ -2970,7 +3438,7 @@ function EchoLinkApp(): ReactElement {
       || track.albumArtist.toLowerCase().includes(normalizedQuery)
     );
   }), [query, tracks]);
-  const visibleTracks = useMemo(() => queryFilteredEchoTracks.filter((track) => {
+  const filteredEchoTracks = useMemo(() => queryFilteredEchoTracks.filter((track) => {
     if (libraryFilter === 'streamable') {
       return track.canPlayOnPhone;
     }
@@ -2979,6 +3447,15 @@ function EchoLinkApp(): ReactElement {
     }
     return true;
   }), [libraryFilter, queryFilteredEchoTracks]);
+  const visibleTracks = useMemo(() => {
+    if (echoLibraryView === 'favorites') return filteredEchoTracks.filter((track) => favoriteEchoTrackIdSet.has(track.id));
+    if (echoLibraryView === 'recent') {
+      return recentEchoTrackIds
+        .map((id) => filteredEchoTracks.find((track) => track.id === id))
+        .filter((track): track is EchoLinkTrackPreview => Boolean(track));
+    }
+    return filteredEchoTracks;
+  }, [echoLibraryView, favoriteEchoTrackIdSet, filteredEchoTracks, recentEchoTrackIds]);
   const organizedEchoTracks = useMemo(() => {
     if (echoLibraryView === 'albums') {
       return sortTracksBy(visibleTracks, (track) => track.album || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'));
@@ -2988,8 +3465,36 @@ function EchoLinkApp(): ReactElement {
     }
     return visibleTracks;
   }, [echoLibraryView, languageIsEnglish, visibleTracks]);
-  const favoriteLocalTrackIdSet = useMemo(() => new Set(favoriteLocalTrackIds), [favoriteLocalTrackIds]);
   const recentLocalTrackIdSet = useMemo(() => new Set(recentLocalTrackIds), [recentLocalTrackIds]);
+  const queryFilteredPowerampTracks = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return powerampTracks.filter((track) => !normalizedQuery || (
+      track.title.toLowerCase().includes(normalizedQuery)
+      || track.artist.toLowerCase().includes(normalizedQuery)
+      || track.album.toLowerCase().includes(normalizedQuery)
+      || track.albumArtist.toLowerCase().includes(normalizedQuery)
+    ));
+  }, [powerampTracks, query]);
+  const filteredPowerampTracks = useMemo(() => queryFilteredPowerampTracks.filter((track) => {
+    if (libraryFilter === 'streamable') return track.canPlayOnPhone;
+    if (libraryFilter === 'local') return formatSourceTag(track.sourceLabel) === 'Local';
+    return true;
+  }), [libraryFilter, queryFilteredPowerampTracks]);
+  const visiblePowerampTracks = useMemo(() => {
+    if (powerampLibraryView === 'favorites') return filteredPowerampTracks.filter((track) => favoritePowerampTrackIdSet.has(track.id));
+    if (powerampLibraryView === 'recent') {
+      return recentPowerampTrackIds
+        .map((id) => filteredPowerampTracks.find((track) => track.id === id))
+        .filter((track): track is PowerampRemoteTrack => Boolean(track));
+    }
+    if (powerampLibraryView === 'albums') {
+      return sortTracksBy(filteredPowerampTracks, (track) => track.album || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'));
+    }
+    if (powerampLibraryView === 'artists') {
+      return sortTracksBy(filteredPowerampTracks, (track) => track.artist || (languageIsEnglish ? 'Unknown Artist' : '未知艺术家'));
+    }
+    return filteredPowerampTracks;
+  }, [favoritePowerampTrackIdSet, filteredPowerampTracks, languageIsEnglish, powerampLibraryView, recentPowerampTrackIds]);
   const queryFilteredLocalTracks = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
@@ -3052,6 +3557,22 @@ function EchoLinkApp(): ReactElement {
     (title) => `local-artist:${title}`,
     (count) => `${text.localLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
   ), [languageIsEnglish, queryFilteredLocalTracks, text.localLibrary]);
+  const powerampCollections = useMemo(() => {
+    const albumsByTitle = new Map(powerampAlbums.map((album) => [album.title, album]));
+    return buildTrackCollections(
+      filteredPowerampTracks,
+      (track) => track.album?.trim() || (languageIsEnglish ? 'Uncategorized' : '未归类专辑'),
+      (title) => `remote:${albumsByTitle.get(title)?.id ?? title}`,
+      (count) => `${text.remoteLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
+      (title) => albumsByTitle.get(title)?.artworkUrl ?? null,
+    );
+  }, [filteredPowerampTracks, languageIsEnglish, powerampAlbums, text.remoteLibrary]);
+  const powerampArtistCollections = useMemo(() => buildTrackCollections(
+    filteredPowerampTracks,
+    (track) => artistNamesForTrack(track, languageIsEnglish ? 'Unknown Artist' : '未知艺术家'),
+    (title) => `remote-artist:${title}`,
+    (count) => `${text.remoteLibrary} · ${count} ${languageIsEnglish ? 'tracks' : '首'}`,
+  ), [filteredPowerampTracks, languageIsEnglish, text.remoteLibrary]);
   const sortedPlaylists = useMemo(() => [...playlists]
       .sort((a, b) => (
         Number(b.pinned) - Number(a.pinned)
@@ -3063,6 +3584,12 @@ function EchoLinkApp(): ReactElement {
     || Number(favoriteStreamingPlaylistIds.includes(b.id)) - Number(favoriteStreamingPlaylistIds.includes(a.id))
     || a.name.localeCompare(b.name)
   )), [favoriteStreamingPlaylistIds, pinnedStreamingPlaylistIds, streamingPlaylists]);
+  const queryFilteredStreamingPlaylists = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return normalizedQuery
+      ? sortedStreamingPlaylists.filter((playlist) => playlist.name.toLowerCase().includes(normalizedQuery))
+      : sortedStreamingPlaylists;
+  }, [query, sortedStreamingPlaylists]);
   const streamableTrackCount = useMemo(() => (
     tracks.filter((track) => track.canPlayOnPhone).length
   ), [tracks]);
@@ -3070,44 +3597,84 @@ function EchoLinkApp(): ReactElement {
     tracks.filter((track) => formatSourceTag(track.sourceLabel) === 'Local').length
   ), [tracks]);
   const showingAllLibrary = page === 'search' || librarySource === 'all';
-  const unsortedActiveLibraryTracks: EchoLinkTrackPreview[] = librarySource === 'streaming'
+  const browsingCollections = !showingAllLibrary
+    && !selectedLibraryCollectionId
+    && ((librarySource === 'echo' && (echoLibraryView === 'albums' || echoLibraryView === 'artists'))
+      || (librarySource === 'remote' && (powerampLibraryView === 'albums' || powerampLibraryView === 'artists'))
+      || (librarySource === 'local' && (localLibraryView === 'albums' || localLibraryView === 'artists')));
+  const sourceLibraryTracks: EchoLinkTrackPreview[] = librarySource === 'streaming'
     ? streamingSessionMatchesApi ? streamingTracks : []
     : showingAllLibrary
-      ? [...queryFilteredEchoTracks, ...queryFilteredLocalTracks]
-      : librarySource === 'local' ? visibleLocalTracks : organizedEchoTracks;
-  const activeLibraryTracks = selectedLibraryCollectionId && libraryAlbumSort !== 'default'
-    ? [...unsortedActiveLibraryTracks].sort((a, b) => {
-      if (libraryAlbumSort === 'duration') return a.durationMs - b.durationMs || a.title.localeCompare(b.title);
-      const left = libraryAlbumSort === 'artist' ? a.artist : a.title;
-      const right = libraryAlbumSort === 'artist' ? b.artist : b.title;
-      return left.localeCompare(right) || a.title.localeCompare(b.title);
-    })
-    : unsortedActiveLibraryTracks;
-  const activeLibraryCollections = showingAllLibrary
-    ? [...echoCollections, ...localCollections]
-    : librarySource === 'echo'
+      ? [
+        ...(echoConnectionEnabled ? queryFilteredEchoTracks : []),
+        ...queryFilteredLocalTracks,
+        ...(powerampRemoteEnabled ? queryFilteredPowerampTracks : []),
+      ]
+      : librarySource === 'local'
+        ? visibleLocalTracks
+        : librarySource === 'remote' ? visiblePowerampTracks : organizedEchoTracks;
+  const activeLibraryTracks = browsingCollections
+    ? []
+    : selectedLibraryCollectionId && libraryAlbumSort !== 'default'
+    ? libraryAlbumSort === 'track'
+      ? sortTracksByAlbumOrder(sourceLibraryTracks)
+      : [...sourceLibraryTracks].sort((a, b) => {
+        if (libraryAlbumSort === 'duration') return a.durationMs - b.durationMs || a.title.localeCompare(b.title);
+        const left = libraryAlbumSort === 'artist' ? a.artist : a.title;
+        const right = libraryAlbumSort === 'artist' ? b.artist : b.title;
+        return left.localeCompare(right) || a.title.localeCompare(b.title);
+      })
+    : sourceLibraryTracks;
+  const activeLibraryCollections = browsingCollections
+    ? librarySource === 'echo'
       ? echoLibraryView === 'albums' ? echoCollections : echoLibraryView === 'artists' ? echoArtistCollections : []
       : librarySource === 'local'
         ? localLibraryView === 'albums' ? localCollections : localLibraryView === 'artists' ? localArtistCollections : []
-        : [];
+        : librarySource === 'remote'
+          ? powerampLibraryView === 'albums' ? powerampCollections : powerampLibraryView === 'artists' ? powerampArtistCollections : []
+          : []
+    : [];
+  const libraryPaginationKind = selectedLibraryCollectionId
+    ? 'tracks'
+    : librarySource === 'streaming' && streamingLibraryMode === 'playlists' && !selectedStreamingPlaylistId
+      ? 'streamingPlaylists'
+      : activeLibraryCollections.length > 0 ? 'collections' : 'tracks';
   const activeLibraryTotal = activeLibraryTracks.length;
   const libraryPageSize = 20;
-  const libraryTotalPages = Math.max(1, Math.ceil(activeLibraryTotal / libraryPageSize));
+  const libraryPaginationTotal = libraryPaginationKind === 'collections'
+    ? activeLibraryCollections.length
+    : libraryPaginationKind === 'streamingPlaylists'
+      ? queryFilteredStreamingPlaylists.length
+      : activeLibraryTotal;
+  const libraryPaginationScope = libraryPaginationKind === 'collections'
+    ? 'collections'
+    : libraryPaginationKind === 'streamingPlaylists' ? 'streaming' : 'tracks';
+  const libraryTotalPages = Math.max(1, Math.ceil(libraryPaginationTotal / libraryPageSize));
   const effectiveLibraryPageIndex = Math.min(libraryPageIndex, libraryTotalPages - 1);
   const libraryPageStart = libraryExpanded ? effectiveLibraryPageIndex * libraryPageSize : 0;
   const displayedLibraryTracks = activeLibraryTracks.slice(libraryPageStart, libraryPageStart + libraryPageSize);
+  const displayedLibraryCollections = activeLibraryCollections.slice(libraryPageStart, libraryPageStart + libraryPageSize);
+  const displayedStreamingPlaylists = queryFilteredStreamingPlaylists.slice(libraryPageStart, libraryPageStart + libraryPageSize);
+  const libraryIndexTitles = libraryPaginationKind === 'collections'
+    ? activeLibraryCollections.map((collection) => collection.title)
+    : libraryPaginationKind === 'streamingPlaylists'
+      ? queryFilteredStreamingPlaylists.map((playlist) => playlist.name)
+      : activeLibraryTracks.map((track) => track.title);
   const libraryArtworkLookupSignature = displayedLibraryTracks
     .map((track) => `${track.id}:${track.artworkUrl ?? ''}`)
     .join('|');
 
   useEffect(() => {
     if (page !== 'library' && page !== 'search') return undefined;
+    if (!externalMetadataSearchEnabled || (!lrcApiExternalDataEnabled && !neteaseExternalDataEnabled)) return undefined;
     let cancelled = false;
     void (async () => {
       for (const track of displayedLibraryTracks) {
         if (cancelled || artworkUrlIsVisible(resolveArtworkUrl(track.artworkUrl))) continue;
         const metadataKey = externalMetadataKeyForTrack(track);
         if (!metadataKey || artworkUrlIsVisible(resolveArtworkUrl(externalMetadataByKey[metadataKey]?.albumArt))) continue;
+        const isLocalTrackWithLyrics = 'hasLyrics' in track && Boolean((track as LocalMusicTrack).hasLyrics);
+        if (externalMetadataSkipExisting && (isLocalTrackWithLyrics || Boolean(externalMetadataByKey[metadataKey]?.lyrics?.trim()))) continue;
         const lookupKey = `library-artwork:${metadataKey}`;
         if (libraryArtworkLookupKeysRef.current.has(lookupKey)) continue;
         libraryArtworkLookupKeysRef.current.add(lookupKey);
@@ -3115,7 +3682,7 @@ function EchoLinkApp(): ReactElement {
           const candidates = await lookupExternalMetadataCandidates(track, {
             lrcapi: lrcApiExternalDataEnabled,
             lrclib: false,
-            netease: true,
+            netease: neteaseExternalDataEnabled,
           }, { includeNeteaseLyrics: false });
           if (cancelled) return;
           const candidate = candidates.find((item) => item.source === 'netease' && item.albumArt)
@@ -3144,8 +3711,12 @@ function EchoLinkApp(): ReactElement {
     return () => { cancelled = true; };
   }, [
     externalMetadataRefreshToken,
+    externalMetadataSearchEnabled,
+    externalMetadataSkipExisting,
+    externalMetadataByKey,
     libraryArtworkLookupSignature,
     lrcApiExternalDataEnabled,
+    neteaseExternalDataEnabled,
     page,
   ]);
   const localGroupLabel = useCallback((track: LocalMusicTrack): string | null => {
@@ -3481,6 +4052,7 @@ function EchoLinkApp(): ReactElement {
           positionMs,
           volume: phoneVolume,
         });
+        setDspPlaybackActive(true);
         setDspStatus(await echoAudioDsp.getStatus());
       } else {
         phonePlayer.replace({
@@ -3508,11 +4080,15 @@ function EchoLinkApp(): ReactElement {
       setPlaybackOutputMode('local');
       if (autoOpenLyricsForLocalTracks && track.hasLyrics) setLyricsVisible(true);
     } catch (localPlaybackError) {
-      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioError(formatPhoneAudioError(localPlaybackError));
+      if (devicePlaybackRequestRef.current === requestId) {
+        void stopDspPlayback();
+        void clearNativeNowPlaying();
+        setPhoneAudioError(formatPhoneAudioError(localPlaybackError));
+      }
     } finally {
       if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
     }
-  }, [autoOpenLyricsForLocalTracks, eqGains, loudnessNormalizationEnabled, markLocalTrackPlayed, phonePlayer, phoneVolume]);
+  }, [autoOpenLyricsForLocalTracks, clearNativeNowPlaying, eqGains, loudnessNormalizationEnabled, markLocalTrackPlayed, phonePlayer, phoneVolume, stopDspPlayback]);
 
   const playNeteaseTrack = useCallback(async (track: EchoLinkTrackPreview, positionMs = 0) => {
     if (!streamingApiBaseUrl || !streamingCookie || !streamingSessionMatchesApi) {
@@ -3533,7 +4109,7 @@ function EchoLinkApp(): ReactElement {
         ? await downloadStreamForDsp(url, track, 'netease')
         : null;
       if (devicePlaybackRequestRef.current !== requestId) return;
-      if (echoAudioDsp.isAvailable) await echoAudioDsp.stop().catch(() => undefined);
+      await stopDspPlayback();
       phonePlayer.pause();
       if (echoAudioDsp.isAvailable && cachedStreamUri) {
         phonePlayer.clearLockScreenControls();
@@ -3543,8 +4119,10 @@ function EchoLinkApp(): ReactElement {
           positionMs,
           volume: phoneVolume,
         });
+        setDspPlaybackActive(true);
         setDspStatus(await echoAudioDsp.getStatus());
       } else {
+        await clearNativeNowPlaying();
         phonePlayer.replace({ name: `${track.title} - ${track.artist}`, uri: url });
         phonePlayer.volume = phoneVolume;
         phonePlayer.setActiveForLockScreen(true, {
@@ -3564,12 +4142,16 @@ function EchoLinkApp(): ReactElement {
       setPlaybackOutputMode('streaming');
       switchPage('control');
     } catch (streamingError) {
-      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioError(formatPhoneAudioError(streamingError));
+      if (devicePlaybackRequestRef.current === requestId) {
+        void stopDspPlayback();
+        void clearNativeNowPlaying();
+        setPhoneAudioError(formatPhoneAudioError(streamingError));
+      }
     } finally {
       endStreamingBusy();
       if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
     }
-  }, [appLanguage, beginStreamingBusy, endStreamingBusy, eqGains, loudnessNormalizationEnabled, phonePlayer, phoneVolume, streamingApiBaseUrl, streamingCookie, streamingSessionMatchesApi, switchPage]);
+  }, [appLanguage, beginStreamingBusy, clearNativeNowPlaying, endStreamingBusy, eqGains, loudnessNormalizationEnabled, phonePlayer, phoneVolume, stopDspPlayback, streamingApiBaseUrl, streamingCookie, streamingSessionMatchesApi, switchPage]);
 
   const switchToStreamingPlayback = useCallback(() => {
     if (isStreamingOutput) return;
@@ -3636,8 +4218,11 @@ function EchoLinkApp(): ReactElement {
           positionMs,
           volume: nextVolume,
         });
+        setDspPlaybackActive(true);
         setDspStatus(await echoAudioDsp.getStatus());
       } else {
+        await stopDspPlayback();
+        await clearNativeNowPlaying();
         phonePlayer.replace({
           name: `${stream.track.title} - ${stream.track.artist}`,
           uri: stream.streamUrl,
@@ -3660,6 +4245,7 @@ function EchoLinkApp(): ReactElement {
       if (devicePlaybackRequestRef.current !== requestId) return;
       setPhoneTrack(stream.track);
       setPlaybackOutputMode('phone');
+      markEchoTrackPlayed(stream.track.id);
 
       if (pausePcAfterStart && (status?.playback.state === 'playing' || status?.playback.state === 'loading')) {
         void client.sendPlaybackCommand({ command: 'playPause' })
@@ -3667,11 +4253,128 @@ function EchoLinkApp(): ReactElement {
           .catch((handoffError) => setPhoneAudioError(formatPhoneAudioError(handoffError)));
       }
     } catch (phoneError) {
-      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioError(formatPhoneAudioError(phoneError));
+      if (devicePlaybackRequestRef.current === requestId) {
+        void stopDspPlayback();
+        void clearNativeNowPlaying();
+        setPhoneAudioError(formatPhoneAudioError(phoneError));
+      }
     } finally {
       if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
     }
-  }, [applyStatus, client, connection.host, connection.port, eqGains, isDeviceOutput, loudnessNormalizationEnabled, phonePlayer, phoneVolume, status, text.echoNotConnected, text.streamUnsupportedMessage]);
+  }, [applyStatus, clearNativeNowPlaying, client, connection.host, connection.port, eqGains, isDeviceOutput, loudnessNormalizationEnabled, markEchoTrackPlayed, phonePlayer, phoneVolume, status, stopDspPlayback, text.echoNotConnected, text.streamUnsupportedMessage]);
+
+  const playPowerampTrackOnPhone = useCallback(async (track: PowerampRemoteTrack, positionMs = 0) => {
+    if (!powerampClient) {
+      setPhoneAudioError(languageIsEnglish ? 'Connect Poweramp Remote in Settings first.' : '请先在设置中连接 Poweramp 远程服务。');
+      return;
+    }
+    if (!track.canPlayOnPhone) {
+      setPhoneAudioError(text.streamUnsupportedMessage);
+      return;
+    }
+    const requestId = ++devicePlaybackRequestRef.current;
+    setPhoneAudioBusy(true);
+    setPhoneAudioError(null);
+    setPhoneSeekPreviewMs(null);
+    try {
+      const stream = await powerampClient.createStream(track.id);
+      const cachedStreamUri = echoAudioDsp.isAvailable
+        ? await downloadStreamForDsp(stream.streamUrl, stream.track, `poweramp-${powerampConnection?.host ?? 'remote'}`)
+        : null;
+      if (devicePlaybackRequestRef.current !== requestId) return;
+      phonePlayer.pause();
+      if (echoAudioDsp.isAvailable && cachedStreamUri) {
+        phonePlayer.clearLockScreenControls();
+        await echoAudioDsp.playFile(cachedStreamUri, {
+          gains: eqGains,
+          loudnessEnabled: loudnessNormalizationEnabled,
+          positionMs,
+          volume: phoneVolume,
+        });
+        setDspPlaybackActive(true);
+        setDspStatus(await echoAudioDsp.getStatus());
+      } else {
+        await stopDspPlayback();
+        await clearNativeNowPlaying();
+        phonePlayer.replace({ name: `${stream.track.title} - ${stream.track.artist}`, uri: stream.streamUrl });
+        phonePlayer.volume = phoneVolume;
+        phonePlayer.setActiveForLockScreen(true, {
+          albumTitle: stream.track.album,
+          artist: stream.track.artist,
+          artworkUrl: stream.track.artworkUrl ?? undefined,
+          title: stream.track.title,
+        }, { showSeekBackward: true, showSeekForward: true });
+        if (positionMs > 0) await phonePlayer.seekTo(positionMs / 1000).catch(() => undefined);
+        phonePlayer.play();
+      }
+      if (devicePlaybackRequestRef.current !== requestId) return;
+      setPowerampStreamTrack(stream.track);
+      setPlaybackOutputMode('remoteStream');
+      markPowerampTrackPlayed(stream.track.id);
+      switchPage('control');
+    } catch (remoteError) {
+      if (devicePlaybackRequestRef.current === requestId) {
+        void stopDspPlayback();
+        void clearNativeNowPlaying();
+        setPhoneAudioError(formatPhoneAudioError(remoteError));
+      }
+    } finally {
+      if (devicePlaybackRequestRef.current === requestId) setPhoneAudioBusy(false);
+    }
+  }, [clearNativeNowPlaying, echoAudioDsp.isAvailable, eqGains, languageIsEnglish, loudnessNormalizationEnabled, markPowerampTrackPlayed, phonePlayer, phoneVolume, powerampClient, powerampConnection?.host, stopDspPlayback, switchPage, text.streamUnsupportedMessage]);
+
+  const playPowerampTrackOnDevice = useCallback((track: PowerampRemoteTrack) => {
+    if (!powerampClient) {
+      setLibrarySource('remote');
+      switchPage('settings');
+      return;
+    }
+    void sendPowerampCommand({ command: 'playTrack', trackId: track.id }).then((nextStatus) => {
+      if (!nextStatus) return;
+      devicePlaybackRequestRef.current += 1;
+      phonePlayer.pause();
+      phonePlayer.clearLockScreenControls();
+      void stopDspPlayback();
+      setPowerampStreamTrack(null);
+      setPlaybackOutputMode('remoteControl');
+      markPowerampTrackPlayed(track.id);
+    });
+  }, [markPowerampTrackPlayed, phonePlayer, powerampClient, sendPowerampCommand, stopDspPlayback, switchPage]);
+
+  const playPowerampTrack = useCallback((track: PowerampRemoteTrack, positionMs = 0) => {
+    if (playbackOutputMode === 'remoteControl') {
+      playPowerampTrackOnDevice(track);
+      return;
+    }
+    void playPowerampTrackOnPhone(track, positionMs);
+  }, [playPowerampTrackOnDevice, playPowerampTrackOnPhone, playbackOutputMode]);
+
+  const switchToPowerampStream = useCallback(() => {
+    if (isPowerampStreamOutput) return;
+    const track = powerampStreamTrack ?? powerampNowPlaying ?? powerampTracks[0];
+    if (!track) {
+      setLibrarySource('remote');
+      switchPage(powerampClient ? 'library' : 'settings');
+      return;
+    }
+    void playPowerampTrackOnPhone(track, 0);
+  }, [isPowerampStreamOutput, playPowerampTrackOnPhone, powerampClient, powerampNowPlaying, powerampStreamTrack, powerampTracks, switchPage]);
+
+  const switchToPowerampControl = useCallback(() => {
+    if (isPowerampControlOutput) return;
+    if (!powerampClient) {
+      setLibrarySource('remote');
+      switchPage('settings');
+      return;
+    }
+    const track = powerampNowPlaying ?? powerampTracks[0];
+    if (track) {
+      playPowerampTrackOnDevice(track);
+    } else {
+      setLibrarySource('remote');
+      switchPage('library');
+    }
+  }, [isPowerampControlOutput, playPowerampTrackOnDevice, powerampClient, powerampNowPlaying, powerampTracks, switchPage]);
 
   const switchToPhonePlayback = useCallback(() => {
     if (isPhoneOutput) {
@@ -3701,7 +4404,7 @@ function EchoLinkApp(): ReactElement {
       return;
     }
     const track = phoneTrack ?? nowPlaying;
-    const positionMs = Math.max(0, Math.round((echoAudioDsp.isAvailable ? dspStatus.currentTime : phonePlayerStatus.currentTime) * 1000));
+    const positionMs = Math.max(0, Math.round((useDspPlayback ? dspStatus.currentTime : phonePlayerStatus.currentTime) * 1000));
 
     if (isPhoneOutput && track) {
       const requestId = ++devicePlaybackRequestRef.current;
@@ -3717,7 +4420,7 @@ function EchoLinkApp(): ReactElement {
           setActivePlaybackPlaylistId(null);
           phonePlayer.pause();
           phonePlayer.clearLockScreenControls();
-          if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+          void stopDspPlayback();
           setPlaybackOutputMode('pc');
           setPhoneSeekPreviewMs(null);
           setPhoneAudioError(null);
@@ -3729,13 +4432,17 @@ function EchoLinkApp(): ReactElement {
     setPhoneAudioBusy(false);
     phonePlayer.pause();
     phonePlayer.clearLockScreenControls();
-    if (echoAudioDsp.isAvailable) void echoAudioDsp.stop().catch(() => undefined);
+    void stopDspPlayback();
     setPlaybackOutputMode('pc');
     setPhoneSeekPreviewMs(null);
     setPhoneAudioError(null);
-  }, [client, dspStatus.currentTime, isPhoneOutput, nowPlaying, phonePlayer, phonePlayerStatus.currentTime, phoneTrack, playbackOutputMode, sendCommand, switchPage]);
+  }, [client, dspStatus.currentTime, isPhoneOutput, nowPlaying, phonePlayer, phonePlayerStatus.currentTime, phoneTrack, playbackOutputMode, sendCommand, stopDspPlayback, switchPage, useDspPlayback]);
 
   const togglePlayPause = useCallback(() => {
+    if (isPowerampControlOutput) {
+      void sendPowerampCommand({ command: 'playPause' });
+      return;
+    }
     if (isDeviceOutput) {
       if (isLocalOutput && !localTrack) {
         switchToLocalPlayback();
@@ -3749,7 +4456,11 @@ function EchoLinkApp(): ReactElement {
         switchToStreamingPlayback();
         return;
       }
-      if (echoAudioDsp.isAvailable) {
+      if (isPowerampStreamOutput && !powerampStreamTrack) {
+        switchToPowerampStream();
+        return;
+      }
+      if (useDspPlayback) {
         void (dspStatus.playing ? echoAudioDsp.pause() : echoAudioDsp.resume())
           .then(() => echoAudioDsp.getStatus())
           .then(setDspStatus)
@@ -3766,16 +4477,22 @@ function EchoLinkApp(): ReactElement {
     isDeviceOutput,
     isLocalOutput,
     isPhoneOutput,
+    isPowerampControlOutput,
+    isPowerampStreamOutput,
     isStreamingOutput,
     localTrack,
     dspStatus.playing,
     phonePlayer,
     phonePlayerStatus.playing,
     phoneTrack,
+    powerampStreamTrack,
     sendCommand,
+    sendPowerampCommand,
     switchToLocalPlayback,
     switchToPhonePlayback,
+    switchToPowerampStream,
     switchToStreamingPlayback,
+    useDspPlayback,
   ]);
 
   const playRelativePhoneQueueTrack = useCallback((direction: -1 | 1) => {
@@ -3809,9 +4526,25 @@ function EchoLinkApp(): ReactElement {
     void playNeteaseTrack(nextTrack, 0);
   }, [appLanguage, playNeteaseTrack, streamingTrack?.id, streamingTracks]);
 
+  const playRelativePowerampTrack = useCallback((direction: -1 | 1) => {
+    if (isPowerampControlOutput) {
+      void sendPowerampCommand({ command: direction > 0 ? 'next' : 'previous' });
+      return;
+    }
+    const currentIndex = powerampTracks.findIndex((item) => item.id === powerampStreamTrack?.id);
+    const nextTrack = currentIndex >= 0 ? powerampTracks[currentIndex + direction] : powerampTracks[0];
+    if (!nextTrack) {
+      setPhoneAudioError(appLanguage === 'en' ? 'No more Poweramp tracks.' : '没有更多 Poweramp 歌曲');
+      return;
+    }
+    void playPowerampTrackOnPhone(nextTrack, 0);
+  }, [appLanguage, isPowerampControlOutput, playPowerampTrackOnPhone, powerampStreamTrack?.id, powerampTracks, sendPowerampCommand]);
+
   const playRelativeSavedPlaylistTrack = useCallback((direction: -1 | 1) => {
     if (!activePlaybackPlaylist) return;
-    const currentSource = isLocalOutput ? 'local' : 'echo';
+    const currentSource = isPowerampControlOutput || isPowerampStreamOutput
+      ? 'remote'
+      : isLocalOutput ? 'local' : 'echo';
     const currentIndex = activePlaybackPlaylist.tracks.findIndex((item) => (
       item.id === displayTrack?.id && item.source === currentSource
     ));
@@ -3827,12 +4560,22 @@ function EchoLinkApp(): ReactElement {
       if (localItem) void playTrackOnLocal(localItem, 0);
       return;
     }
+    if (nextTrack.source === 'remote') {
+      const remoteItem = powerampTracks.find((item) => item.id === nextTrack.id);
+      if (!remoteItem) return;
+      if (isPowerampControlOutput) {
+        playPowerampTrackOnDevice(remoteItem);
+      } else {
+        void playPowerampTrackOnPhone(remoteItem, 0);
+      }
+      return;
+    }
     if (isPhoneOutput && nextTrack.canPlayOnPhone) {
       void playTrackOnPhone(nextTrack, 0, false);
     } else {
       playTrackOnPc(nextTrack);
     }
-  }, [activePlaybackPlaylist, appLanguage, displayTrack?.id, isLocalOutput, isPhoneOutput, localTracks, playTrackOnLocal, playTrackOnPhone, playTrackOnPc]);
+  }, [activePlaybackPlaylist, appLanguage, displayTrack?.id, isLocalOutput, isPhoneOutput, isPowerampControlOutput, isPowerampStreamOutput, localTracks, playPowerampTrackOnDevice, playPowerampTrackOnPhone, playTrackOnLocal, playTrackOnPhone, playTrackOnPc, powerampTracks]);
 
   const playPrevious = useCallback(() => {
     if (activePlaybackPlaylist) {
@@ -3851,8 +4594,12 @@ function EchoLinkApp(): ReactElement {
       playRelativeStreamingTrack(-1);
       return;
     }
+    if (isPowerampControlOutput || isPowerampStreamOutput) {
+      playRelativePowerampTrack(-1);
+      return;
+    }
     void sendCommand({ command: 'previous' });
-  }, [activePlaybackPlaylist, isLocalOutput, isPhoneOutput, isStreamingOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, playRelativeSavedPlaylistTrack, playRelativeStreamingTrack, sendCommand]);
+  }, [activePlaybackPlaylist, isLocalOutput, isPhoneOutput, isPowerampControlOutput, isPowerampStreamOutput, isStreamingOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, playRelativePowerampTrack, playRelativeSavedPlaylistTrack, playRelativeStreamingTrack, sendCommand]);
 
   const playNext = useCallback(() => {
     if (activePlaybackPlaylist) {
@@ -3871,8 +4618,12 @@ function EchoLinkApp(): ReactElement {
       playRelativeStreamingTrack(1);
       return;
     }
+    if (isPowerampControlOutput || isPowerampStreamOutput) {
+      playRelativePowerampTrack(1);
+      return;
+    }
     void sendCommand({ command: 'next' });
-  }, [activePlaybackPlaylist, isLocalOutput, isPhoneOutput, isStreamingOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, playRelativeSavedPlaylistTrack, playRelativeStreamingTrack, sendCommand]);
+  }, [activePlaybackPlaylist, isLocalOutput, isPhoneOutput, isPowerampControlOutput, isPowerampStreamOutput, isStreamingOutput, playRelativeLocalTrack, playRelativePhoneQueueTrack, playRelativePowerampTrack, playRelativeSavedPlaylistTrack, playRelativeStreamingTrack, sendCommand]);
 
   useEffect(() => {
     if (!repeatOneEnabled || !isDeviceOutput || !deviceTrack) {
@@ -4002,7 +4753,7 @@ function EchoLinkApp(): ReactElement {
   ]);
 
   const seekToPosition = useCallback((requestedPositionMs: number, commit: boolean) => {
-    if ((!status && !isDeviceOutput) || !playbackDurationMs) {
+    if ((!status && !powerampStatus && !isDeviceOutput) || !playbackDurationMs) {
       return;
     }
     const positionMs = Math.max(0, Math.min(playbackDurationMs, Math.round(requestedPositionMs)));
@@ -4020,6 +4771,10 @@ function EchoLinkApp(): ReactElement {
       }
       return;
     }
+    if (isPowerampControlOutput) {
+      if (commit) void sendPowerampCommand({ command: 'seekTo', positionMs });
+      return;
+    }
     sliderInteractionInFlight.current = true;
     patchPlayback({ positionMs });
     if (commit) {
@@ -4032,7 +4787,7 @@ function EchoLinkApp(): ReactElement {
         sliderInteractionInFlight.current = false;
       });
     }
-  }, [isDeviceOutput, patchPlayback, phonePlayer, playbackDurationMs, sendCommand, status, useDspPlayback]);
+  }, [isDeviceOutput, isPowerampControlOutput, patchPlayback, phonePlayer, playbackDurationMs, powerampStatus, sendCommand, sendPowerampCommand, status, useDspPlayback]);
 
   const updateSeekFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
     if (progressTrackWidth <= 0) {
@@ -4041,8 +4796,42 @@ function EchoLinkApp(): ReactElement {
     seekToPosition(playbackDurationMs * ratioFromGesture(event, progressTrackWidth), commit);
   }, [playbackDurationMs, progressTrackWidth, seekToPosition]);
 
+  nativeRemoteCommandHandlerRef.current = (command) => {
+    switch (command.action) {
+      case 'next':
+        playNext();
+        break;
+      case 'pause':
+        if (isPlaybackActive) togglePlayPause();
+        break;
+      case 'play':
+        if (!isPlaybackActive) togglePlayPause();
+        break;
+      case 'previous':
+        playPrevious();
+        break;
+      case 'seek':
+        if (typeof command.positionSeconds === 'number' && Number.isFinite(command.positionSeconds)) {
+          seekToPosition(command.positionSeconds * 1000, true);
+        }
+        break;
+      case 'toggle':
+        togglePlayPause();
+        break;
+    }
+  };
+
+  useEffect(() => {
+    const subscription = echoAudioDsp.addRemoteCommandListener((command) => {
+      nativeRemoteCommandHandlerRef.current(command);
+    });
+    return () => {
+      subscription?.remove();
+    };
+  }, []);
+
   const seekToLyric = useCallback((line: LyricLine) => {
-    if (line.timeMs === null || (!status && !isDeviceOutput)) {
+    if (line.timeMs === null || (!status && !powerampStatus && !isDeviceOutput)) {
       return;
     }
     if (isDeviceOutput) {
@@ -4056,6 +4845,10 @@ function EchoLinkApp(): ReactElement {
       }
       return;
     }
+    if (isPowerampControlOutput) {
+      void sendPowerampCommand({ command: 'seekTo', positionMs: line.timeMs });
+      return;
+    }
     pendingPcSeekRef.current = {
       positionMs: line.timeMs,
       requestedAtMs: Date.now(),
@@ -4063,10 +4856,10 @@ function EchoLinkApp(): ReactElement {
     };
     patchPlayback({ positionMs: line.timeMs });
     void sendCommand({ command: 'seekTo', positionMs: line.timeMs });
-  }, [isDeviceOutput, patchPlayback, phonePlayer, sendCommand, status, useDspPlayback]);
+  }, [isDeviceOutput, isPowerampControlOutput, patchPlayback, phonePlayer, powerampStatus, sendCommand, sendPowerampCommand, status, useDspPlayback]);
 
   const setPlaybackVolume = useCallback((requestedVolume: number, commit: boolean) => {
-    if (!status && !isDeviceOutput) {
+    if (!status && !powerampStatus && !isDeviceOutput) {
       return;
     }
     const volume = clamp01(requestedVolume);
@@ -4082,12 +4875,16 @@ function EchoLinkApp(): ReactElement {
       }
       return;
     }
+    if (isPowerampControlOutput) {
+      if (commit) void sendPowerampCommand({ command: 'setVolume', volume });
+      return;
+    }
     sliderInteractionInFlight.current = !commit;
     patchPlayback({ volume });
     if (commit) {
       void sendCommand({ command: 'setVolume', volume });
     }
-  }, [isDeviceOutput, patchPlayback, phonePlayer, sendCommand, status, useDspPlayback]);
+  }, [isDeviceOutput, isPowerampControlOutput, patchPlayback, phonePlayer, powerampStatus, sendCommand, sendPowerampCommand, status, useDspPlayback]);
 
   const updateVolumeFromGesture = useCallback((event: GestureResponderEvent, commit: boolean) => {
     if (volumeTrackWidth <= 0) {
@@ -4124,7 +4921,11 @@ function EchoLinkApp(): ReactElement {
     ? text.localMode
     : isStreamingOutput
       ? (languageIsEnglish ? 'Streaming Service' : '流媒体播放')
-    : isPhoneOutput
+      : isPowerampStreamOutput
+        ? (languageIsEnglish ? 'Poweramp Stream' : 'Poweramp 串流')
+        : isPowerampControlOutput
+          ? (languageIsEnglish ? 'Poweramp Control' : 'Poweramp 控制')
+      : isPhoneOutput
       ? text.streamingMode
       : text.controllingMode;
   const pageAnimatedStyle = {
@@ -4152,14 +4953,18 @@ function EchoLinkApp(): ReactElement {
   ];
   const connectPanelOptions: Array<[ConnectPanelMode, string]> = [
     ['echo', text.connectEcho],
-    ['streaming', text.streamingServices],
   ];
-  const librarySourceSettingOptions: Array<[LibrarySource, string]> = [
-    ['all', text.all],
-    ['echo', text.echoLibrary],
-    ['local', text.localLibrary],
-    ['streaming', text.streamingServices],
-  ];
+  if (showPowerampRemoteConnection) connectPanelOptions.push(['remote', text.powerampRemote]);
+  connectPanelOptions.push(['streaming', text.streamingServices]);
+  const fallbackLibrarySourceOptions: Array<[LibrarySource, string]> = [];
+  if (echoConnectionEnabled) fallbackLibrarySourceOptions.push(['echo', `${text.echoLibrary} ${tracks.length}`]);
+  fallbackLibrarySourceOptions.push(['local', `${text.localLibrary} ${localTracks.length}`]);
+  if (powerampRemoteEnabled) fallbackLibrarySourceOptions.push(['remote', `${text.remoteLibrary} ${powerampTracks.length}`]);
+  const librarySourceSettingOptions: Array<[LibrarySource, string]> = [['all', text.all]];
+  if (echoConnectionEnabled) librarySourceSettingOptions.push(['echo', text.echoLibrary]);
+  librarySourceSettingOptions.push(['local', text.localLibrary]);
+  if (powerampRemoteEnabled) librarySourceSettingOptions.push(['remote', text.remoteLibrary]);
+  librarySourceSettingOptions.push(['streaming', text.streamingServices]);
   const labelForLocalLibraryView = useCallback((view: LocalLibraryView) => {
     const labels: Record<LocalLibraryView, string> = {
       albums: text.albums,
@@ -4192,21 +4997,31 @@ function EchoLinkApp(): ReactElement {
     {
       description: text.externalDataDescription,
       key: 'externalData',
-      summary: [
-        externalDataSelectionMode === 'ask'
-          ? (languageIsEnglish ? 'Ask' : '每次选择')
-          : (languageIsEnglish ? 'Auto' : '自动匹配'),
-        lrcApiExternalDataEnabled ? 'LrcAPI' : null,
-        lrclibExternalDataEnabled ? 'LRCLIB' : null,
-        neteaseExternalDataEnabled ? (languageIsEnglish ? 'NetEase' : '网易云') : null,
-      ].filter(Boolean).join(' · ') || (languageIsEnglish ? 'Off' : '关闭'),
+      summary: externalMetadataSearchEnabled
+        ? [
+          externalDataSelectionMode === 'ask'
+            ? (languageIsEnglish ? 'Ask' : '每次选择')
+            : (languageIsEnglish ? 'Auto' : '自动匹配'),
+          lrcApiExternalDataEnabled ? 'LrcAPI' : null,
+          lrclibExternalDataEnabled ? 'LRCLIB' : null,
+          neteaseExternalDataEnabled ? (languageIsEnglish ? 'NetEase' : '网易云') : null,
+        ].filter(Boolean).join(' · ')
+        : (languageIsEnglish ? 'Off' : '关闭'),
       title: text.externalData,
     },
     {
       description: text.librarySettingsDescription,
       key: 'library',
-      summary: `${librarySourceSettingOptions.find(([value]) => value === defaultLibrarySource)?.[1] ?? text.echoLibrary} · ${labelForLocalLibraryView(defaultLocalLibraryView)}`,
+      summary: `${librarySourceSettingOptions.find(([value]) => value === defaultLibrarySource)?.[1] ?? text.localLibrary} · ${labelForLocalLibraryView(defaultLocalLibraryView)}`,
       title: text.library,
+    },
+    {
+      description: text.powerampRemoteVisibilityDescription,
+      key: 'remote',
+      summary: showPowerampRemoteConnection
+        ? (languageIsEnglish ? 'Visible' : '已显示')
+        : (languageIsEnglish ? 'Off' : '关闭'),
+      title: text.remoteLibrary,
     },
     {
       description: text.audioTagsDescription,
@@ -4230,6 +5045,7 @@ function EchoLinkApp(): ReactElement {
     labelForLocalLibraryView,
     languageIsEnglish,
     externalDataSelectionMode,
+    externalMetadataSearchEnabled,
     localStorageBytes,
     loudnessNormalizationEnabled,
     lrcApiExternalDataEnabled,
@@ -4238,6 +5054,7 @@ function EchoLinkApp(): ReactElement {
     neteaseAccessMode,
     pageSettingOptions,
     showArtworkGlow,
+    showPowerampRemoteConnection,
     text,
     visibleAudioTagCount,
   ]);
@@ -4395,6 +5212,7 @@ function EchoLinkApp(): ReactElement {
           return next;
         });
         setPendingExternalMetadataSelection(null);
+        setExternalMetadataManualRefreshKey(externalMetadataKey);
         setExternalMetadataRefreshToken((value) => value + 1);
         break;
       }
@@ -4405,7 +5223,9 @@ function EchoLinkApp(): ReactElement {
         setLyricsVisible(false);
         break;
       case 'librarySource':
-        if (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'streaming') {
+        if (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'remote' || action.selection === 'streaming') {
+          if (action.selection === 'echo' && !echoConnectionEnabled) break;
+          if (action.selection === 'remote' && !powerampRemoteEnabled) break;
           if (action.selection !== librarySource) setQuery('');
           setLibrarySource(action.selection);
           setLibraryExpanded(false);
@@ -4419,6 +5239,7 @@ function EchoLinkApp(): ReactElement {
           setStreamingLibraryMode(action.selection);
           setStreamingTracks([]);
           setSelectedStreamingPlaylistId(null);
+          setLibraryExpanded(false);
           setLibraryPageIndex(0);
         }
         break;
@@ -4427,6 +5248,7 @@ function EchoLinkApp(): ReactElement {
           beginStreamingBusy();
           setQuery('');
           setSelectedStreamingPlaylistId(action.id);
+          setLibraryExpanded(false);
           setLibraryPageIndex(0);
           void getNeteasePlaylistTracks(streamingApiBaseUrl, streamingCookie, action.id)
             .then(setStreamingTracks)
@@ -4451,6 +5273,8 @@ function EchoLinkApp(): ReactElement {
       case 'libraryView':
         if (librarySource === 'echo' && echoLibraryViewOptions.includes(action.selection as EchoLibraryView)) {
           setEchoLibraryView(action.selection as EchoLibraryView);
+        } else if (librarySource === 'remote' && echoLibraryViewOptions.includes(action.selection as EchoLibraryView)) {
+          setPowerampLibraryView(action.selection as EchoLibraryView);
         } else if (localLibraryViewOptions.includes(action.selection as LocalLibraryView)) {
           setLocalLibraryView(action.selection as LocalLibraryView);
         }
@@ -4475,12 +5299,12 @@ function EchoLinkApp(): ReactElement {
         setLibraryExpanded(false);
         setLibraryPageIndex(0);
         setSelectedLibraryCollectionId(action.id ?? '');
-        if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration') {
+        if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration' || action.selection === 'track') {
           setLibraryAlbumSort(action.selection);
         }
         break;
       case 'libraryAlbumSort':
-        if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration') {
+        if (action.selection === 'default' || action.selection === 'title' || action.selection === 'artist' || action.selection === 'duration' || action.selection === 'track') {
           setLibraryAlbumSort(action.selection);
           setLibraryPageIndex(0);
         }
@@ -4494,6 +5318,12 @@ function EchoLinkApp(): ReactElement {
           setLibraryPageIndex(Math.max(0, Math.min(libraryTotalPages - 1, action.index)));
         }
         break;
+      case 'libraryIndex':
+        if (typeof action.index === 'number') {
+          setLibraryExpanded(true);
+          setLibraryPageIndex(Math.max(0, Math.min(libraryTotalPages - 1, action.index)));
+        }
+        break;
       case 'libraryRefresh':
         setFailedArtworkUrls(new Set());
         libraryArtworkLookupKeysRef.current.clear();
@@ -4504,8 +5334,10 @@ function EchoLinkApp(): ReactElement {
             .then(setStreamingPlaylists)
             .catch((streamingError) => setStreamingStatusText(formatRequestError(streamingError)))
             .finally(endStreamingBusy);
+        } else if (librarySource === 'remote') {
+          void refreshPowerampRemote();
         } else if (page === 'search' || librarySource === 'all') {
-          void Promise.all([refresh(), refreshLocalLibrary()]);
+          void Promise.all([refresh(), refreshLocalLibrary(), refreshPowerampRemote()]);
         } else if (librarySource === 'local') {
           void refreshLocalLibrary();
         } else {
@@ -4518,20 +5350,103 @@ function EchoLinkApp(): ReactElement {
       case 'libraryPlayFirst':
         switchToLocalPlayback();
         break;
+      case 'collectionPlay': {
+        const queueTracks = action.selection === 'track'
+          ? sortTracksByAlbumOrder(activeLibraryTracks)
+          : activeLibraryTracks;
+        if (action.source === 'local') {
+          const albumTracks = queueTracks
+            .map((track) => localTrackById.get(track.id))
+            .filter((track): track is LocalMusicTrack => Boolean(track));
+          const firstTrack = albumTracks[0];
+          if (!firstTrack) break;
+          setActivePlaybackPlaylistId(null);
+          setLocalQueueTrackIds(albumTracks.map((track) => track.id));
+          setLocalQueueActive(true);
+          void playTrackOnLocal(firstTrack, 0);
+          break;
+        }
+        if (action.source === 'remote') {
+          const albumTracks = queueTracks
+            .map((track) => powerampTrackById.get(track.id))
+            .filter((track): track is PowerampRemoteTrack => Boolean(track));
+          const firstTrack = albumTracks[0];
+          if (!firstTrack) break;
+          setActivePlaybackPlaylistId(null);
+          playPowerampTrack(firstTrack, 0);
+          break;
+        }
+        if (action.source === 'echo') {
+          const albumTracks = queueTracks
+            .map((track) => echoTrackById.get(track.id))
+            .filter((track): track is EchoLinkTrackPreview => Boolean(track));
+          const firstTrack = albumTracks[0];
+          if (!firstTrack) break;
+          setActivePlaybackPlaylistId(null);
+          if (client) {
+            replaceEchoQueue(albumTracks, firstTrack.id);
+          } else {
+            playTrackOnPc(firstTrack);
+          }
+        }
+        break;
+      }
+      case 'collectionPlaylistAdd':
+      case 'collectionPlaylistCreate': {
+        const collectionSource = action.source;
+        if (collectionSource !== 'echo' && collectionSource !== 'local' && collectionSource !== 'remote') break;
+        const collectionTracks: EchoLinkTrackPreview[] = collectionSource === 'local'
+          ? activeLibraryTracks
+            .map((track) => localTrackById.get(track.id))
+            .filter((track): track is LocalMusicTrack => Boolean(track))
+          : collectionSource === 'remote'
+            ? activeLibraryTracks
+              .map((track) => powerampTrackById.get(track.id))
+              .filter((track): track is PowerampRemoteTrack => Boolean(track))
+          : activeLibraryTracks
+            .map((track) => echoTrackById.get(track.id))
+            .filter((track): track is EchoLinkTrackPreview => Boolean(track));
+        const snapshots = collectionTracks.map((track) => playlistTrackFromPreview(track, collectionSource));
+        if (snapshots.length === 0) break;
+
+        if (action.action === 'collectionPlaylistCreate') {
+          const createdAt = Date.now();
+          setPlaylists((current) => [{
+            createdAt,
+            favorite: false,
+            id: `playlist-${createdAt}`,
+            name: action.text?.trim() || (languageIsEnglish ? 'Album' : '专辑'),
+            pinned: false,
+            tracks: snapshots,
+          }, ...current]);
+          break;
+        }
+
+        if (!action.playlistId) break;
+        setPlaylists((current) => current.map((playlist) => {
+          if (playlist.id !== action.playlistId) return playlist;
+          const existingTrackKeys = new Set(playlist.tracks.map((track) => `${track.source}:${track.id}`));
+          const additions = snapshots.filter((track) => !existingTrackKeys.has(`${track.source}:${track.id}`));
+          return additions.length > 0 ? { ...playlist, tracks: [...playlist.tracks, ...additions] } : playlist;
+        }));
+        break;
+      }
       case 'playlistCreate': {
         const name = action.text?.trim();
         if (!name) break;
         const createdAt = Date.now();
         const selectedTrack = action.source === 'local'
           ? localTracks.find((track) => track.id === action.id)
-          : action.source === 'echo' ? tracks.find((track) => track.id === action.id) : null;
+          : action.source === 'remote'
+            ? powerampTracks.find((track) => track.id === action.id)
+            : action.source === 'echo' ? tracks.find((track) => track.id === action.id) : null;
         setPlaylists((current) => [{
           createdAt,
           favorite: false,
           id: `playlist-${createdAt}`,
           name,
           pinned: false,
-          tracks: selectedTrack && (action.source === 'echo' || action.source === 'local')
+          tracks: selectedTrack && (action.source === 'echo' || action.source === 'local' || action.source === 'remote')
             ? [playlistTrackFromPreview(selectedTrack, action.source)]
             : [],
         }, ...current]);
@@ -4573,10 +5488,12 @@ function EchoLinkApp(): ReactElement {
         setActivePlaylistId(null);
         break;
       case 'playlistAddTrack': {
-        if (!action.playlistId || !action.id || (action.source !== 'echo' && action.source !== 'local')) break;
+        if (!action.playlistId || !action.id || (action.source !== 'echo' && action.source !== 'local' && action.source !== 'remote')) break;
         const track = action.source === 'local'
           ? localTracks.find((item) => item.id === action.id)
-          : tracks.find((item) => item.id === action.id);
+          : action.source === 'remote'
+            ? powerampTracks.find((item) => item.id === action.id)
+            : tracks.find((item) => item.id === action.id);
         if (!track) break;
         const snapshot = playlistTrackFromPreview(track, action.source);
         setPlaylists((current) => current.map((playlist) => {
@@ -4590,7 +5507,7 @@ function EchoLinkApp(): ReactElement {
         break;
       }
       case 'playlistRemoveTrack':
-        if (action.playlistId && action.trackId && (action.source === 'echo' || action.source === 'local')) {
+        if (action.playlistId && action.trackId && (action.source === 'echo' || action.source === 'local' || action.source === 'remote')) {
           setPlaylists((current) => current.map((playlist) => (
             playlist.id === action.playlistId
               ? {
@@ -4617,6 +5534,11 @@ function EchoLinkApp(): ReactElement {
           if (track) void playTrackOnLocal(track, 0);
           break;
         }
+        if (action.source === 'remote') {
+          const track = powerampTracks.find((item) => item.id === action.id);
+          if (track) playPowerampTrack(track, 0);
+          break;
+        }
         const track = tracks.find((item) => item.id === action.id)
           ?? playlists.flatMap((playlist) => playlist.tracks).find((item) => item.source === 'echo' && item.id === action.id);
         if (track) {
@@ -4629,8 +5551,29 @@ function EchoLinkApp(): ReactElement {
         break;
       }
       case 'trackFavorite': {
+        if (action.source === 'echo') {
+          if (action.id) toggleEchoFavorite(action.id);
+          break;
+        }
+        if (action.source === 'remote') {
+          if (action.id) togglePowerampFavorite(action.id);
+          break;
+        }
         const track = localTracks.find((item) => item.id === action.id);
         if (track) toggleLocalFavorite(track);
+        break;
+      }
+      case 'trackFavoriteCurrent':
+        toggleCurrentFavorite();
+        break;
+      case 'remoteTrackControl': {
+        const track = powerampTracks.find((item) => item.id === action.id);
+        if (track) playPowerampTrackOnDevice(track);
+        break;
+      }
+      case 'remoteTrackStream': {
+        const track = powerampTracks.find((item) => item.id === action.id);
+        if (track) void playPowerampTrackOnPhone(track, 0);
         break;
       }
       case 'trackQueue': {
@@ -4654,7 +5597,7 @@ function EchoLinkApp(): ReactElement {
         break;
       }
       case 'connectMode':
-        if (action.selection === 'echo' || action.selection === 'streaming') {
+        if (action.selection === 'echo' || action.selection === 'streaming' || (action.selection === 'remote' && showPowerampRemoteConnection)) {
           setConnectPanelMode(action.selection);
         }
         break;
@@ -4686,6 +5629,9 @@ function EchoLinkApp(): ReactElement {
       case 'echoConnectionEnabled':
         if (typeof action.enabled === 'boolean') setEchoConnectionEnabled(action.enabled);
         break;
+      case 'powerampRemoteEnabled':
+        if (typeof action.enabled === 'boolean') setPowerampRemoteEnabled(action.enabled);
+        break;
       case 'pairingText':
         setPairingText(action.text ?? '');
         break;
@@ -4694,6 +5640,9 @@ function EchoLinkApp(): ReactElement {
         break;
       case 'pairScanned':
         if (action.text) void applyPairingValue(action.text);
+        break;
+      case 'powerampPairScanned':
+        if (action.text) applyPowerampPairingValue(action.text);
         break;
       case 'connectionField':
         if (action.field === 'host') {
@@ -4710,9 +5659,14 @@ function EchoLinkApp(): ReactElement {
       case 'connectionTest':
         void refresh();
         break;
+      case 'powerampRemoteTest':
+        void refreshPowerampRemote();
+        break;
       case 'settingToggle':
         if (typeof action.enabled !== 'boolean') break;
         if (action.key === 'loudness') setLoudnessNormalizationEnabled(action.enabled);
+        if (action.key === 'externalMetadataSearch') setExternalMetadataSearchEnabled(action.enabled);
+        if (action.key === 'externalMetadataSkipExisting') setExternalMetadataSkipExisting(action.enabled);
         if (action.key === 'autoLyrics') setAutoOpenLyricsForLocalTracks(action.enabled);
         if (action.key === 'artworkGlow') setShowArtworkGlow(action.enabled);
         if (action.key === 'artworkBackground') setArtworkBackgroundEnabled(action.enabled);
@@ -4721,6 +5675,7 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'netease') setNeteaseExternalDataEnabled(action.enabled);
         if (action.key === 'autoQueueImports') setAutoQueueImportedLocalTracks(action.enabled);
         if (action.key === 'confirmDelete') setConfirmBeforeDeletingLocalTracks(action.enabled);
+        if (action.key === 'showPowerampRemoteConnection') setShowPowerampRemoteConnection(action.enabled);
         if (action.key?.startsWith('audioTag.')) {
           const key = action.key.slice('audioTag.'.length) as AudioTagKey;
           if (audioTagOptions.some((option) => option.key === key)) {
@@ -4735,7 +5690,7 @@ function EchoLinkApp(): ReactElement {
         if (action.key === 'defaultPage' && appPages.includes(action.selection as AppPage)) {
           setDefaultPage(action.selection as AppPage);
         }
-        if (action.key === 'defaultLibrarySource' && (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'streaming')) {
+        if (action.key === 'defaultLibrarySource' && (action.selection === 'all' || action.selection === 'echo' || action.selection === 'local' || action.selection === 'remote' || action.selection === 'streaming')) {
           setDefaultLibrarySource(action.selection);
           setLibrarySource(action.selection);
         }
@@ -4759,6 +5714,27 @@ function EchoLinkApp(): ReactElement {
         }
         if (action.key === 'clearRecent') setRecentLocalTrackIds([]);
         break;
+      case 'powerampRemoteSave': {
+        const host = normalizePowerampRemoteHost(action.host ?? '');
+        const token = normalizePowerampRemoteToken(action.token ?? '');
+        const port = Number(action.port ?? 0);
+        if (!host || !token || !Number.isInteger(port) || port < 1 || port > 65535) {
+          setPowerampError(languageIsEnglish ? 'Enter a valid Poweramp Remote address, port, and token.' : '请输入有效的 Poweramp 远程地址、端口和令牌。');
+          break;
+        }
+        const nextConnection: PowerampRemoteConnection = {
+          host,
+          name: action.name?.trim() || 'Poweramp',
+          port,
+          scheme: action.scheme === 'https' ? 'https' : 'http',
+          token,
+        };
+        setPowerampConnection(nextConnection);
+        setPowerampConnectionDraft(powerampConnectionDraftFrom(nextConnection));
+        setPowerampRemoteEnabled(true);
+        setPowerampError(null);
+        break;
+      }
       case 'next':
         playNext();
         break;
@@ -4767,6 +5743,8 @@ function EchoLinkApp(): ReactElement {
         if (action.mode === 'streaming') switchToStreamingPlayback();
         if (action.mode === 'pc') switchToPcPlayback();
         if (action.mode === 'phone') switchToPhonePlayback();
+        if (action.mode === 'remoteControl') switchToPowerampControl();
+        if (action.mode === 'remoteStream') switchToPowerampStream();
         break;
       case 'page':
         if (action.page) switchPage(action.page);
@@ -4791,6 +5769,11 @@ function EchoLinkApp(): ReactElement {
           if (track) void playTrackOnLocal(track, 0);
           break;
         }
+        if (action.source === 'remote') {
+          const track = powerampTracks.find((item) => item.id === action.id);
+          if (track) playPowerampTrack(track, 0);
+          break;
+        }
         const track = tracks.find((item) => item.id === action.id)
           ?? playlistItems.find((item) => item.id === action.id);
         if (track) {
@@ -4804,7 +5787,7 @@ function EchoLinkApp(): ReactElement {
       }
       case 'queueMove': {
         if (!action.id || (action.value !== -1 && action.value !== 1)) break;
-        if (action.playlistId && (action.source === 'echo' || action.source === 'local')) {
+        if (action.playlistId && (action.source === 'echo' || action.source === 'local' || action.source === 'remote')) {
           const playlist = playlists.find((item) => item.id === action.playlistId);
           const index = playlist?.tracks.findIndex((track) => track.id === action.id && track.source === action.source) ?? -1;
           const nextTracks = playlist ? moveItem(playlist.tracks, index, action.value as -1 | 1) : [];
@@ -4839,7 +5822,7 @@ function EchoLinkApp(): ReactElement {
       }
       case 'queueRemove':
         if (!action.id) break;
-        if (action.playlistId && (action.source === 'echo' || action.source === 'local')) {
+        if (action.playlistId && (action.source === 'echo' || action.source === 'local' || action.source === 'remote')) {
           const playlist = playlists.find((item) => item.id === action.playlistId);
           const nextTracks = playlist?.tracks.filter((track) => !(track.id === action.id && track.source === action.source)) ?? [];
           setPlaylists((current) => current.map((playlist) => playlist.id === action.playlistId
@@ -5034,10 +6017,35 @@ function EchoLinkApp(): ReactElement {
     if (section === 'externalData') {
       return (
         <View style={styles.settingsList}>
+          {renderSettingSwitch(
+            languageIsEnglish ? 'Search metadata online' : '从网络搜索元数据',
+            languageIsEnglish ? 'Search the enabled sources only when this is on, or when you refresh a track manually.' : '开启后才会自动查询已启用的来源；关闭时仅可通过播放器刷新按钮手动查询。',
+            externalMetadataSearchEnabled,
+            setExternalMetadataSearchEnabled,
+          )}
+          {renderSettingSwitch(
+            languageIsEnglish ? 'Skip tracks with existing artwork or lyrics' : '已有封面或歌词时不联网获取',
+            languageIsEnglish ? 'Keep the current artwork or lyrics and skip automatic online matching. Manual refresh can still search once.' : '保留当前封面或歌词，不自动联网匹配；播放器的刷新按钮仍可单次强制查询。',
+            externalMetadataSkipExisting,
+            setExternalMetadataSkipExisting,
+          )}
           {renderSettingSwitch(text.lrcApiSource, text.lrcApiSourceHint, lrcApiExternalDataEnabled, setLrcApiExternalDataEnabled)}
           {renderSettingSwitch(text.lrclibSource, text.lrclibSourceHint, lrclibExternalDataEnabled, setLrclibExternalDataEnabled)}
           {renderSettingSwitch(text.neteaseSource, text.neteaseSourceHint, neteaseExternalDataEnabled, setNeteaseExternalDataEnabled)}
           <Text style={styles.settingDescription}>{text.externalDataDescription}</Text>
+        </View>
+      );
+    }
+
+    if (section === 'remote') {
+      return (
+        <View style={styles.settingsList}>
+          {renderSettingSwitch(
+            text.powerampRemoteVisibility,
+            text.powerampRemoteVisibilityDescription,
+            showPowerampRemoteConnection,
+            setShowPowerampRemoteConnection,
+          )}
         </View>
       );
     }
@@ -5464,7 +6472,7 @@ function EchoLinkApp(): ReactElement {
       artworkBackgroundEnabled={artworkBackgroundEnabled}
       artworkUrl={displayArtworkUrl ?? stableArtworkUrl ?? ''}
       connectionLabel={connectedLabel}
-      connectionOnline={echoConnectionOnline}
+      connectionOnline={isPowerampControlOutput || isPowerampStreamOutput ? powerampConnectionOnline : echoConnectionOnline}
       controlsEnabled={playbackControlsEnabled}
       durationMs={playbackDurationMs}
       externalSourcePickerPayload={pendingExternalMetadataSelection?.metadataKey === externalMetadataKey
@@ -5505,6 +6513,7 @@ function EchoLinkApp(): ReactElement {
       eqGains={eqGains}
       eqPreset={eqPreset}
       isPlaying={isPlaybackActive}
+      isFavorite={currentTrackFavorite}
       language={appLanguage}
       lyricTexts={lyricLines.map((line) => line.text)}
       lyricTimesMs={lyricLines.map((line) => line.timeMs ?? -1)}
@@ -5658,6 +6667,18 @@ function EchoLinkApp(): ReactElement {
         ),
       ],
       externalData: [
+        settingToggle(
+          'externalMetadataSearch',
+          languageIsEnglish ? 'Search metadata online' : '从网络搜索元数据',
+          languageIsEnglish ? 'Automatically search enabled sources. The player refresh button can still search once while this is off.' : '开启后会自动查询已启用的来源；关闭时播放器刷新按钮仍可单次查询。',
+          externalMetadataSearchEnabled,
+        ),
+        settingToggle(
+          'externalMetadataSkipExisting',
+          languageIsEnglish ? 'Skip tracks with existing artwork or lyrics' : '已有封面或歌词时不联网获取',
+          languageIsEnglish ? 'Keep the current artwork or lyrics and skip automatic online matching. The player refresh button can still search once.' : '保留当前封面或歌词，不自动联网匹配；播放器刷新按钮仍可单次强制查询。',
+          externalMetadataSkipExisting,
+        ),
         settingPicker(
           'externalSelectionMode',
           languageIsEnglish ? 'Result selection' : '结果选择',
@@ -5698,6 +6719,14 @@ function EchoLinkApp(): ReactElement {
           autoQueueImportedLocalTracks,
         ),
       ],
+      remote: [
+        settingToggle(
+          'showPowerampRemoteConnection',
+          text.powerampRemoteVisibility,
+          text.powerampRemoteVisibilityDescription,
+          showPowerampRemoteConnection,
+        ),
+      ],
       audioTags: [
         ...audioTagOptions.map((option) => settingToggle(
           `audioTag.${option.key}`,
@@ -5730,12 +6759,15 @@ function EchoLinkApp(): ReactElement {
       playback: 'waveform',
       externalData: 'globe',
       library: 'music.note.list',
+      remote: 'dot.radiowaves.left.and.right',
       audioTags: 'tag',
       storage: 'internaldrive',
     };
     const payload = {
       connection: page === 'connect' ? {
-        busy: connectPanelMode === 'streaming' ? streamingBusy : busy || !client || connectionDraftDirty,
+        busy: connectPanelMode === 'streaming'
+          ? streamingBusy
+          : connectPanelMode === 'remote' ? powerampBusy : busy || !client || connectionDraftDirty,
         enabled: echoConnectionEnabled,
         host: connectionDraft.host,
         labels: {
@@ -5762,6 +6794,13 @@ function EchoLinkApp(): ReactElement {
         modeOptions: connectPanelOptions.map(([id, label]) => ({ id, label })),
         pairingText,
         port: String(connectionDraft.port),
+        powerampRemote: {
+          enabled: powerampRemoteEnabled,
+          host: powerampConnection?.host ?? '',
+          name: powerampConnection?.name ?? 'Poweramp',
+          port: String(powerampConnection?.port ?? 27806),
+          token: powerampConnection?.token ?? '',
+        },
         streamableCount: String(streamableTrackCount),
         streaming: {
           accessMode: neteaseAccessMode,
@@ -5784,13 +6823,15 @@ function EchoLinkApp(): ReactElement {
       library: page === 'library' || page === 'search' ? {
         busy: librarySource === 'streaming'
           ? streamingBusy
+          : librarySource === 'remote'
+          ? powerampBusy
           : page === 'search' || librarySource === 'all'
-          ? busy || localLibraryBusy
+          ? busy || localLibraryBusy || powerampBusy
           : librarySource === 'local' ? localLibraryBusy : busy || !client,
         canPlayLocal: localTracks.length > 0,
-        collections: activeLibraryCollections.map((collection) => {
+        collections: displayedLibraryCollections.map((collection) => {
           const nativeArtwork = resolveArtworkUrl(collection.artworkUrl);
-          const representative = activeLibraryTracks.find((track) => (
+          const representative = sourceLibraryTracks.find((track) => (
             track.album?.trim() === collection.query
             || artistNamesForTrack(track, '').includes(collection.query)
           ));
@@ -5803,15 +6844,15 @@ function EchoLinkApp(): ReactElement {
         }),
         filter: libraryFilter,
         filterOptions: [
-          { id: 'all', label: `${text.all} ${tracks.length}` },
-          { id: 'streamable', label: `${text.streamable} ${streamableTrackCount}` },
-          { id: 'local', label: `${text.pcLocal} ${pcLocalTrackCount}` },
+          { id: 'all', label: `${text.all} ${librarySource === 'remote' ? powerampTracks.length : tracks.length}` },
+          { id: 'streamable', label: `${text.streamable} ${librarySource === 'remote' ? powerampTracks.filter((track) => track.canPlayOnPhone).length : streamableTrackCount}` },
+          { id: 'local', label: `${librarySource === 'remote' ? text.remoteLibrary : text.pcLocal} ${librarySource === 'remote' ? powerampTracks.filter((track) => formatSourceTag(track.sourceLabel) === 'Local').length : pcLocalTrackCount}` },
         ],
         labels: {
           addToQueue: text.addToQueue,
           addToPlaylist: languageIsEnglish ? 'Add to playlist' : '加入歌单',
           cancel: languageIsEnglish ? 'Cancel' : '取消',
-          collections: !showingAllLibrary && (librarySource === 'echo' ? echoLibraryView : localLibraryView) === 'artists'
+          collections: !showingAllLibrary && (librarySource === 'echo' ? echoLibraryView : librarySource === 'remote' ? powerampLibraryView : localLibraryView) === 'artists'
             ? (languageIsEnglish ? 'Artists' : '艺术家')
             : (languageIsEnglish ? 'Albums' : '专辑'),
           createPlaylist: languageIsEnglish ? 'Create playlist' : '创建歌单',
@@ -5823,7 +6864,9 @@ function EchoLinkApp(): ReactElement {
               : (languageIsEnglish ? 'Sign in to NetEase Cloud Music from Connect first' : '请先在连接页登录网易云音乐'))
             : showingAllLibrary
             ? (languageIsEnglish ? 'No matching albums or tracks' : '没有匹配的专辑或歌曲')
-            : librarySource === 'local' ? text.emptyLocalLibrary : text.emptyEchoLibrary,
+            : librarySource === 'remote'
+              ? (powerampRemoteEnabled ? (powerampError || (languageIsEnglish ? 'No matching Poweramp tracks' : '没有匹配的 Poweramp 歌曲')) : text.powerampRemoteNotConfigured)
+              : librarySource === 'local' ? text.emptyLocalLibrary : text.emptyEchoLibrary,
           favorite: languageIsEnglish ? 'Favorite' : '收藏',
           favoritePlaylist: languageIsEnglish ? 'Favorite playlist' : '收藏歌单',
           importLyrics: text.importLyricsA11y,
@@ -5842,12 +6885,14 @@ function EchoLinkApp(): ReactElement {
           unpinPlaylist: languageIsEnglish ? 'Unpin playlist' : '取消置顶',
           unfavorite: languageIsEnglish ? 'Remove Favorite' : '取消收藏',
         },
+        indexTitles: libraryIndexTitles,
+        paginationScope: libraryPaginationScope,
         query,
         pagination: {
           expanded: libraryExpanded,
           page: effectiveLibraryPageIndex + 1,
           pageSize: libraryPageSize,
-          totalCount: activeLibraryTotal,
+          totalCount: libraryPaginationTotal,
           totalPages: libraryTotalPages,
         },
         playlists: sortedPlaylists.map(nativePlaylist),
@@ -5862,7 +6907,7 @@ function EchoLinkApp(): ReactElement {
           ],
           loggedIn: Boolean(streamingProfile && streamingSessionMatchesApi),
           playlistCount: streamingSessionMatchesApi ? streamingPlaylists.length : 0,
-          playlists: (streamingSessionMatchesApi ? sortedStreamingPlaylists : []).map((playlist) => ({
+          playlists: (streamingSessionMatchesApi ? displayedStreamingPlaylists : []).map((playlist) => ({
             artworkUrl: playlist.artworkUrl,
             favorite: favoriteStreamingPlaylistIds.includes(playlist.id),
             id: playlist.id,
@@ -5878,33 +6923,38 @@ function EchoLinkApp(): ReactElement {
         },
         totalLabel: libraryExpanded
           ? (languageIsEnglish
-            ? `${activeLibraryTotal} tracks · page ${effectiveLibraryPageIndex + 1} of ${libraryTotalPages}`
-            : `共 ${activeLibraryTotal} 首 · 第 ${effectiveLibraryPageIndex + 1}/${libraryTotalPages} 页`)
+            ? `${libraryPaginationTotal} items · page ${effectiveLibraryPageIndex + 1} of ${libraryTotalPages}`
+            : `共 ${libraryPaginationTotal} 项 · 第 ${effectiveLibraryPageIndex + 1}/${libraryTotalPages} 页`)
           : (languageIsEnglish
-            ? `${activeLibraryTotal} tracks · showing ${displayedLibraryTracks.length}`
-            : `共 ${activeLibraryTotal} 首 · 显示 ${displayedLibraryTracks.length} 首`),
+            ? `${libraryPaginationTotal} items · showing ${Math.min(libraryPageSize, libraryPaginationTotal)}`
+            : `共 ${libraryPaginationTotal} 项 · 显示 ${Math.min(libraryPageSize, libraryPaginationTotal)} 项`),
         tracks: displayedLibraryTracks.map((item) => {
           const localItem = item as LocalMusicTrack;
           const isLocalItem = localTrackById.has(item.id);
+          const isRemoteItem = powerampTrackById.has(item.id);
           return {
             artworkUrl: artworkForLibraryTrack(item),
             artist: item.artist,
             canPlayOnPhone: item.canPlayOnPhone,
             durationMs: item.durationMs,
-            favorite: isLocalItem && favoriteLocalTrackIdSet.has(item.id),
+            discNo: item.discNo ?? null,
+            favorite: isLocalItem
+              ? favoriteLocalTrackIdSet.has(item.id)
+              : isRemoteItem ? favoritePowerampTrackIdSet.has(item.id) : favoriteEchoTrackIdSet.has(item.id),
             group: showingAllLibrary
-              ? (isLocalItem ? text.localLibrary : text.echoLibrary)
-              : isLocalItem ? localGroupLabel(localItem) ?? '' : echoGroupLabel(item) ?? '',
+              ? (isLocalItem ? text.localLibrary : isRemoteItem ? text.remoteLibrary : text.echoLibrary)
+              : isLocalItem ? localGroupLabel(localItem) ?? '' : isRemoteItem ? '' : echoGroupLabel(item) ?? '',
             hasLyrics: isLocalItem && localItem.hasLyrics,
             id: item.id,
             isLocal: isLocalItem,
-            source: librarySource === 'streaming' ? 'streaming' : isLocalItem ? 'local' : 'echo',
+            source: librarySource === 'streaming' ? 'streaming' : isLocalItem ? 'local' : isRemoteItem ? 'remote' : 'echo',
             tags: tagsForTrack(item, { includeDuration: true, visibleAudioTags: audioTagVisibility }),
             title: item.title,
+            trackNo: item.trackNo ?? null,
           };
         }),
-        view: librarySource === 'echo' ? echoLibraryView : localLibraryView,
-        viewOptions: (librarySource === 'echo' ? echoLibraryViewOptions : localLibraryViewOptions)
+        view: librarySource === 'echo' ? echoLibraryView : librarySource === 'remote' ? powerampLibraryView : localLibraryView,
+        viewOptions: (librarySource === 'echo' || librarySource === 'remote' ? echoLibraryViewOptions : localLibraryViewOptions)
           .map((id) => ({ id, label: labelForLocalLibraryView(id) })),
       } : null,
       page,
@@ -5991,6 +7041,84 @@ function EchoLinkApp(): ReactElement {
                     <Text style={styles.cardTitle}>{text.streamingComingSoon}</Text>
                     <Text style={styles.hint}>{text.streamingReserved}</Text>
                   </View>
+                ) : connectPanelMode === 'remote' ? (
+                  <>
+                    <View style={styles.connectPanel}>
+                      <Text style={styles.cardEyebrow}>{text.powerampRemote}</Text>
+                      <Text style={styles.cardTitle}>{text.powerampRemote}</Text>
+                      {renderSettingSwitch(
+                        text.powerampRemoteEnabled,
+                        text.powerampRemoteDescription,
+                        powerampRemoteEnabled,
+                        setPowerampRemoteEnabled,
+                      )}
+                    </View>
+
+                    <View style={styles.connectPanel}>
+                      <Text style={styles.cardEyebrow}>{text.powerampRemoteSetup}</Text>
+                      <Text style={styles.cardTitle}>{text.powerampRemoteSetup}</Text>
+                      <TextInput
+                        value={powerampConnectionDraft.host}
+                        onChangeText={(host) => setPowerampConnectionDraft((current) => ({ ...current, host }))}
+                        placeholder="192.168.1.10"
+                        placeholderTextColor="#a8a29e"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        style={styles.input}
+                      />
+                      <TextInput
+                        value={powerampConnectionDraft.port}
+                        onChangeText={(port) => setPowerampConnectionDraft((current) => ({ ...current, port }))}
+                        placeholder={text.portPlaceholder}
+                        placeholderTextColor="#a8a29e"
+                        keyboardType="number-pad"
+                        style={styles.input}
+                      />
+                      <TextInput
+                        value={powerampConnectionDraft.token}
+                        onChangeText={(token) => setPowerampConnectionDraft((current) => ({ ...current, token }))}
+                        placeholder="Token"
+                        placeholderTextColor="#a8a29e"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        secureTextEntry
+                        style={styles.input}
+                      />
+                      <TextInput
+                        value={powerampConnectionDraft.name}
+                        onChangeText={(name) => setPowerampConnectionDraft((current) => ({ ...current, name }))}
+                        placeholder="Poweramp"
+                        placeholderTextColor="#a8a29e"
+                        style={styles.input}
+                      />
+                      <View style={styles.buttonRow}>
+                        <Pressable
+                          accessibilityLabel={text.save}
+                          accessibilityRole="button"
+                          style={styles.secondaryButton}
+                          onPress={savePowerampRemoteConnection}
+                        >
+                          {renderButtonBlur(24)}
+                          <SuperconIcon glyph="checkmark" size={15} color="#f8fafc" />
+                          <Text style={styles.secondaryButtonText}>{text.save}</Text>
+                        </Pressable>
+                        <Pressable
+                          accessibilityLabel={text.test}
+                          accessibilityRole="button"
+                          disabled={!powerampClient || powerampBusy}
+                          style={styles.secondaryButton}
+                          onPress={() => void refreshPowerampRemote()}
+                        >
+                          {renderButtonBlur(24)}
+                          <AnimatedButtonContent motionKey={`poweramp-test-${powerampBusy}`} style={styles.buttonMotionRow}>
+                            <SuperconIcon glyph="view-reload" size={15} color="#f8fafc" />
+                            <Text style={styles.secondaryButtonText}>{powerampBusy ? text.testing : text.test}</Text>
+                          </AnimatedButtonContent>
+                        </Pressable>
+                      </View>
+                      {powerampError ? <Text style={styles.hint}>{powerampError}</Text> : null}
+                    </View>
+                  </>
                 ) : (
                   <>
                     <View style={styles.connectPanel}>
@@ -6110,15 +7238,16 @@ function EchoLinkApp(): ReactElement {
                   <Text style={styles.libraryHeroTitle}>{activeLibraryTotal} 首</Text>
                 </View>
                 <View style={styles.libraryFilterRow}>
-                  {([
-                    ['echo', `${text.echoLibrary} ${tracks.length}`],
-                    ['local', `${text.localLibrary} ${localTracks.length}`],
-                  ] as const).map(([value, label]) => (
+                  {fallbackLibrarySourceOptions.map(([value, label]) => (
                     <Pressable
                       accessibilityLabel={`${text.switchLibraryPrefix}${label}${text.switchLibrarySuffix}`}
                       accessibilityRole="button"
                       key={value}
-                      onPress={() => setLibrarySource(value)}
+                      onPress={() => {
+                        setLibrarySource(value);
+                        setLibraryExpanded(false);
+                        setLibraryPageIndex(0);
+                      }}
                       style={[styles.libraryFilterChip, librarySource === value ? styles.libraryFilterChipActive : null]}
                     >
                       {renderButtonBlur(librarySource === value ? 10 : 20)}
@@ -6129,12 +7258,18 @@ function EchoLinkApp(): ReactElement {
                   ))}
                 </View>
                 <View style={styles.librarySearchRow}>
-                  <TextInput
-                    value={query}
-                    onChangeText={setQuery}
+                    <TextInput
+                      value={query}
+                      onChangeText={(nextQuery) => {
+                        setQuery(nextQuery);
+                        setLibraryExpanded(false);
+                        setLibraryPageIndex(0);
+                      }}
                     onSubmitEditing={() => {
                       if (librarySource === 'echo') {
                         void refresh();
+                      } else if (librarySource === 'remote') {
+                        void refreshPowerampRemote();
                       }
                     }}
                     placeholder={text.searchPlaceholder}
@@ -6144,10 +7279,16 @@ function EchoLinkApp(): ReactElement {
                   <Pressable
                     accessibilityLabel={librarySource === 'local' ? text.scan : text.sync}
                     accessibilityRole="button"
-                    disabled={librarySource === 'local' ? localLibraryBusy : (!client || busy)}
+                    disabled={librarySource === 'local'
+                      ? localLibraryBusy
+                      : librarySource === 'remote' ? !powerampClient || powerampBusy : (!client || busy)}
                     onPress={() => {
                       if (librarySource === 'local') {
                         void refreshLocalLibrary();
+                        return;
+                      }
+                      if (librarySource === 'remote') {
+                        void refreshPowerampRemote();
                         return;
                       }
                       void refresh();
@@ -6155,12 +7296,14 @@ function EchoLinkApp(): ReactElement {
                     style={styles.libraryRefreshButton}
                   >
                     {renderButtonBlur(24)}
-                    <AnimatedButtonContent motionKey={`library-refresh-${librarySource}-${busy}-${localLibraryBusy}`} style={styles.buttonMotionRow}>
+                    <AnimatedButtonContent motionKey={`library-refresh-${librarySource}-${busy}-${localLibraryBusy}-${powerampBusy}`} style={styles.buttonMotionRow}>
                       <SuperconIcon glyph="view-reload" size={15} color="#f8fafc" />
                       <Text style={styles.libraryRefreshText}>
                         {librarySource === 'local'
                           ? (localLibraryBusy ? text.scanning : text.scan)
-                          : (busy ? text.syncing : text.sync)}
+                          : librarySource === 'remote'
+                            ? (powerampBusy ? text.syncing : text.sync)
+                            : (busy ? text.syncing : text.sync)}
                       </Text>
                     </AnimatedButtonContent>
                   </Pressable>
@@ -6175,7 +7318,11 @@ function EchoLinkApp(): ReactElement {
                           accessibilityLabel={`${text.localLibrary} ${label}`}
                           accessibilityRole="button"
                           key={value}
-                          onPress={() => setLocalLibraryView(value)}
+                          onPress={() => {
+                            setLocalLibraryView(value);
+                            setLibraryExpanded(false);
+                            setLibraryPageIndex(0);
+                          }}
                           style={[styles.localViewChip, localLibraryView === value ? styles.localViewChipActive : null]}
                         >
                           {renderButtonBlur(localLibraryView === value ? 10 : 20)}
@@ -6214,15 +7361,19 @@ function EchoLinkApp(): ReactElement {
                 ) : (
                   <View style={styles.libraryFilterRow}>
                     {([
-                      ['all', `${text.all} ${tracks.length}`],
-                      ['streamable', `${text.streamable} ${streamableTrackCount}`],
-                      ['local', `${text.pcLocal} ${pcLocalTrackCount}`],
+                      ['all', `${text.all} ${librarySource === 'remote' ? powerampTracks.length : tracks.length}`],
+                      ['streamable', `${text.streamable} ${librarySource === 'remote' ? powerampTracks.filter((track) => track.canPlayOnPhone).length : streamableTrackCount}`],
+                      ['local', `${librarySource === 'remote' ? text.remoteLibrary : text.pcLocal} ${librarySource === 'remote' ? powerampTracks.filter((track) => formatSourceTag(track.sourceLabel) === 'Local').length : pcLocalTrackCount}`],
                     ] as const).map(([value, label]) => (
                       <Pressable
                         accessibilityLabel={`${text.filterA11y}${label}`}
                         accessibilityRole="button"
                         key={value}
-                        onPress={() => setLibraryFilter(value)}
+                        onPress={() => {
+                          setLibraryFilter(value);
+                          setLibraryExpanded(false);
+                          setLibraryPageIndex(0);
+                        }}
                         style={[styles.libraryFilterChip, libraryFilter === value ? styles.libraryFilterChipActive : null]}
                       >
                         {renderButtonBlur(libraryFilter === value ? 10 : 20)}
@@ -6235,9 +7386,9 @@ function EchoLinkApp(): ReactElement {
                 )}
 
                 <View style={styles.libraryList}>
-                  {activeLibraryTracks.length > 0 ? activeLibraryTracks.map((item, index) => {
+                  {displayedLibraryTracks.length > 0 ? displayedLibraryTracks.map((item, index) => {
                     const localItem = item as LocalMusicTrack;
-                    const previousLocalItem = activeLibraryTracks[index - 1] as LocalMusicTrack | undefined;
+                    const previousLocalItem = displayedLibraryTracks[index - 1] as LocalMusicTrack | undefined;
                     const groupLabel = librarySource === 'local' ? localGroupLabel(localItem) : null;
                     const previousGroupLabel = librarySource === 'local' && previousLocalItem ? localGroupLabel(previousLocalItem) : null;
                     const showGroupHeader = Boolean(groupLabel && groupLabel !== previousGroupLabel);
@@ -6256,6 +7407,10 @@ function EchoLinkApp(): ReactElement {
                           onPress={() => {
                             if (librarySource === 'local') {
                               void playTrackOnLocal(localItem, 0);
+                              return;
+                            }
+                            if (librarySource === 'remote') {
+                              playPowerampTrack(item as PowerampRemoteTrack, 0);
                               return;
                             }
                             if (isPhoneOutput && item.canPlayOnPhone) {
@@ -6360,10 +7515,71 @@ function EchoLinkApp(): ReactElement {
                     <Text style={styles.hint}>
                       {librarySource === 'local'
                         ? text.emptyLocalLibrary
+                        : librarySource === 'remote'
+                          ? (powerampError || text.powerampRemoteNotConfigured)
                         : text.emptyEchoLibrary}
                     </Text>
                   )}
                 </View>
+                {activeLibraryTotal > libraryPageSize ? (
+                  libraryExpanded ? (
+                    <View style={styles.libraryFilterRow}>
+                      <Pressable
+                        accessibilityLabel={languageIsEnglish ? 'Previous page' : '上一页'}
+                        accessibilityRole="button"
+                        disabled={effectiveLibraryPageIndex === 0}
+                        onPress={() => setLibraryPageIndex((current) => Math.max(0, current - 1))}
+                        style={[styles.libraryFilterChip, effectiveLibraryPageIndex === 0 ? { opacity: 0.38 } : null]}
+                      >
+                        {renderButtonBlur(20)}
+                        <SuperconIcon glyph="view-back" size={16} color="#f8fafc" />
+                      </Pressable>
+                      <View style={styles.libraryFilterChip}>
+                        <Text style={[styles.libraryFilterText, styles.libraryFilterTextActive]}>
+                          {effectiveLibraryPageIndex + 1} / {libraryTotalPages}
+                        </Text>
+                      </View>
+                      <Pressable
+                        accessibilityLabel={languageIsEnglish ? 'Next page' : '下一页'}
+                        accessibilityRole="button"
+                        disabled={effectiveLibraryPageIndex >= libraryTotalPages - 1}
+                        onPress={() => setLibraryPageIndex((current) => Math.min(libraryTotalPages - 1, current + 1))}
+                        style={[styles.libraryFilterChip, effectiveLibraryPageIndex >= libraryTotalPages - 1 ? { opacity: 0.38 } : null]}
+                      >
+                        {renderButtonBlur(20)}
+                        <SuperconIcon glyph="view-forward" size={16} color="#f8fafc" />
+                      </Pressable>
+                      <Pressable
+                        accessibilityLabel={languageIsEnglish ? 'Collapse pages' : '收起分页'}
+                        accessibilityRole="button"
+                        onPress={() => {
+                          setLibraryExpanded(false);
+                          setLibraryPageIndex(0);
+                        }}
+                        style={styles.libraryFilterChip}
+                      >
+                        {renderButtonBlur(20)}
+                        <SuperconIcon glyph="view-close-small" size={14} color="#f8fafc" />
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <Pressable
+                      accessibilityLabel={languageIsEnglish ? 'Browse all tracks by page' : '展开全部歌曲并分页浏览'}
+                      accessibilityRole="button"
+                      onPress={() => {
+                        setLibraryExpanded(true);
+                        setLibraryPageIndex(0);
+                      }}
+                      style={styles.secondaryButton}
+                    >
+                      {renderButtonBlur(20)}
+                      <SuperconIcon glyph="view-forward" size={15} color="#f8fafc" />
+                      <Text style={styles.secondaryButtonText}>
+                        {languageIsEnglish ? `Browse all ${activeLibraryTotal} tracks` : `展开全部 ${activeLibraryTotal} 首并分页浏览`}
+                      </Text>
+                    </Pressable>
+                  )
+                ) : null}
               </View>
             ) : page === 'settings' ? (
               <View style={styles.settingsPage}>

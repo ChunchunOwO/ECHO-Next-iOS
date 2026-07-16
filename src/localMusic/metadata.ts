@@ -8,9 +8,11 @@ export type ParsedAudioMetadata = {
   bitrate?: number | null;
   bitDepth?: number | null;
   codec?: string | null;
+  discNo?: number | null;
   durationMs?: number | null;
   sampleRate?: number | null;
   title?: string | null;
+  trackNo?: number | null;
 };
 
 const maxMetadataBytes = 1024 * 1024;
@@ -50,6 +52,11 @@ const readSynchsafe = (bytes: Uint8Array, offset: number): number => (
 const cleanText = (value: string): string | null => {
   const cleaned = value.replace(/\0/gu, '').trim();
   return cleaned || null;
+};
+
+const parseIndexNumber = (value: string | null | undefined): number | null => {
+  const parsed = Number.parseInt(value?.split('/')[0]?.trim() ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
 const decodeLatin1 = (bytes: Uint8Array): string => {
@@ -237,6 +244,10 @@ const parseMp3 = (bytes: Uint8Array, fileSize: number): ParsedAudioMetadata => {
         metadata.album = decodeId3Text(frame);
       } else if (frameId === 'TPE2') {
         metadata.albumArtist = decodeId3Text(frame);
+      } else if (frameId === 'TRCK') {
+        metadata.trackNo = parseIndexNumber(decodeId3Text(frame));
+      } else if (frameId === 'TPOS') {
+        metadata.discNo = parseIndexNumber(decodeId3Text(frame));
       } else if (frameId === 'TLEN') {
         const duration = Number(decodeId3Text(frame));
         metadata.durationMs = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : metadata.durationMs;
@@ -300,6 +311,10 @@ const parseFlac = (bytes: Uint8Array): ParsedAudioMetadata => {
           metadata.album = value;
         } else if (key === 'ALBUMARTIST' || key === 'ALBUM ARTIST') {
           metadata.albumArtist = value;
+        } else if (key === 'TRACKNUMBER') {
+          metadata.trackNo = parseIndexNumber(value);
+        } else if (key === 'DISCNUMBER') {
+          metadata.discNo = parseIndexNumber(value);
         }
       }
     } else if (type === 6 && block.length >= 32 && !metadata.artworkUrl) {
@@ -415,6 +430,10 @@ const parseM4a = (bytes: Uint8Array, extension: string): ParsedAudioMetadata => 
             metadata.album = text;
           } else if (item.type === 'aART') {
             metadata.albumArtist = text;
+          } else if (item.type === 'trkn') {
+            metadata.trackNo = readU16BE(data, 2) || null;
+          } else if (item.type === 'disk') {
+            metadata.discNo = readU16BE(data, 2) || null;
           } else if (item.type === 'covr' && !metadata.artworkUrl) {
             const isPng = byte(data, 0) === 0x89 && ascii(data, 1, 3) === 'PNG';
             metadata.artworkUrl = dataUrl(isPng ? 'image/png' : 'image/jpeg', data);
