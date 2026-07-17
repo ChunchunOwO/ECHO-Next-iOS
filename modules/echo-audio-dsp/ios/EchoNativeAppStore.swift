@@ -13,6 +13,7 @@ final class EchoNativeAppStore {
   var powerampTracks: [EchoNativeCoreTrack] = []
   var powerampAlbums: [EchoNativeCoreAlbum] = []
   var neteaseTracks: [EchoNativeCoreTrack] = []
+  var neteaseSearchTracks: [EchoNativeCoreTrack] = []
   var neteasePlaylists: [EchoNativeNeteaseClient.Playlist] = []
   var neteaseProfile: EchoNativeNeteaseClient.Profile?
   var queue: [EchoNativeCoreTrack] = []
@@ -39,6 +40,7 @@ final class EchoNativeAppStore {
   var echoError = ""
   var powerampError = ""
   var streamingStatus = ""
+  var streamingSearchStatus = ""
   var pairingText = ""
   var streamingLibraryMode = "search"
   var streamingFavoritePlaylistIds: Set<String> {
@@ -173,6 +175,7 @@ final class EchoNativeAppStore {
     case "page":
       guard let page = payload["page"] as? String else { return }
       playerModel.activePage = page
+      scheduleStreamingSearchIfNeeded()
       renderPages()
     case "playPause": togglePlayPause()
     case "previous": playAdjacent(-1)
@@ -236,7 +239,12 @@ final class EchoNativeAppStore {
     case "queueRemove": removeQueueItem(payload)
     case "queueClear": clearQueue(payload)
     case "librarySource":
-      if let value = payload["selection"] as? String { librarySource = value; resetLibraryPosition(); refreshVisibleLibraryIfNeeded() }
+      if let value = payload["selection"] as? String {
+        librarySource = value
+        resetLibraryPosition()
+        scheduleStreamingSearchIfNeeded()
+        refreshVisibleLibraryIfNeeded()
+      }
     case "libraryView":
       if let value = payload["selection"] as? String { libraryView = value; resetLibraryPosition(); renderPages() }
     case "libraryFilter":
@@ -338,18 +346,27 @@ final class EchoNativeAppStore {
     case "streamingLogout":
       clearNeteaseQrLogin()
       EchoNativePersistence.setNeteaseCookie("")
-      neteaseClient = nil; neteaseClientConfiguration = ""; neteaseProfile = nil; neteasePlaylists = []; neteaseTracks = []; streamingStatus = ""; renderPages()
+      neteaseClient = nil; neteaseClientConfiguration = ""; neteaseProfile = nil; neteasePlaylists = []; neteaseTracks = []; neteaseSearchTracks = []; streamingStatus = ""; streamingSearchStatus = ""; renderPages()
     case "streamingLogin": startNeteaseQrLogin()
     case "streamingQrResume": resumeNeteaseQrLogin()
     case "streamingLibraryMode":
       searchTask?.cancel()
-      streamingLibraryMode = payload["selection"] as? String ?? "search"; renderPages()
+      streamingLibraryMode = payload["selection"] as? String ?? "search"
+      selectedStreamingPlaylistId = ""
+      libraryQuery = ""
+      neteaseTracks = []
+      libraryPage = 0
+      libraryExpanded = false
+      streamingStatus = ""
+      streamingSearchStatus = ""
+      renderPages()
     case "streamingPlaylistOpen": openStreamingPlaylist(payload)
     case "streamingPlaylistClose":
       selectedStreamingPlaylistId = ""
       neteaseTracks = []
       libraryPage = 0
       libraryExpanded = false
+      streamingStatus = ""
       renderPages()
     case "streamingPlaylistPin": toggleStreamingPlaylist(payload, pinned: true)
     case "streamingPlaylistFavorite": toggleStreamingPlaylist(payload, pinned: false)
@@ -409,6 +426,16 @@ final class EchoNativeAppStore {
     let configuration = cookie.isEmpty ? "" : "\(baseUrl)\u{0}\(cookie)"
     if configuration != neteaseClientConfiguration || (!configuration.isEmpty && neteaseClient == nil) {
       streamingBusy = false
+      if configuration != neteaseClientConfiguration {
+        searchTask?.cancel()
+        neteaseProfile = nil
+        neteasePlaylists = []
+        neteaseTracks = []
+        neteaseSearchTracks = []
+        selectedStreamingPlaylistId = ""
+        streamingStatus = ""
+        streamingSearchStatus = ""
+      }
       neteaseClientConfiguration = configuration
       neteaseClient = configuration.isEmpty || URL(string: baseUrl)?.host == nil
         ? nil
@@ -537,6 +564,8 @@ final class EchoNativeAppStore {
 
   private func applyControlledPlayback(_ status: EchoNativePlaybackStatus, source: EchoNativeTrackSource) {
     var trackChanged = false
+    var trackIdentityChanged = false
+    var clearedTrack = false
     if var track = status.playback.track {
       track.source = source
       let baseUrl = source == .echo ? echoClient?.baseUrl : powerampClient?.baseUrl
@@ -551,14 +580,24 @@ final class EchoNativeAppStore {
         if track.album.isEmpty { track.album = currentTrack.album }
       }
       if currentTrack != track {
+        trackIdentityChanged = currentTrack.map(trackKey) != trackKey(track)
         currentTrack = track
         updatePlayerTrack(track)
         trackChanged = true
       }
+    } else if currentTrack != nil {
+      clearCurrentPlayback()
+      clearedTrack = true
     }
-    setIfChanged(playerModel, \.isPlaying, status.playback.state == "playing")
-    playerModel.positionMs = status.playback.positionMs
-    setIfChanged(playerModel, \.durationMs, status.playback.durationMs)
+    if currentTrack == nil {
+      setIfChanged(playerModel, \.isPlaying, false)
+      playerModel.positionMs = 0
+      setIfChanged(playerModel, \.durationMs, 0)
+    } else {
+      setIfChanged(playerModel, \.isPlaying, status.playback.state == "playing")
+      playerModel.positionMs = status.playback.positionMs
+      setIfChanged(playerModel, \.durationMs, status.playback.durationMs)
+    }
     setIfChanged(playerModel, \.volume, max(0, min(1, status.playback.volume)))
     if let currentTrack { setIfChanged(playerModel, \.tags, tags(for: currentTrack)) }
     var queueChanged = false
@@ -578,7 +617,11 @@ final class EchoNativeAppStore {
       if queue != nextQueue { queue = nextQueue; queueChanged = true }
       if source == .remote { powerampQueueManagedLocally = true }
     }
-    if trackChanged || queueChanged { updateQueueModel() }
+    if trackChanged || queueChanged || clearedTrack { updateQueueModel() }
+    if trackIdentityChanged {
+      loadLyricsForCurrentTrack()
+      if persistent.settings.externalMetadataEnabled { refreshExternalMetadata(manual: false) }
+    }
     publishNowPlaying()
   }
 
@@ -666,6 +709,7 @@ final class EchoNativeAppStore {
     outputMode = mode
     playerModel.outputMode = mode.rawValue
     currentTrack = track
+    playerModel.positionMs = max(0, positionMs)
     handledFinishedTrackKey = ""
     if let index = queue.firstIndex(where: { trackKey($0) == trackKey(track) }) {
       queue[index] = track
@@ -675,7 +719,7 @@ final class EchoNativeAppStore {
     }
     if track.source == .remote { powerampQueueManagedLocally = true }
     updatePlayerTrack(track)
-    addRecent(track)
+    if mode != .streaming { addRecent(track) }
     switch mode {
     case .local:
       guard let uri = track.localUrl else { showError(EchoNativeNetworkError.invalidResponse); return }
@@ -786,6 +830,7 @@ final class EchoNativeAppStore {
         guard self.neteaseClient === neteaseClient, playbackGeneration == generation,
           currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
         playFile(uri: file.absoluteString, track: track, positionMs: positionMs)
+        if playerModel.isPlaying, let currentTrack { addRecent(currentTrack) }
       } catch {
         if self.neteaseClient === neteaseClient, playbackGeneration == generation { showError(error) }
       }
@@ -1008,8 +1053,7 @@ final class EchoNativeAppStore {
     playerModel.isFavorite = false
     playerModel.isPlaying = false
     playerModel.activeLyricIndex = 0
-    playerModel.lyricTexts = []
-    playerModel.lyricTimesMs = []
+    playerModel.lyricLines = []
     playerModel.positionMs = 0
     playerModel.tags = []
     playerModel.title = ""
@@ -1021,8 +1065,8 @@ final class EchoNativeAppStore {
 
   private func updatePlayerTrack(_ track: EchoNativeCoreTrack) {
     playerModel.title = track.title
-    playerModel.album = track.album.isEmpty ? localized("Unknown Album", "未知专辑") : track.album
-    playerModel.artist = track.artist.isEmpty ? (persistent.settings.language == "en" ? "Unknown Artist" : "未知艺术家") : track.artist
+    playerModel.album = track.album
+    playerModel.artist = track.artist
     playerModel.artworkUrl = track.artworkUrl ?? ""
     playerModel.durationMs = track.durationMs
     playerModel.controlsEnabled = true
@@ -1147,11 +1191,19 @@ final class EchoNativeAppStore {
         playlistsChanged = true
       }
     }
-    let values = persistent.queueTrackKeys.compactMap(track(forKey:))
+    let streamingSnapshots = Dictionary(
+      persistent.streamingQueueTracks.map { (trackKey($0), $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    let values = persistent.queueTrackKeys.compactMap { key in
+      streamingSnapshots[key] ?? track(forKey: key)
+    }
     queue = values
     powerampQueueManagedLocally = values.contains { $0.source == .remote }
     updateQueueModel()
-    if playlistsChanged { persist() }
+    if playlistsChanged || values.count != persistent.queueTrackKeys.count {
+      persistQueue()
+    }
   }
 
   private func synchronizeActivePlaylist() {
@@ -1163,6 +1215,7 @@ final class EchoNativeAppStore {
 
   private func persistQueue() {
     persistent.queueTrackKeys = queue.map { trackKey($0) }
+    persistent.streamingQueueTracks = queue.filter { $0.source == .streaming }
     persist()
   }
 
@@ -1199,6 +1252,9 @@ final class EchoNativeAppStore {
     persistent.recentTrackKeys.removeAll { $0 == key }
     persistent.recentTrackKeys.insert(key, at: 0)
     persistent.recentTrackKeys = Array(persistent.recentTrackKeys.prefix(100))
+    persistent.recentTracks.removeAll { trackKey($0) == key }
+    persistent.recentTracks.insert(track, at: 0)
+    persistent.recentTracks = Array(persistent.recentTracks.prefix(100))
     persist()
   }
 
@@ -1325,6 +1381,7 @@ final class EchoNativeAppStore {
     }
     persistent.favoriteTrackKeys.remove(key)
     persistent.recentTrackKeys.removeAll { $0 == key }
+    persistent.recentTracks.removeAll { trackKey($0) == key }
     externalLyricsByTrackKey.removeValue(forKey: key)
     if wasCurrent { clearCurrentPlayback() }
     synchronizeActivePlaylist()
@@ -1596,12 +1653,22 @@ final class EchoNativeAppStore {
         renderPages()
       }
     }
+    let profile: EchoNativeNeteaseClient.Profile
     do {
-      let profile = try await neteaseClient.profile()
+      profile = try await neteaseClient.profile()
       guard self.neteaseClient === neteaseClient else { return }
+      if neteaseProfile?.userId != profile.userId { neteasePlaylists = [] }
+      neteaseProfile = profile
+      streamingStatus = ""
+      renderPages()
+      scheduleStreamingSearchIfNeeded()
+    } catch {
+      if self.neteaseClient === neteaseClient { streamingStatus = errorMessage(error) }
+      return
+    }
+    do {
       let playlists = try await neteaseClient.playlists(userId: profile.userId)
       guard self.neteaseClient === neteaseClient else { return }
-      neteaseProfile = profile
       neteasePlaylists = playlists
       streamingStatus = ""
     } catch {
@@ -1611,7 +1678,16 @@ final class EchoNativeAppStore {
 
   private func openStreamingPlaylist(_ payload: [String: Any]) {
     guard let id = payload["id"] as? String, let neteaseClient else { return }
-    selectedStreamingPlaylistId = id; streamingBusy = true; renderPages()
+    searchTask?.cancel()
+    libraryQuery = ""
+    neteaseTracks = []
+    libraryPage = 0
+    libraryExpanded = false
+    streamingStatus = ""
+    streamingSearchStatus = ""
+    selectedStreamingPlaylistId = id
+    streamingBusy = true
+    renderPages()
     Task {
       defer {
         if self.neteaseClient === neteaseClient,
@@ -1625,6 +1701,7 @@ final class EchoNativeAppStore {
         guard self.neteaseClient === neteaseClient, selectedStreamingPlaylistId == id else { return }
         neteaseTracks = tracks
         libraryPage = 0
+        streamingStatus = ""
       }
       catch {
         if self.neteaseClient === neteaseClient, selectedStreamingPlaylistId == id {
@@ -1646,26 +1723,42 @@ final class EchoNativeAppStore {
 
   private func scheduleStreamingSearchIfNeeded() {
     searchTask?.cancel()
-    guard librarySource == "streaming", streamingLibraryMode == "search", let neteaseClient else { return }
+    let globalSearch = playerModel.activePage == "search"
+    let streamingSearch = playerModel.activePage == "library"
+      && librarySource == "streaming" && streamingLibraryMode == "search"
+    guard globalSearch || streamingSearch, let neteaseClient else { return }
     let query = libraryQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !query.isEmpty else { neteaseTracks = []; return }
+    guard !query.isEmpty else {
+      if globalSearch { neteaseSearchTracks = [] } else { neteaseTracks = [] }
+      streamingSearchStatus = ""
+      return
+    }
     searchTask = Task {
       try? await Task.sleep(nanoseconds: 350_000_000)
       guard !Task.isCancelled else { return }
       do {
         let tracks = try await neteaseClient.search(query)
+        let contextValid = globalSearch
+          ? playerModel.activePage == "search"
+          : playerModel.activePage == "library"
+            && librarySource == "streaming" && streamingLibraryMode == "search"
         guard self.neteaseClient === neteaseClient,
-          librarySource == "streaming", streamingLibraryMode == "search",
+          contextValid,
           libraryQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query
         else { return }
-        neteaseTracks = tracks
+        if globalSearch { neteaseSearchTracks = tracks } else { neteaseTracks = tracks }
+        streamingSearchStatus = ""
         renderPages()
       }
       catch {
+        let contextValid = globalSearch
+          ? playerModel.activePage == "search"
+          : playerModel.activePage == "library"
+            && librarySource == "streaming" && streamingLibraryMode == "search"
         if self.neteaseClient === neteaseClient,
-          librarySource == "streaming", streamingLibraryMode == "search",
+          contextValid,
           libraryQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query {
-          streamingStatus = errorMessage(error)
+          streamingSearchStatus = errorMessage(error)
           renderPages()
         }
       }
@@ -1732,7 +1825,7 @@ final class EchoNativeAppStore {
     case "resetTags": persistent.settings.audioTagVisibility = EchoNativeCoreSettings().audioTagVisibility; persist(); renderPages()
     case "rescanMetadata": Task { await refreshLocalLibrary() }
     case "clearLocalQueue": activeQueuePlaylistId = ""; queue.removeAll { $0.source == .local }; updateQueueModel(); persistQueue()
-    case "clearRecent": persistent.recentTrackKeys = []; persist(); renderPages()
+    case "clearRecent": persistent.recentTrackKeys = []; persistent.recentTracks = []; persist(); renderPages()
     default: break
     }
   }
@@ -1784,9 +1877,10 @@ final class EchoNativeAppStore {
   private func loadLyricsForCurrentTrack() {
     guard let track = currentTrack else { return }
     lyricsGeneration &+= 1
+    lyricsTask?.cancel()
     let generation = lyricsGeneration
-    playerModel.lyricTexts = []
-    playerModel.lyricTimesMs = []
+    playerModel.activeLyricIndex = 0
+    playerModel.lyricLines = []
     lyricsTask = Task {
       var lyrics = ""
       lyrics = externalLyricsByTrackKey[trackKey(track)] ?? ""
@@ -1795,8 +1889,8 @@ final class EchoNativeAppStore {
       if lyrics.isEmpty, track.source == .remote { lyrics = (try? await powerampClient?.lyrics(trackId: track.id)) ?? "" }
       guard lyricsGeneration == generation, currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
       let lines = EchoNativeMetadataService.parseLyrics(lyrics)
-      playerModel.lyricTexts = lines.map(\.text)
-      playerModel.lyricTimesMs = lines.map(\.milliseconds)
+      playerModel.lyricLines = lines
+      updateActiveLyricIndex()
       if lyricsGeneration == generation { lyricsTask = nil }
     }
   }
@@ -1806,7 +1900,7 @@ final class EchoNativeAppStore {
     let key = trackKey(track)
     let settings = persistent.settings
     let hasExistingMetadata = track.artworkUrl?.isEmpty == false || track.hasLyrics
-      || externalLyricsByTrackKey[key]?.isEmpty == false || !playerModel.lyricTexts.isEmpty
+      || externalLyricsByTrackKey[key]?.isEmpty == false || !playerModel.lyricLines.isEmpty
     guard manual || settings.externalMetadataEnabled else { return }
     guard manual || !settings.externalMetadataSkipExisting || !hasExistingMetadata else { return }
     guard manual || !ignoredExternalMetadataTrackKeys.contains(key) else { return }
@@ -1976,10 +2070,13 @@ final class EchoNativeAppStore {
     currentTrack = updated
     updatePlayerTrack(updated)
     if !result.lyrics.isEmpty {
+      lyricsGeneration &+= 1
+      lyricsTask?.cancel()
+      lyricsTask = nil
       externalLyricsByTrackKey[trackKey(track)] = result.lyrics
       let lines = EchoNativeMetadataService.parseLyrics(result.lyrics)
-      playerModel.lyricTexts = lines.map(\.text)
-      playerModel.lyricTimesMs = lines.map(\.milliseconds)
+      playerModel.lyricLines = lines
+      updateActiveLyricIndex()
     }
     updateQueueModel()
     renderPages()
@@ -1996,6 +2093,8 @@ final class EchoNativeAppStore {
     replace(in: &echoTracks)
     replace(in: &powerampTracks)
     replace(in: &neteaseTracks)
+    replace(in: &neteaseSearchTracks)
+    replace(in: &persistent.recentTracks)
     replace(in: &queue)
   }
 
@@ -2040,6 +2139,8 @@ final class EchoNativeAppStore {
   private func track(id: String, source: EchoNativeTrackSource?) -> EchoNativeCoreTrack? {
     let values = source.map { libraryTracks(for: $0) } ?? allTracks()
     return values.first { $0.id == id }
+      ?? queue.first { track in track.id == id && (source.map { track.source == $0 } ?? true) }
+      ?? persistent.recentTracks.first { track in track.id == id && (source.map { track.source == $0 } ?? true) }
   }
 
   private func resolvedTrack(_ track: EchoNativeCoreTrack) -> EchoNativeCoreTrack {
@@ -2084,12 +2185,15 @@ final class EchoNativeAppStore {
     case .echo: return echoTracks
     case .local: return localTracks
     case .remote: return powerampTracks
-    case .streaming: return neteaseTracks
+    case .streaming:
+      if playerModel.activePage == "search" { return neteaseSearchTracks }
+      if streamingLibraryMode == "history" { return persistent.recentTracks.filter { $0.source == .streaming } }
+      return neteaseTracks
     }
   }
 
   private func allTracks() -> [EchoNativeCoreTrack] {
-    localTracks + echoTracks + powerampTracks + neteaseTracks
+    localTracks + echoTracks + powerampTracks + libraryTracks(for: .streaming)
   }
 
   func trackKey(_ track: EchoNativeCoreTrack) -> String { "\(track.source.rawValue):\(track.id)" }
@@ -2203,7 +2307,7 @@ final class EchoNativeAppStore {
 
   private func updateActiveLyricIndex() {
     let position = playerModel.positionMs
-    guard let index = playerModel.lyricTimesMs.lastIndex(where: { $0 >= 0 && $0 <= position }) else {
+    guard let index = playerModel.lyricLines.lastIndex(where: { $0.milliseconds >= 0 && $0.milliseconds <= position }) else {
       if playerModel.activeLyricIndex != 0 { playerModel.activeLyricIndex = 0 }
       return
     }

@@ -79,11 +79,17 @@ enum EchoNativeMetadataService {
   static func parseLyrics(_ value: String) -> [LyricLine] {
     let expression = try? NSRegularExpression(pattern: #"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]"#)
     var result: [LyricLine] = []
+    var plainResult: [LyricLine] = []
     for rawLine in value.components(separatedBy: .newlines) {
       let range = NSRange(rawLine.startIndex..<rawLine.endIndex, in: rawLine)
       let matches = expression?.matches(in: rawLine, range: range) ?? []
       let text = expression?.stringByReplacingMatches(in: rawLine, range: range, withTemplate: "")
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? rawLine
+      guard !text.isEmpty else { continue }
+      if matches.isEmpty {
+        plainResult.append(LyricLine(milliseconds: -1, text: text))
+        continue
+      }
       for match in matches {
         guard
           let minuteRange = Range(match.range(at: 1), in: rawLine),
@@ -100,10 +106,7 @@ enum EchoNativeMetadataService {
       }
     }
     if !result.isEmpty { return result.sorted { $0.milliseconds < $1.milliseconds } }
-    return value.components(separatedBy: .newlines)
-      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-      .filter { !$0.isEmpty }
-      .map { LyricLine(milliseconds: -1, text: $0) }
+    return plainResult
   }
 
   private static func lrclibCandidates(for track: EchoNativeCoreTrack) async throws -> [Candidate] {

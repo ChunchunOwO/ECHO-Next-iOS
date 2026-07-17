@@ -59,6 +59,7 @@ private struct EchoNativeLibraryStreaming: Decodable {
   let loggedIn: Bool
   let playlistCount: Int
   let playlists: [EchoNativeStreamingPlaylist]
+  let profileAvatarUrl: String?
   let profileName: String
   let selectedPlaylistId: String
   let selectedPlaylistName: String
@@ -604,6 +605,7 @@ struct EchoNativePagesScreen: View {
     let streamingPlaylistIndexKeys = displayedStreamingPlaylists.map { libraryIndexKey($0.name) }
     let collectionIndexKeys = library.collections.map { libraryIndexKey($0.title) }
     let trackIndexKeys = sortedTracks.map { libraryIndexKey($0.title) }
+    // ponytail: Pages are capped at 20 items; firstIndex keeps anchor IDs unique without more state.
     let firstRowId = (
       streamingPlaylistIndexKeys.first
         ?? collectionIndexKeys.first
@@ -618,7 +620,10 @@ struct EchoNativePagesScreen: View {
       : (model.payload?.language == "en"
         ? "Browse all \(library.pagination.totalCount) items"
         : "展开全部 \(library.pagination.totalCount) 项并分页浏览")
-    let indexTargets = selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title"
+    let chronologicalView = library.view == "recent"
+      || (library.source == "streaming" && library.streaming.libraryMode == "history")
+    let indexTargets = !chronologicalView
+      && (selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title")
       ? model.libraryIndexTargets
       : []
     let contentAnimationKey = "\(library.paginationScope)::\(library.pagination.page)"
@@ -654,13 +659,14 @@ struct EchoNativePagesScreen: View {
             .buttonStyle(.plain)
           }
 
-          if !library.streaming.status.isEmpty {
-            Text(library.streaming.status)
-              .font(.system(size: 11, weight: .semibold))
-              .foregroundColor(echoInk.opacity(0.5))
-              .frame(maxWidth: .infinity, alignment: .center)
-              .multilineTextAlignment(.center)
-          }
+        }
+
+        if (searchOnly || library.source == "streaming"), !library.streaming.status.isEmpty {
+          Text(library.streaming.status)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(echoInk.opacity(0.5))
+            .frame(maxWidth: .infinity, alignment: .center)
+            .multilineTextAlignment(.center)
         }
 
         if !searchOnly {
@@ -774,6 +780,9 @@ struct EchoNativePagesScreen: View {
         if library.source == "streaming" && library.streaming.loggedIn
           && library.streaming.libraryMode == "playlists" && library.streaming.selectedPlaylistId.isEmpty {
           HStack(spacing: 10) {
+            EchoNativeArtwork(urlString: library.streaming.profileAvatarUrl ?? "", onError: {})
+              .frame(width: 42, height: 42)
+              .clipShape(Circle())
             VStack(alignment: .leading, spacing: 2) {
               Text(library.labels.playlists)
                 .font(.system(size: 18, weight: .bold, design: .rounded))
@@ -793,7 +802,7 @@ struct EchoNativePagesScreen: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
                   ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
                     streamingPlaylistGridCard(playlist, labels: library.labels)
-                      .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
+                      .id(streamingPlaylistIndexKeys.firstIndex(of: streamingPlaylistIndexKeys[index]) == index
                             ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : playlist.id)
                   }
@@ -802,7 +811,7 @@ struct EchoNativePagesScreen: View {
                 LazyVStack(spacing: 0) {
                   ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
                     streamingPlaylistRow(playlist, labels: library.labels)
-                      .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
+                      .id(streamingPlaylistIndexKeys.firstIndex(of: streamingPlaylistIndexKeys[index]) == index
                             ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : playlist.id)
                   }
@@ -845,7 +854,7 @@ struct EchoNativePagesScreen: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
                   ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
                     libraryCollectionGridCard(collection)
-                      .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
+                      .id(collectionIndexKeys.firstIndex(of: collectionIndexKeys[index]) == index
                         ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : collection.id)
                   }
@@ -854,7 +863,7 @@ struct EchoNativePagesScreen: View {
                 LazyVStack(spacing: 0) {
                   ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
                     libraryCollectionRow(collection)
-                      .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
+                      .id(collectionIndexKeys.firstIndex(of: collectionIndexKeys[index]) == index
                         ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : collection.id)
                   }
@@ -974,7 +983,7 @@ struct EchoNativePagesScreen: View {
           ) {
             ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { index, track in
               libraryTrackGridCard(track, labels: library.labels)
-                .id(index == 0 || trackIndexKeys[index - 1] != trackIndexKeys[index]
+                .id(trackIndexKeys.firstIndex(of: trackIndexKeys[index]) == index
                   ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                   : track.stableId)
             }
@@ -996,7 +1005,7 @@ struct EchoNativePagesScreen: View {
                 .padding(.top, index == 0 ? 2 : 12)
             }
             libraryTrackRow(track, labels: library.labels)
-              .id(index == 0 || trackIndexKeys[index - 1] != trackIndexKeys[index]
+              .id(trackIndexKeys.firstIndex(of: trackIndexKeys[index]) == index
                 ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                 : track.stableId)
           }
@@ -1061,8 +1070,8 @@ struct EchoNativePagesScreen: View {
       .onChange(of: "\(library.paginationScope)::\(firstRowId ?? "")") { _ in
         guard pendingAlbumScroll else { return }
         pendingAlbumScroll = false
-        guard let firstRowId else { return }
-        DispatchQueue.main.async { scrollToLibraryAnchor(firstRowId, proxy: proxy) }
+        guard firstRowId != nil else { return }
+        DispatchQueue.main.async { scrollToLibraryAnchor(pageFirstRowId, proxy: proxy) }
       }
       .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
     }
@@ -1084,7 +1093,7 @@ struct EchoNativePagesScreen: View {
     if reduceMotion {
       proxy.scrollTo(id, anchor: .top)
     } else {
-      withAnimation(.easeInOut(duration: 0.18)) {
+      withAnimation(.easeInOut(duration: 0.32)) {
         proxy.scrollTo(id, anchor: .top)
       }
     }
@@ -1169,6 +1178,7 @@ struct EchoNativePagesScreen: View {
       }
     }
     .frame(width: 44, height: indexHeight)
+    .offset(x: 11)
     .zIndex(10)
   }
 
@@ -1315,7 +1325,7 @@ struct EchoNativePagesScreen: View {
   }
 
   private func sortedAlbumTracks(_ tracks: [EchoNativeLibraryTrack]) -> [EchoNativeLibraryTrack] {
-    guard !selectedAlbumId.isEmpty else { return tracks }
+    guard selectedCollectionIsAlbum else { return tracks }
     switch albumTrackSort {
     case "track":
       return tracks.sorted {
@@ -1414,9 +1424,7 @@ struct EchoNativePagesScreen: View {
       onArtworkError: { onAction(["action": "artworkError", "url": track.artworkUrl]) },
       onSelect: { onAction(["action": "trackPlay", "id": track.id, "source": track.source]) }
     ) {
-      if track.source != "streaming" {
-        libraryTrackMenu(track, labels: labels)
-      }
+      libraryTrackMenu(track, labels: labels)
     }
   }
 
@@ -1621,9 +1629,7 @@ struct EchoNativePagesScreen: View {
       }
       .buttonStyle(.plain)
 
-      if track.source != "streaming" {
-        libraryTrackMenu(track, labels: labels)
-      }
+      libraryTrackMenu(track, labels: labels)
     }
     .padding(.vertical, 8)
     .overlay(alignment: .bottom) {
@@ -1675,13 +1681,11 @@ struct EchoNativePagesScreen: View {
         }
       }
 
-      if track.source != "streaming" {
-        Divider()
-        Button {
-          onAction(["action": "trackFavorite", "id": track.id, "source": track.source])
-        } label: {
-          Label(track.favorite ? labels.unfavorite : labels.favorite, systemImage: track.favorite ? "heart.slash" : "heart")
-        }
+      Divider()
+      Button {
+        onAction(["action": "trackFavorite", "id": track.id, "source": track.source])
+      } label: {
+        Label(track.favorite ? labels.unfavorite : labels.favorite, systemImage: track.favorite ? "heart.slash" : "heart")
       }
       if track.source == "remote" {
         Button {

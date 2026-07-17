@@ -231,7 +231,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     guard let value = response.profile, let userId = value.userId else {
       throw EchoNativeNetworkError.server(401, "网易云登录状态已失效。")
     }
-    return Profile(avatarUrl: value.avatarUrl ?? "", name: value.nickname ?? "网易云用户", userId: userId)
+    return Profile(avatarUrl: Self.secureMediaUrl(value.avatarUrl), name: value.nickname ?? "网易云用户", userId: userId)
   }
 
   func playlists(userId: Int64) async throws -> [Playlist] {
@@ -244,7 +244,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     ])
     return (response.playlist ?? []).compactMap { value in
       guard let id = value.id, let name = value.name else { return nil }
-      return Playlist(artworkUrl: value.coverImgUrl ?? "", id: String(id), name: name, trackCount: value.trackCount ?? 0)
+      return Playlist(artworkUrl: Self.secureMediaUrl(value.coverImgUrl), id: String(id), name: name, trackCount: value.trackCount ?? 0)
     }
   }
 
@@ -259,12 +259,18 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
   func playlistTracks(id: String) async throws -> [EchoNativeCoreTrack] {
     if direct {
       struct Detail: Decodable {
-        struct Value: Decodable { struct TrackId: Decodable { let id: Int64? }; let trackIds: [TrackId]? }
+        struct Value: Decodable {
+          struct TrackId: Decodable { let id: Int64? }
+          let trackIds: [TrackId]?
+          let tracks: [Song]?
+        }
         let playlist: Value?
       }
       struct Songs: Decodable { let songs: [Song]? }
-      let detail: Detail = try await request(path: "/api/v6/playlist/detail", values: ["id": id, "n": "100000", "s": "0"])
+      let detail: Detail = try await request(path: "/api/v6/playlist/detail", values: ["id": id, "n": "100000", "s": "8"])
+      let inlineTracks = (detail.playlist?.tracks ?? []).compactMap(\.track)
       let ids = detail.playlist?.trackIds?.compactMap(\.id) ?? []
+      guard !ids.isEmpty else { return inlineTracks }
       var tracks: [EchoNativeCoreTrack] = []
       for start in stride(from: 0, to: ids.count, by: 500) {
         let chunk = Array(ids[start..<min(start + 500, ids.count)])
@@ -273,7 +279,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
         let response: Songs = try await request(path: "/api/v3/song/detail", values: ["c": value])
         tracks.append(contentsOf: (response.songs ?? []).compactMap(\.track))
       }
-      return tracks
+      return tracks.isEmpty ? inlineTracks : tracks
     }
     struct Response: Decodable { let songs: [Song]? }
     var tracks: [EchoNativeCoreTrack] = []
@@ -296,7 +302,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
       direct ? "ids" : "id": direct ? "[\(trackId)]" : trackId,
       "level": "exhigh",
     ])
-    guard let raw = response.data?.first?.url, let url = URL(string: raw.replacingOccurrences(of: "http://", with: "https://")) else {
+    guard let raw = response.data?.first?.url, let url = URL(string: Self.secureMediaUrl(raw)) else {
       throw EchoNativeNetworkError.server(404, "该歌曲当前不可播放。")
     }
     return url
@@ -356,7 +362,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
         album: albumValue?.name ?? "",
         albumArtist: "",
         artist: (ar ?? artists ?? []).compactMap(\.name).joined(separator: ", "),
-        artworkUrl: albumValue?.picUrl,
+        artworkUrl: EchoNativeNeteaseClient.secureMediaUrl(albumValue?.picUrl),
         canPlayOnPhone: true,
         durationMs: dt ?? duration ?? 0,
         id: String(id),
@@ -365,6 +371,16 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
         title: name
       )
     }
+  }
+
+  private static func secureMediaUrl(_ value: String?) -> String {
+    guard let value, var components = URLComponents(string: value), components.scheme == "http",
+      let host = components.host?.lowercased(),
+      host == "music.126.net" || host.hasSuffix(".music.126.net")
+        || host == "music.163.com" || host.hasSuffix(".music.163.com")
+    else { return value ?? "" }
+    components.scheme = "https"
+    return components.string ?? value
   }
 
   private func request<T: Decodable>(path: String, values: [String: String] = [:]) async throws -> T {

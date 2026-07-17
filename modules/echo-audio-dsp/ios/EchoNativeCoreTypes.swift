@@ -287,9 +287,11 @@ struct EchoNativePersistentState: Codable, Sendable {
   var powerampConnection = EchoNativeConnection.powerampDefault
   var queueTrackKeys: [String] = []
   var recentTrackKeys: [String] = []
+  var recentTracks: [EchoNativeCoreTrack] = []
   var settings = EchoNativeCoreSettings()
   var streamingFavoritePlaylistIds: Set<String> = []
   var streamingPinnedPlaylistIds: Set<String> = []
+  var streamingQueueTracks: [EchoNativeCoreTrack] = []
 
   init() {}
 
@@ -301,9 +303,11 @@ struct EchoNativePersistentState: Codable, Sendable {
     powerampConnection = try values.decodeIfPresent(EchoNativeConnection.self, forKey: .powerampConnection) ?? .powerampDefault
     queueTrackKeys = try values.decodeIfPresent([String].self, forKey: .queueTrackKeys) ?? []
     recentTrackKeys = try values.decodeIfPresent([String].self, forKey: .recentTrackKeys) ?? []
+    recentTracks = try values.decodeIfPresent([EchoNativeCoreTrack].self, forKey: .recentTracks) ?? []
     settings = try values.decodeIfPresent(EchoNativeCoreSettings.self, forKey: .settings) ?? EchoNativeCoreSettings()
     streamingFavoritePlaylistIds = try values.decodeIfPresent(Set<String>.self, forKey: .streamingFavoritePlaylistIds) ?? []
     streamingPinnedPlaylistIds = try values.decodeIfPresent(Set<String>.self, forKey: .streamingPinnedPlaylistIds) ?? []
+    streamingQueueTracks = try values.decodeIfPresent([EchoNativeCoreTrack].self, forKey: .streamingQueueTracks) ?? []
   }
 }
 

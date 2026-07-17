@@ -113,7 +113,9 @@ extension EchoNativeAppStore {
     let selectedTracks = selectedCollectionId.isEmpty ? nil : collectionTrackKeys[selectedCollectionId]?.compactMap(track(forKey:))
     let baseTracks = selectedTracks ?? filteredTracks(sourceTracks, source: source)
     let collections = selectedTracks == nil ? collectionsForCurrentView(baseTracks, source: source) : []
-    let sortedTracks = sortLibraryTracks(baseTracks)
+    let sortedTracks = libraryView == "recent" || (source == "streaming" && streamingLibraryMode == "history")
+      ? baseTracks
+      : sortLibraryTracks(baseTracks)
     let shouldShowTracks = selectedTracks != nil || libraryView == "songs" || libraryView == "favorites" || libraryView == "recent" || libraryView == "formats" || source == "all" || source == "streaming"
     let fullTracks = shouldShowTracks ? sortedTracks : []
     let allStreamingPlaylists = sortedStreamingPlaylists()
@@ -196,14 +198,18 @@ extension EchoNativeAppStore {
     case "echo": return echoTracks
     case "local": return localTracks
     case "remote": return powerampTracks
-    case "streaming": return neteaseTracks
-    default: return localTracks + echoTracks + powerampTracks + neteaseTracks
+    case "streaming": return libraryTracks(for: .streaming)
+    default: return localTracks + echoTracks + powerampTracks + libraryTracks(for: .streaming)
     }
   }
 
   private func filteredTracks(_ tracks: [EchoNativeCoreTrack], source: String) -> [EchoNativeCoreTrack] {
     let query = normalized(libraryQuery)
     var values = tracks
+    if libraryView == "recent" {
+      let snapshots = persistent.recentTracks.filter { source == "all" || $0.source.rawValue == source }
+      values = deduplicated(values + snapshots)
+    }
     if !query.isEmpty {
       values = values.filter { track in
         [track.title, track.artist, track.album, track.albumArtist, track.codec ?? ""]
@@ -416,9 +422,16 @@ extension EchoNativeAppStore {
   }
 
   private func streamingLibraryPayload(playlists: [EchoNativeNeteaseClient.Playlist]) -> [String: Any] {
+    let status = playerModel.activePage == "search" || streamingLibraryMode == "search"
+      ? streamingSearchStatus
+      : streamingStatus
     return [
       "libraryMode": streamingLibraryMode,
-      "libraryModeOptions": [option("search", localized("Search", "搜索")), option("playlists", localized("Playlists", "歌单"))],
+      "libraryModeOptions": [
+        option("search", localized("Search", "搜索")),
+        option("playlists", localized("Playlists", "歌单")),
+        option("history", localized("History", "历史")),
+      ],
       "loggedIn": neteaseProfile != nil,
       "playlistCount": neteasePlaylists.count,
       "playlists": playlists.map { playlist in [
@@ -430,10 +443,11 @@ extension EchoNativeAppStore {
         "sourceLabel": localized("NetEase", "网易云"),
         "trackCount": playlist.trackCount,
       ] as [String: Any] },
+      "profileAvatarUrl": neteaseProfile?.avatarUrl ?? "",
       "profileName": neteaseProfile?.name ?? "",
       "selectedPlaylistId": selectedStreamingPlaylistId,
       "selectedPlaylistName": neteasePlaylists.first(where: { $0.id == selectedStreamingPlaylistId })?.name ?? "",
-      "status": streamingStatus,
+      "status": status,
     ]
   }
 

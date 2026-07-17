@@ -258,8 +258,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var isFavorite = false
   @Published var isPlaying = false
   @Published var language = "zh"
-  @Published var lyricTexts: [String] = []
-  @Published var lyricTimesMs: [Double] = []
+  @Published var lyricLines: [EchoNativeMetadataService.LyricLine] = []
   @Published var lyricsVisible = false
   @Published var metadataLoading = false
   @Published var outputMode = "pc"
@@ -314,6 +313,7 @@ final class EchoNativePlayerModel: ObservableObject {
 
 public final class EchoNativeAppView: ExpoView {
   private let store = EchoNativeAppStore()
+  private var appearanceCancellable: AnyCancellable?
 
   private lazy var hostingController = UIHostingController(
     rootView: EchoNativeAppScreen(
@@ -328,6 +328,12 @@ public final class EchoNativeAppView: ExpoView {
     clipsToBounds = true
     hostingController.view.backgroundColor = .clear
     hostingController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    appearanceCancellable = store.playerModel.$followSystemAppearance
+      .combineLatest(store.playerModel.$darkModeEnabled)
+      .sink { [weak self] followsSystem, darkMode in
+        let style: UIUserInterfaceStyle = followsSystem ? .unspecified : (darkMode ? .dark : .light)
+        self?.hostingController.overrideUserInterfaceStyle = style
+      }
   }
 
   public override func layoutSubviews() {
@@ -391,7 +397,6 @@ private struct EchoNativeAppScreen: View {
     } message: {
       Text(playerModel.alertMessage)
     }
-    .preferredColorScheme(playerModel.followSystemAppearance ? nil : (playerModel.darkModeEnabled ? .dark : .light))
   }
 
   private var selection: Binding<String> {
@@ -621,7 +626,7 @@ struct EchoNativePlayerScreen: View {
       .frame(width: artworkSize)
 
       VStack(alignment: .leading, spacing: compact ? 3 : 5) {
-        Text(model.title)
+        Text(titleLabel)
           .font(.system(size: compact ? 17 : 20, weight: .bold))
           .foregroundColor(echoInk)
           .lineLimit(2)
@@ -663,16 +668,16 @@ struct EchoNativePlayerScreen: View {
     ScrollViewReader { proxy in
       ScrollView(.vertical, showsIndicators: false) {
         LazyVStack(alignment: .leading, spacing: compact ? 12 : 18) {
-          ForEach(model.lyricTexts.indices, id: \.self) { index in
+          ForEach(Array(model.lyricLines.enumerated()), id: \.offset) { index, line in
             let active = index == model.activeLyricIndex
             let distance = abs(index - model.activeLyricIndex)
-            let timeMs = lyricTime(at: index)
+            let timeMs = line.milliseconds
             Button {
               guard timeMs >= 0 else { return }
               onAction(["action": "seek", "value": timeMs])
             } label: {
               VStack(alignment: .leading, spacing: 3) {
-                Text(model.lyricTexts[index])
+                Text(line.text)
                   .font(.system(
                     size: active ? (compact ? 20 : 24) : (distance == 1 ? 18 : 16),
                     weight: active ? .bold : .semibold
@@ -681,7 +686,7 @@ struct EchoNativePlayerScreen: View {
                   .multilineTextAlignment(.leading)
                   .fixedSize(horizontal: false, vertical: true)
                   .shadow(color: active ? Color.white.opacity(0.7) : .clear, radius: 8)
-                if timeMs >= 0 && !active {
+                if timeMs >= 0 {
                   Text(formatTime(timeMs))
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundColor(echoInk.opacity(0.32))
@@ -693,7 +698,7 @@ struct EchoNativePlayerScreen: View {
             .buttonStyle(.plain)
             .disabled(timeMs < 0)
             .id(index)
-            .accessibilityLabel(lyricAccessibilityLabel(index: index, timeMs: timeMs))
+            .accessibilityLabel(lyricAccessibilityLabel(line: line, timeMs: timeMs))
           }
         }
         .padding(.vertical, compact ? 56 : 76)
@@ -714,17 +719,13 @@ struct EchoNativePlayerScreen: View {
     .frame(maxHeight: .infinity)
   }
 
-  private func lyricTime(at index: Int) -> Double {
-    index < model.lyricTimesMs.count ? model.lyricTimesMs[index] : -1
-  }
-
-  private func lyricAccessibilityLabel(index: Int, timeMs: Double) -> String {
-    guard timeMs >= 0 else { return model.lyricTexts[index] }
-    return "\(formatTime(timeMs)), \(model.lyricTexts[index])"
+  private func lyricAccessibilityLabel(line: EchoNativeMetadataService.LyricLine, timeMs: Double) -> String {
+    guard timeMs >= 0 else { return line.text }
+    return "\(formatTime(timeMs)), \(line.text)"
   }
 
   private func scrollToActiveLyric(_ proxy: ScrollViewProxy, index: Int, animated: Bool) {
-    guard model.lyricTexts.indices.contains(index) else { return }
+    guard model.lyricLines.indices.contains(index) else { return }
     if animated && !reduceMotion {
       withAnimation(.easeOut(duration: 0.3)) {
         proxy.scrollTo(index, anchor: .center)
@@ -739,7 +740,7 @@ struct EchoNativePlayerScreen: View {
       Text(model.language == "en" ? "NOW PLAYING" : "正在播放")
         .font(.system(size: 10, weight: .bold))
         .foregroundColor(echoInk.opacity(0.48))
-      Text(model.album)
+      Text(albumLabel)
         .font(.system(size: 13, weight: .semibold))
         .foregroundColor(echoInk)
         .lineLimit(1)
@@ -799,7 +800,7 @@ struct EchoNativePlayerScreen: View {
 
   private func trackDetails(compact: Bool) -> some View {
     VStack(spacing: compact ? 4 : 7) {
-      Text(model.title)
+      Text(titleLabel)
         .font(.system(size: compact ? 18 : 21, weight: .bold))
         .foregroundColor(echoInk)
         .lineLimit(compact ? 1 : 2)
@@ -1089,6 +1090,16 @@ struct EchoNativePlayerScreen: View {
   private var artistLabel: String {
     let artist = model.artist.trimmingCharacters(in: .whitespacesAndNewlines)
     return artist.isEmpty ? (model.language == "en" ? "Unknown Artist" : "未知艺术家") : artist
+  }
+
+  private var albumLabel: String {
+    let album = model.album.trimmingCharacters(in: .whitespacesAndNewlines)
+    return album.isEmpty ? (model.language == "en" ? "Unknown Album" : "未知专辑") : album
+  }
+
+  private var titleLabel: String {
+    let title = model.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    return title.isEmpty ? (model.language == "en" ? "No song is playing" : "没有正在播放的歌曲") : title
   }
 }
 
