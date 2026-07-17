@@ -112,7 +112,9 @@ extension EchoNativeAppStore {
     let sourceTracks = tracksForLibrarySource(source)
     let selectedTracks = selectedCollectionId.isEmpty ? nil : collectionTrackKeys[selectedCollectionId]?.compactMap(track(forKey:))
     let baseTracks = selectedTracks ?? filteredTracks(sourceTracks, source: source)
-    let collections = selectedTracks == nil ? collectionsForCurrentView(baseTracks, source: source) : []
+    let collections = selectedTracks == nil && source != "all"
+      ? collectionsForCurrentView(baseTracks, source: source)
+      : []
     let sortedTracks = libraryView == "recent" || (source == "streaming" && streamingLibraryMode == "history")
       ? baseTracks
       : sortLibraryTracks(baseTracks)

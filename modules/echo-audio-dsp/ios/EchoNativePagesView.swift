@@ -583,7 +583,6 @@ struct EchoNativePagesScreen: View {
 
   private func searchPage(_ library: EchoNativeLibraryPayload) -> some View {
     libraryPage(library, searchOnly: true)
-      .searchable(text: libraryQueryBinding(library), prompt: library.labels.searchPlaceholder)
   }
 
   private func libraryPage(_ library: EchoNativeLibraryPayload, searchOnly: Bool = false) -> some View {
@@ -669,36 +668,36 @@ struct EchoNativePagesScreen: View {
             .multilineTextAlignment(.center)
         }
 
-        if !searchOnly {
-          HStack(spacing: 10) {
-            HStack(spacing: 9) {
-              Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(echoInk.opacity(0.45))
-              TextField(
-                library.labels.searchPlaceholder,
-                text: libraryQueryBinding(library)
-              )
-              .font(.system(size: 14, weight: .medium))
-              .textInputAutocapitalization(.never)
-              .disableAutocorrection(true)
-              if !library.query.isEmpty {
-                Button {
-                  libraryQueryBinding(library).wrappedValue = ""
-                } label: {
-                  Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(echoInk.opacity(0.36))
-                    .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(model.payload?.language == "en" ? "Clear search" : "清除搜索")
+        HStack(spacing: 10) {
+          HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+              .font(.system(size: 15, weight: .semibold))
+              .foregroundColor(echoInk.opacity(0.45))
+            TextField(
+              library.labels.searchPlaceholder,
+              text: libraryQueryBinding(library)
+            )
+            .font(.system(size: 14, weight: .medium))
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
+            if !library.query.isEmpty {
+              Button {
+                libraryQueryBinding(library).wrappedValue = ""
+              } label: {
+                Image(systemName: "xmark.circle.fill")
+                  .font(.system(size: 17, weight: .semibold))
+                  .foregroundColor(echoInk.opacity(0.36))
+                  .frame(width: 44, height: 44)
               }
+              .buttonStyle(.plain)
+              .accessibilityLabel(model.payload?.language == "en" ? "Clear search" : "清除搜索")
             }
-            .padding(.horizontal, 14)
-            .frame(height: 46)
-            .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+          }
+          .padding(.horizontal, 14)
+          .frame(height: 46)
+          .echoGlass(tint: Color.white.opacity(0.12), clear: false, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
 
+          if !searchOnly {
             Button {
               onAction(["action": "libraryRefresh"])
             } label: {

@@ -811,10 +811,7 @@ struct EchoNativePlayerScreen: View {
         .foregroundColor(echoInk.opacity(0.58))
         .lineLimit(1)
       if !model.tags.isEmpty {
-        LazyVGrid(
-          columns: [GridItem(.adaptive(minimum: compact ? 54 : 64), spacing: 5)],
-          spacing: 5
-        ) {
+        HStack(spacing: 5) {
           ForEach(model.tags, id: \.self) { tag in
             Text(tag)
               .font(.system(size: 10, weight: .bold))
@@ -822,10 +819,11 @@ struct EchoNativePlayerScreen: View {
               .lineLimit(1)
               .minimumScaleFactor(0.7)
               .padding(.horizontal, 6)
-              .frame(maxWidth: .infinity, minHeight: 23)
+              .frame(minHeight: 23)
               .overlay(Capsule().stroke(echoInk.opacity(0.15), lineWidth: 1))
           }
         }
+        .frame(maxWidth: .infinity, alignment: .center)
       }
     }
   }

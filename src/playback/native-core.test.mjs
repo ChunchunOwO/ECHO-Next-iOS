@@ -51,6 +51,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(store, /streamingSnapshots\[key\] \?\? track\(forKey: key\)/u);
   assert.match(store, /if mode != \.streaming \{ addRecent\(track\) \}/u);
   assert.match(store, /streamingSearchStatus = errorMessage\(error\)/u);
+  assert.match(payload, /let collections = selectedTracks == nil && source != "all"/u);
   assert.match(payload, /option\("history", localized\("History", "历史"\)\)/u);
   assert.match(coreTypes, /recentTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.recentTracks\) \?\? \[\]/u);
   assert.match(coreTypes, /streamingQueueTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.streamingQueueTracks\) \?\? \[\]/u);
@@ -76,6 +77,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.equal((pages.match(/\.firstIndex\(of:/gu) ?? []).length, 6);
   assert.match(pages, /\.offset\(x: 11\)/u);
   assert.match(pages, /libraryTrackMenu\(track, labels: labels\)/u);
+  assert.doesNotMatch(pages, /\.searchable\(text: libraryQueryBinding/u);
   assert.match(remoteClients, /secureMediaUrl\(value\.avatarUrl\)/u);
   assert.match(remoteClients, /host == "music\.126\.net" \|\| host\.hasSuffix\("\.music\.126\.net"\)/u);
   assert.match(remoteClients, /return tracks\.isEmpty \? inlineTracks : tracks/u);
