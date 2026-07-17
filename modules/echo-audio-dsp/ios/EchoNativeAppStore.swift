@@ -1,0 +1,2232 @@
+import Foundation
+import UIKit
+
+@MainActor
+final class EchoNativeAppStore {
+  let pagesModel = EchoNativePagesModel()
+  let playerModel = EchoNativePlayerModel()
+
+  var persistent = EchoNativePersistence.load()
+  var echoTracks: [EchoNativeCoreTrack] = []
+  var echoAlbums: [EchoNativeCoreAlbum] = []
+  var localTracks: [EchoNativeCoreTrack] = []
+  var powerampTracks: [EchoNativeCoreTrack] = []
+  var powerampAlbums: [EchoNativeCoreAlbum] = []
+  var neteaseTracks: [EchoNativeCoreTrack] = []
+  var neteasePlaylists: [EchoNativeNeteaseClient.Playlist] = []
+  var neteaseProfile: EchoNativeNeteaseClient.Profile?
+  var queue: [EchoNativeCoreTrack] = []
+  var currentTrack: EchoNativeCoreTrack?
+  var outputMode: EchoNativeOutputMode = .local
+  var librarySource = "local"
+  var libraryView = "songs"
+  var libraryFilter = "all"
+  var libraryQuery = ""
+  var libraryPage = 0
+  var libraryExpanded = false
+  var librarySort = "default"
+  var selectedCollectionId = ""
+  var selectedPlaylistId = ""
+  var activeQueuePlaylistId = ""
+  var selectedStreamingPlaylistId = ""
+  var connectMode = "echo"
+  var echoBusy = false
+  var powerampBusy = false
+  var localBusy = false
+  var streamingBusy = false
+  var echoOnline = false
+  var powerampOnline = false
+  var echoError = ""
+  var powerampError = ""
+  var streamingStatus = ""
+  var pairingText = ""
+  var streamingLibraryMode = "search"
+  var streamingFavoritePlaylistIds: Set<String> {
+    get { persistent.streamingFavoritePlaylistIds }
+    set { persistent.streamingFavoritePlaylistIds = newValue }
+  }
+  var streamingPinnedPlaylistIds: Set<String> {
+    get { persistent.streamingPinnedPlaylistIds }
+    set { persistent.streamingPinnedPlaylistIds = newValue }
+  }
+  var collectionTrackKeys: [String: [String]] = [:]
+  var libraryIndexPayloadScope = ""
+  var libraryIndexPayloadTitles: [String] = []
+  weak var presenter: UIViewController?
+
+  private let audioEngine = DspPlaybackEngine()
+  private lazy var nowPlayingController = NowPlayingController { [weak self] command, position in
+    Task { @MainActor in self?.handleRemoteCommand(command, position: position) }
+  }
+  private var echoClient: EchoNativeRemoteClient?
+  private var powerampClient: EchoNativeRemoteClient?
+  private var neteaseClient: EchoNativeNeteaseClient?
+  private var neteaseClientConfiguration = ""
+  private var echoStatus: EchoNativePlaybackStatus?
+  private var powerampStatus: EchoNativePlaybackStatus?
+  private var echoStatusReceivedAt = Date()
+  private var powerampStatusReceivedAt = Date()
+  private var progressTask: Task<Void, Never>?
+  private var echoPollTask: Task<Void, Never>?
+  private var powerampPollTask: Task<Void, Never>?
+  private var searchTask: Task<Void, Never>?
+  private var playbackLoadTask: Task<Void, Never>?
+  private var lyricsTask: Task<Void, Never>?
+  private var metadataTask: Task<Void, Never>?
+  private var libraryArtworkTask: Task<Void, Never>?
+  private var streamingQrTask: Task<Void, Never>?
+  private var handledFinishedTrackKey = ""
+  private var playbackGeneration = 0
+  private var lyricsGeneration = 0
+  private var metadataGeneration = 0
+  private var libraryArtworkGeneration = 0
+  private var streamingQrGeneration = 0
+  private var streamingQrKey = ""
+  var streamingQrUrl = ""
+  private var audioLoading = false
+  private var externalMetadataLoading = false
+  private var externalMetadataCandidates: [EchoNativeMetadataService.Candidate] = []
+  private var externalMetadataTrackKey = ""
+  private var externalLyricsByTrackKey: [String: String] = [:]
+  private var libraryArtworkLookupKeys = Set<String>()
+  private var ignoredExternalMetadataTrackKeys = Set<String>()
+  private var failedArtworkUrls = Set<String>()
+  private var lastNowPlayingPosition = -1.0
+  private var lastNowPlayingState = false
+  private var lastNowPlayingTrackKey = ""
+  private var powerampQueueManagedLocally = false
+  private var started = false
+
+  func start() {
+    guard !started else { return }
+    started = true
+    applySettings()
+    configureClients()
+    startProgressClock()
+    startPolling()
+    renderPages()
+    Task {
+      await refreshLocalLibrary()
+      await refreshEcho(loadLibrary: true)
+      await refreshPoweramp(loadLibrary: true)
+      await loadNeteaseAccount()
+      restoreQueue()
+    }
+  }
+
+  func stop() {
+    playbackGeneration &+= 1
+    progressTask?.cancel()
+    echoPollTask?.cancel()
+    powerampPollTask?.cancel()
+    searchTask?.cancel()
+    playbackLoadTask?.cancel()
+    lyricsTask?.cancel()
+    metadataTask?.cancel()
+    libraryArtworkTask?.cancel()
+    streamingQrTask?.cancel()
+    playbackLoadTask = nil
+    lyricsTask = nil
+    metadataTask = nil
+    libraryArtworkTask = nil
+    streamingQrTask = nil
+    audioLoading = false
+    externalMetadataLoading = false
+    updateLoadingState()
+    audioEngine.stop()
+    nowPlayingController.clear()
+  }
+
+  func migrateLegacy(payloadJSON: String) {
+    struct Payload: Decodable {
+      let neteaseCookie: String
+      let state: EchoNativePersistentState
+      let streamingFavoritePlaylistIds: [String]
+      let streamingPinnedPlaylistIds: [String]
+    }
+    guard !payloadJSON.isEmpty, !EchoNativePersistence.didMigrateLegacy,
+      let data = payloadJSON.data(using: .utf8),
+      let payload = try? JSONDecoder().decode(Payload.self, from: data)
+    else { return }
+    persistent = payload.state
+    streamingFavoritePlaylistIds = Set(payload.streamingFavoritePlaylistIds)
+    streamingPinnedPlaylistIds = Set(payload.streamingPinnedPlaylistIds)
+    EchoNativePersistence.setNeteaseCookie(payload.neteaseCookie)
+    EchoNativePersistence.save(persistent)
+    EchoNativePersistence.markLegacyMigrated()
+    guard started else { return }
+    applySettings()
+    configureClients()
+    startPolling()
+    renderPages()
+    Task {
+      await refreshEcho(loadLibrary: true)
+      await refreshPoweramp(loadLibrary: true)
+      await loadNeteaseAccount()
+      restoreQueue()
+    }
+  }
+
+  func handle(_ payload: [String: Any]) {
+    guard let action = payload["action"] as? String else { return }
+    switch action {
+    case "page":
+      guard let page = payload["page"] as? String else { return }
+      playerModel.activePage = page
+      renderPages()
+    case "playPause": togglePlayPause()
+    case "previous": playAdjacent(-1)
+    case "next": playAdjacent(1)
+    case "seek":
+      if let value = number(payload["value"]) { seek(toMilliseconds: value) }
+    case "volume":
+      if let value = number(payload["value"]) {
+        let volume = max(0, min(1, value))
+        if (outputMode == .pc || outputMode == .remoteControl), payload["commit"] as? Bool == false {
+          playerModel.volume = volume
+        } else {
+          setVolume(volume)
+        }
+      }
+    case "repeat":
+      persistent.settings.repeatOne = playerModel.repeatOne
+      persist()
+    case "lyrics":
+      playerModel.lyricsVisible = true
+      loadLyricsForCurrentTrack()
+    case "lyricsClose": playerModel.lyricsVisible = false
+    case "eqChange":
+      guard let index = payload["index"] as? Int, let value = number(payload["value"]), playerModel.equalizer.gains.indices.contains(index) else { return }
+      playerModel.equalizer.gains[index] = min(12, max(-12, value))
+      playerModel.equalizer.preset = "custom"
+      pagesModel.equalizer.gains[index] = playerModel.equalizer.gains[index]
+      pagesModel.equalizer.preset = "custom"
+      persistent.settings.eqGains = playerModel.equalizer.gains
+      persistent.settings.eqPreset = "custom"
+      audioEngine.setEq(gains: playerModel.equalizer.gains)
+      if payload["commit"] as? Bool != false { persist() }
+    case "eqPreset":
+      if let preset = payload["preset"] as? String { applyEqPreset(preset) }
+    case "outputSource", "output":
+      if let mode = payload["mode"] as? String { switchOutput(mode) }
+    case "trackFavoriteCurrent":
+      if let currentTrack { toggleFavorite(currentTrack) }
+    case "externalMetadataRefresh": refreshExternalMetadata(manual: true)
+    case "externalFieldSourcesSelect": applyExternalMetadataSelection(payload)
+    case "externalSourcePickerDismiss": clearExternalMetadataPicker()
+    case "externalSourcePickerIgnore": ignoreExternalMetadataPicker()
+    case "artworkError": handleArtworkError(payload["url"] as? String ?? "")
+    case "queuePlay", "trackPlay":
+      guard let id = payload["id"] as? String else { return }
+      let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:))
+      if let playlistId = payload["playlistId"] as? String, !playlistId.isEmpty,
+        let playlist = persistent.playlists.first(where: { $0.id == playlistId }) {
+        queue = resolvedTracks(playlist.tracks)
+        activeQueuePlaylistId = playlistId
+      } else if action == "trackPlay" {
+        activeQueuePlaylistId = ""
+      }
+      if let track = track(id: id, source: source) {
+        play(track)
+        playerModel.activePage = "control"
+        renderPages()
+      }
+    case "queueMove": moveQueueItem(payload)
+    case "queueRemove": removeQueueItem(payload)
+    case "queueClear": clearQueue(payload)
+    case "librarySource":
+      if let value = payload["selection"] as? String { librarySource = value; resetLibraryPosition(); refreshVisibleLibraryIfNeeded() }
+    case "libraryView":
+      if let value = payload["selection"] as? String { libraryView = value; resetLibraryPosition(); renderPages() }
+    case "libraryFilter":
+      if let value = payload["selection"] as? String { libraryFilter = value; resetLibraryPosition(); renderPages() }
+    case "libraryQuery":
+      libraryQuery = payload["text"] as? String ?? ""
+      if libraryQuery.isEmpty { selectedCollectionId = "" }
+      libraryPage = 0
+      scheduleStreamingSearchIfNeeded()
+      renderPages()
+    case "libraryPage", "libraryIndex":
+      if let index = payload["index"] as? Int {
+        libraryPage = max(0, index)
+        if action == "libraryIndex" { libraryExpanded = true }
+        renderPages()
+      }
+    case "libraryExpand":
+      libraryExpanded = payload["enabled"] as? Bool ?? true
+      libraryPage = 0
+      renderPages()
+    case "libraryAlbumSort":
+      librarySort = payload["selection"] as? String ?? "default"
+      renderPages()
+    case "libraryCollectionSelect": selectCollection(payload)
+    case "collectionPlay": playCollection(payload)
+    case "libraryRefresh":
+      resetLibraryArtworkLookup()
+      refreshVisibleLibrary()
+    case "libraryImport": importLocalMusic()
+    case "libraryPlayFirst":
+      if let first = localTracks.first {
+        activeQueuePlaylistId = ""; queue = localTracks; play(first, forcedMode: .local)
+        playerModel.activePage = "control"; renderPages()
+      }
+    case "trackQueue":
+      if let id = payload["id"] as? String,
+        let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:)),
+        let value = track(id: id, source: source),
+        !queue.contains(where: { trackKey($0) == trackKey(value) }) {
+        activeQueuePlaylistId = ""
+        queue.append(value)
+        if source == .remote { powerampQueueManagedLocally = true }
+        updateQueueModel(); persistQueue(); synchronizeControlledQueue()
+      }
+    case "trackNext": insertTrackNext(payload)
+    case "trackLyrics": importLocalLyrics(payload)
+    case "trackDelete": deleteLocalTrack(payload)
+    case "trackFavorite":
+      if let id = payload["id"] as? String,
+        let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:)),
+        let value = track(id: id, source: source) { toggleFavorite(value) }
+    case "remoteTrackControl":
+      if let id = payload["id"] as? String, let value = track(id: id, source: .remote) {
+        play(value, forcedMode: .remoteControl); playerModel.activePage = "control"; renderPages()
+      }
+    case "remoteTrackStream":
+      if let id = payload["id"] as? String, let value = track(id: id, source: .remote) {
+        play(value, forcedMode: .remoteStream); playerModel.activePage = "control"; renderPages()
+      }
+    case "playlistCreate": createPlaylist(payload)
+    case "playlistRename": renamePlaylist(payload)
+    case "playlistDelete": deletePlaylist(payload)
+    case "playlistOpen":
+      selectedPlaylistId = payload["playlistId"] as? String ?? ""
+      renderPages()
+    case "playlistClose": selectedPlaylistId = ""; renderPages()
+    case "playlistPin": mutatePlaylist(payload) { $0.pinned.toggle() }
+    case "playlistFavorite": mutatePlaylist(payload) { $0.favorite.toggle() }
+    case "playlistAddTrack": addTrackToPlaylist(payload)
+    case "playlistRemoveTrack": removeTrackFromPlaylist(payload)
+    case "collectionPlaylistAdd": addCollectionToPlaylist(payload)
+    case "collectionPlaylistCreate": createPlaylistFromCollection(payload)
+    case "connectMode":
+      connectMode = payload["selection"] as? String ?? "echo"
+      renderPages()
+    case "connectionField": updateConnectionField(payload, remote: false)
+    case "powerampRemoteField": updateConnectionField(payload, remote: true)
+    case "connectionSave": saveConnection(remote: false)
+    case "powerampRemoteSave": savePowerampConnection(payload)
+    case "connectionTest": testConnection(remote: false)
+    case "powerampRemoteTest": testConnection(remote: true)
+    case "echoConnectionEnabled": setConnectionEnabled(payload, remote: false)
+    case "powerampRemoteEnabled": setConnectionEnabled(payload, remote: true)
+    case "pairingText": pairingText = payload["text"] as? String ?? ""
+    case "pairConnection": applyPairing(pairingText, remote: false)
+    case "pairScanned": applyPairing(payload["text"] as? String ?? "", remote: false)
+    case "powerampPairScanned": applyPairing(payload["text"] as? String ?? "", remote: true)
+    case "streamingWebLogin": acceptNeteaseCookie(payload["text"] as? String ?? "")
+    case "streamingAccessMode":
+      guard let selection = payload["selection"] as? String, selection == "direct" || selection == "selfHosted" else { return }
+      clearNeteaseQrLogin()
+      persistent.settings.neteaseAccessMode = selection
+      if selection == "direct" { persistent.settings.neteaseApiBaseUrl = "https://music.163.com" }
+      persist(); configureClients(); renderPages()
+    case "streamingApiUrl":
+      clearNeteaseQrLogin()
+      persistent.settings.neteaseApiBaseUrl = payload["text"] as? String ?? ""
+      persist(); configureClients(); renderPages()
+    case "streamingLogout":
+      clearNeteaseQrLogin()
+      EchoNativePersistence.setNeteaseCookie("")
+      neteaseClient = nil; neteaseClientConfiguration = ""; neteaseProfile = nil; neteasePlaylists = []; neteaseTracks = []; streamingStatus = ""; renderPages()
+    case "streamingLogin": startNeteaseQrLogin()
+    case "streamingQrResume": resumeNeteaseQrLogin()
+    case "streamingLibraryMode":
+      searchTask?.cancel()
+      streamingLibraryMode = payload["selection"] as? String ?? "search"; renderPages()
+    case "streamingPlaylistOpen": openStreamingPlaylist(payload)
+    case "streamingPlaylistClose":
+      selectedStreamingPlaylistId = ""
+      neteaseTracks = []
+      libraryPage = 0
+      libraryExpanded = false
+      renderPages()
+    case "streamingPlaylistPin": toggleStreamingPlaylist(payload, pinned: true)
+    case "streamingPlaylistFavorite": toggleStreamingPlaylist(payload, pinned: false)
+    case "streamingConnect": connectMode = "streaming"; playerModel.activePage = "connect"; renderPages()
+    case "settingToggle": updateSettingToggle(payload)
+    case "settingSelect": updateSettingSelection(payload)
+    case "settingAction": performSettingAction(payload)
+    default: break
+    }
+  }
+
+  private func applySettings() {
+    let settings = persistent.settings
+    playerModel.activePage = settings.defaultPage
+    playerModel.artworkBackgroundEnabled = settings.artworkBackgroundEnabled
+    playerModel.darkModeEnabled = settings.darkModeEnabled
+    playerModel.followSystemAppearance = settings.followSystemAppearance
+    playerModel.language = settings.language
+    playerModel.repeatOne = settings.repeatOne
+    playerModel.showArtworkGlow = settings.showArtworkGlow
+    playerModel.equalizer.gains = normalizedGains(settings.eqGains)
+    playerModel.equalizer.language = settings.language
+    playerModel.equalizer.preset = settings.eqPreset
+    pagesModel.equalizer.gains = normalizedGains(settings.eqGains)
+    pagesModel.equalizer.language = settings.language
+    pagesModel.equalizer.preset = settings.eqPreset
+    librarySource = settings.defaultLibrarySource
+    if librarySource == "echo", !persistent.echoConnection.enabled { librarySource = "local" }
+    if librarySource == "remote", !persistent.powerampConnection.enabled { librarySource = "local" }
+    libraryView = librarySource == "local" ? settings.defaultLocalLibraryView : "songs"
+    audioEngine.setEq(gains: settings.eqGains)
+    audioEngine.setLoudness(settings.loudnessEnabled)
+  }
+
+  private func configureClients() {
+    let nextEchoClient = try? EchoNativeRemoteClient(connection: persistent.echoConnection, kind: .echo)
+    let nextPowerampClient = try? EchoNativeRemoteClient(connection: persistent.powerampConnection, kind: .poweramp)
+    if echoClient?.connection != nextEchoClient?.connection {
+      echoBusy = false
+      echoStatus = nil
+      echoOnline = false
+      echoError = ""
+    }
+    if powerampClient?.connection != nextPowerampClient?.connection {
+      powerampBusy = false
+      powerampQueueManagedLocally = false
+      powerampStatus = nil
+      powerampOnline = false
+      powerampError = ""
+    }
+    echoClient = nextEchoClient
+    powerampClient = nextPowerampClient
+    let cookie = EchoNativePersistence.neteaseCookie()
+    let baseUrl = persistent.settings.neteaseAccessMode == "direct"
+      ? "https://music.163.com"
+      : persistent.settings.neteaseApiBaseUrl
+    let configuration = cookie.isEmpty ? "" : "\(baseUrl)\u{0}\(cookie)"
+    if configuration != neteaseClientConfiguration || (!configuration.isEmpty && neteaseClient == nil) {
+      streamingBusy = false
+      neteaseClientConfiguration = configuration
+      neteaseClient = configuration.isEmpty || URL(string: baseUrl)?.host == nil
+        ? nil
+        : EchoNativeNeteaseClient(baseUrl: baseUrl, cookie: cookie)
+    }
+  }
+
+  private func startProgressClock() {
+    progressTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        guard let self else { return }
+        self.tickPlayback()
+      }
+    }
+  }
+
+  private func startPolling() {
+    echoPollTask?.cancel()
+    powerampPollTask?.cancel()
+    echoPollTask = echoClient == nil ? nil : Task { [weak self] in
+      while !Task.isCancelled, self?.echoClient != nil {
+        await self?.refreshEcho(loadLibrary: false)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+      }
+    }
+    powerampPollTask = powerampClient == nil ? nil : Task { [weak self] in
+      while !Task.isCancelled, self?.powerampClient != nil {
+        await self?.refreshPoweramp(loadLibrary: false)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+      }
+    }
+  }
+
+  func refreshEcho(loadLibrary: Bool) async {
+    guard let echoClient else {
+      if echoOnline { echoOnline = false; renderPages() }
+      return
+    }
+    let wasOnline = echoOnline
+    let previousError = echoError
+    if loadLibrary { echoBusy = true; renderPages() }
+    do {
+      if loadLibrary {
+        async let status = echoClient.status()
+        async let tracks = echoClient.allTracks()
+        async let albums = echoClient.allAlbums()
+        let values = try await (status, tracks, albums)
+        guard self.echoClient === echoClient else { return }
+        echoAlbums = values.2
+        echoTracks = values.1
+        echoTracks = echoTracks.map(resolvedTrack)
+        applyRemoteStatus(values.0, kind: .echo)
+      } else {
+        let status = try await echoClient.status()
+        guard self.echoClient === echoClient else { return }
+        applyRemoteStatus(status, kind: .echo)
+      }
+      echoOnline = true
+      echoError = ""
+    } catch {
+      guard self.echoClient === echoClient else { return }
+      echoOnline = false
+      echoError = errorMessage(error)
+    }
+    if loadLibrary { echoBusy = false }
+    if loadLibrary || wasOnline != echoOnline || previousError != echoError { renderPages() }
+  }
+
+  func refreshPoweramp(loadLibrary: Bool) async {
+    guard let powerampClient else {
+      if powerampOnline { powerampOnline = false; renderPages() }
+      return
+    }
+    let wasOnline = powerampOnline
+    let previousError = powerampError
+    if loadLibrary { powerampBusy = true; renderPages() }
+    do {
+      if loadLibrary {
+        async let status = powerampClient.status()
+        async let tracks = powerampClient.allTracks()
+        async let albums = powerampClient.allAlbums()
+        let values = try await (status, tracks, albums)
+        guard self.powerampClient === powerampClient else { return }
+        powerampAlbums = values.2
+        powerampTracks = values.1
+        powerampTracks = powerampTracks.map(resolvedTrack)
+        applyRemoteStatus(values.0, kind: .poweramp)
+      } else {
+        let status = try await powerampClient.status()
+        guard self.powerampClient === powerampClient else { return }
+        applyRemoteStatus(status, kind: .poweramp)
+      }
+      powerampOnline = true
+      powerampError = ""
+    } catch {
+      guard self.powerampClient === powerampClient else { return }
+      powerampOnline = false
+      powerampError = errorMessage(error)
+    }
+    if loadLibrary { powerampBusy = false }
+    if loadLibrary || wasOnline != powerampOnline || previousError != powerampError { renderPages() }
+  }
+
+  func refreshLocalLibrary() async {
+    localBusy = true
+    renderPages()
+    localTracks = await EchoNativeLocalLibrary.scan()
+    localBusy = false
+    renderPages()
+  }
+
+  private func applyRemoteStatus(_ status: EchoNativePlaybackStatus, kind: EchoNativeRemoteKind) {
+    if kind == .echo {
+      guard echoStatus.map({ status.playback.updatedAtEpochMs >= $0.playback.updatedAtEpochMs }) ?? true else { return }
+      echoStatus = status
+      echoStatusReceivedAt = Date()
+      if outputMode == .pc { applyControlledPlayback(status, source: .echo) }
+    } else {
+      guard powerampStatus.map({ status.playback.updatedAtEpochMs >= $0.playback.updatedAtEpochMs }) ?? true else { return }
+      powerampStatus = status
+      powerampStatusReceivedAt = Date()
+      if outputMode == .remoteControl { applyControlledPlayback(status, source: .remote) }
+    }
+  }
+
+  private func applyControlledPlayback(_ status: EchoNativePlaybackStatus, source: EchoNativeTrackSource) {
+    var trackChanged = false
+    if var track = status.playback.track {
+      track.source = source
+      let baseUrl = source == .echo ? echoClient?.baseUrl : powerampClient?.baseUrl
+      if let artwork = track.artworkUrl, let baseUrl {
+        track.artworkUrl = URL(string: artwork, relativeTo: baseUrl)?.absoluteURL.absoluteString
+      }
+      track = resolvedTrack(track)
+      if let artwork = track.artworkUrl, failedArtworkUrls.contains(artwork) { track.artworkUrl = nil }
+      if let currentTrack, trackKey(currentTrack) == trackKey(track) {
+        if track.artworkUrl?.isEmpty != false { track.artworkUrl = currentTrack.artworkUrl }
+        if track.artist.isEmpty { track.artist = currentTrack.artist }
+        if track.album.isEmpty { track.album = currentTrack.album }
+      }
+      if currentTrack != track {
+        currentTrack = track
+        updatePlayerTrack(track)
+        trackChanged = true
+      }
+    }
+    setIfChanged(playerModel, \.isPlaying, status.playback.state == "playing")
+    playerModel.positionMs = status.playback.positionMs
+    setIfChanged(playerModel, \.durationMs, status.playback.durationMs)
+    setIfChanged(playerModel, \.volume, max(0, min(1, status.playback.volume)))
+    if let currentTrack { setIfChanged(playerModel, \.tags, tags(for: currentTrack)) }
+    var queueChanged = false
+    if activeQueuePlaylistId.isEmpty,
+      (source == .echo || !powerampQueueManagedLocally),
+      let items = status.playback.queue?.items {
+      let baseUrl = source == .echo ? echoClient?.baseUrl : powerampClient?.baseUrl
+      let nextQueue = items.map { item in
+        var value = item
+        value.source = source
+        if let artwork = value.artworkUrl, let baseUrl {
+          value.artworkUrl = URL(string: artwork, relativeTo: baseUrl)?.absoluteURL.absoluteString
+        }
+        if let artwork = value.artworkUrl, failedArtworkUrls.contains(artwork) { value.artworkUrl = nil }
+        return value
+      }
+      if queue != nextQueue { queue = nextQueue; queueChanged = true }
+      if source == .remote { powerampQueueManagedLocally = true }
+    }
+    if trackChanged || queueChanged { updateQueueModel() }
+    publishNowPlaying()
+  }
+
+  private func tickPlayback() {
+    switch outputMode {
+    case .local, .phone, .remoteStream, .streaming:
+      if audioLoading {
+        setIfChanged(playerModel, \.isPlaying, false)
+      } else {
+        let status = audioEngine.playbackStatus()
+        playerModel.positionMs = status.currentTime * 1000
+        setIfChanged(playerModel, \.durationMs, status.duration * 1000)
+        setIfChanged(playerModel, \.isPlaying, status.playing)
+        if status.didJustFinish, let currentTrack {
+          let key = trackKey(currentTrack)
+          if handledFinishedTrackKey != key {
+            handledFinishedTrackKey = key
+            persistent.settings.repeatOne ? play(currentTrack) : playAdjacent(1)
+          }
+        }
+      }
+    case .pc:
+      updateEstimatedRemotePosition(status: echoStatus, receivedAt: echoStatusReceivedAt)
+    case .remoteControl:
+      updateEstimatedRemotePosition(status: powerampStatus, receivedAt: powerampStatusReceivedAt)
+    }
+    updateActiveLyricIndex()
+    publishNowPlaying()
+  }
+
+  private func updateEstimatedRemotePosition(status: EchoNativePlaybackStatus?, receivedAt: Date) {
+    guard let status else { return }
+    let elapsed = status.playback.state == "playing" ? Date().timeIntervalSince(receivedAt) * 1000 : 0
+    playerModel.positionMs = min(status.playback.durationMs, max(0, status.playback.positionMs + elapsed))
+  }
+
+  private func togglePlayPause() {
+    switch outputMode {
+    case .local, .phone, .remoteStream, .streaming:
+      do {
+        let status = audioEngine.playbackStatus()
+        if status.duration <= 0, let currentTrack {
+          play(currentTrack, forcedMode: outputMode, positionMs: playerModel.positionMs)
+          return
+        }
+        if status.playing { audioEngine.pause() } else { try audioEngine.resume() }
+        playerModel.isPlaying = audioEngine.playbackStatus().playing
+      } catch { showError(error) }
+    case .pc:
+      sendRemoteCommand(["command": "playPause"], client: echoClient, source: .echo)
+    case .remoteControl:
+      sendRemoteCommand(["command": "playPause"], client: powerampClient, source: .remote)
+    }
+  }
+
+  private func play(
+    _ requestedTrack: EchoNativeCoreTrack,
+    forcedMode: EchoNativeOutputMode? = nil,
+    positionMs: Double = 0,
+    pauseRemoteAfterStart: Bool = false
+  ) {
+    let track = resolvedTrack(requestedTrack)
+    if !externalMetadataTrackKey.isEmpty, externalMetadataTrackKey != trackKey(track) {
+      clearExternalMetadataPicker()
+    }
+    playbackGeneration &+= 1
+    let generation = playbackGeneration
+    playbackLoadTask?.cancel()
+    playbackLoadTask = nil
+    audioLoading = false
+    lyricsGeneration &+= 1
+    lyricsTask?.cancel()
+    lyricsTask = nil
+    metadataGeneration &+= 1
+    metadataTask?.cancel()
+    metadataTask = nil
+    externalMetadataLoading = false
+    updateLoadingState()
+    let mode = forcedMode ?? modeForTrack(track)
+    outputMode = mode
+    playerModel.outputMode = mode.rawValue
+    currentTrack = track
+    handledFinishedTrackKey = ""
+    if let index = queue.firstIndex(where: { trackKey($0) == trackKey(track) }) {
+      queue[index] = track
+    } else {
+      queue = resolvedTracks(libraryTracks(for: track.source))
+      activeQueuePlaylistId = ""
+    }
+    if track.source == .remote { powerampQueueManagedLocally = true }
+    updatePlayerTrack(track)
+    addRecent(track)
+    switch mode {
+    case .local:
+      guard let uri = track.localUrl else { showError(EchoNativeNetworkError.invalidResponse); return }
+      playFile(uri: uri, track: track, positionMs: positionMs)
+    case .pc:
+      audioEngine.stop()
+      sendRemoteCommand(["command": "playTrack", "trackId": track.id, "output": "pc"], client: echoClient, source: .echo, expectedGeneration: generation)
+    case .remoteControl:
+      audioEngine.stop()
+      sendRemoteCommand(["command": "playTrack", "trackId": track.id], client: powerampClient, source: .remote, expectedGeneration: generation)
+    case .phone:
+      audioEngine.stop()
+      playerModel.isPlaying = false
+      stream(track, client: echoClient, positionMs: positionMs, generation: generation, pauseRemoteAfterStart: pauseRemoteAfterStart)
+    case .remoteStream:
+      audioEngine.stop()
+      playerModel.isPlaying = false
+      stream(track, client: powerampClient, positionMs: positionMs, generation: generation, pauseRemoteAfterStart: pauseRemoteAfterStart)
+    case .streaming:
+      audioEngine.stop()
+      playerModel.isPlaying = false
+      streamNetease(track, positionMs: positionMs, generation: generation)
+    }
+    updateQueueModel()
+    persistQueue()
+    loadLyricsForCurrentTrack()
+    if track.source == .local, persistent.settings.autoOpenLyricsForLocalTracks, track.hasLyrics {
+      playerModel.lyricsVisible = true
+    }
+    if persistent.settings.externalMetadataEnabled { refreshExternalMetadata(manual: false) }
+  }
+
+  private func playFile(uri: String, track: EchoNativeCoreTrack, positionMs: Double = 0) {
+    do {
+      try audioEngine.playFile(
+        uri: uri,
+        positionMs: positionMs,
+        volume: playerModel.volume,
+        gains: playerModel.equalizer.gains,
+        loudnessEnabled: persistent.settings.loudnessEnabled
+      )
+      playerModel.isPlaying = audioEngine.playbackStatus().playing
+      publishNowPlaying()
+    } catch {
+      playerModel.isPlaying = false
+      showError(error)
+    }
+  }
+
+  private func stream(
+    _ track: EchoNativeCoreTrack,
+    client: EchoNativeRemoteClient?,
+    positionMs: Double = 0,
+    generation: Int,
+    pauseRemoteAfterStart: Bool
+  ) {
+    guard let client else { showError(EchoNativeNetworkError.invalidConnection); return }
+    audioLoading = true
+    updateLoadingState()
+    playbackLoadTask = Task {
+      defer {
+        if playbackGeneration == generation {
+          playbackLoadTask = nil
+          audioLoading = false
+          updateLoadingState()
+        }
+      }
+      do {
+        let response = try await client.stream(trackId: track.id)
+        guard let remoteUrl = URL(string: response.streamUrl) else { throw EchoNativeNetworkError.invalidResponse }
+        var streamedTrack = response.track
+        streamedTrack.source = track.source
+        if streamedTrack.artworkUrl?.isEmpty != false { streamedTrack.artworkUrl = track.artworkUrl }
+        let file = try await EchoNativeStreamCache.file(for: remoteUrl, track: streamedTrack)
+        guard isCurrentRemoteClient(client, source: track.source), playbackGeneration == generation,
+          currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
+        replaceTrack(streamedTrack)
+        currentTrack = streamedTrack
+        updatePlayerTrack(streamedTrack)
+        playFile(uri: file.absoluteString, track: streamedTrack, positionMs: positionMs)
+        if pauseRemoteAfterStart {
+          let status = track.source == .echo ? echoStatus : powerampStatus
+          if status?.playback.state == "playing" || status?.playback.state == "loading" {
+            sendRemoteCommand(["command": "playPause"], client: client, source: track.source, expectedGeneration: generation)
+          }
+        }
+      } catch {
+        if isCurrentRemoteClient(client, source: track.source), playbackGeneration == generation { showError(error) }
+      }
+    }
+  }
+
+  private func streamNetease(_ track: EchoNativeCoreTrack, positionMs: Double = 0, generation: Int) {
+    guard let neteaseClient else { showError(EchoNativeNetworkError.invalidConnection); return }
+    audioLoading = true
+    updateLoadingState()
+    playbackLoadTask = Task {
+      defer {
+        if playbackGeneration == generation {
+          playbackLoadTask = nil
+          audioLoading = false
+          updateLoadingState()
+        }
+      }
+      do {
+        let remoteUrl = try await neteaseClient.playbackUrl(trackId: track.id)
+        let file = try await EchoNativeStreamCache.file(for: remoteUrl, track: track)
+        guard self.neteaseClient === neteaseClient, playbackGeneration == generation,
+          currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
+        playFile(uri: file.absoluteString, track: track, positionMs: positionMs)
+      } catch {
+        if self.neteaseClient === neteaseClient, playbackGeneration == generation { showError(error) }
+      }
+    }
+  }
+
+  private func sendRemoteCommand(
+    _ command: [String: Any],
+    client: EchoNativeRemoteClient?,
+    source: EchoNativeTrackSource,
+    expectedGeneration: Int? = nil
+  ) {
+    guard let client else { showError(EchoNativeNetworkError.invalidConnection); return }
+    Task {
+      do {
+        let status = try await client.command(command)
+        guard isCurrentRemoteClient(client, source: source), expectedGeneration.map({ $0 == playbackGeneration }) ?? true else { return }
+        applyRemoteStatus(status, kind: source == .echo ? .echo : .poweramp)
+      }
+      catch {
+        if isCurrentRemoteClient(client, source: source), expectedGeneration.map({ $0 == playbackGeneration }) ?? true { showError(error) }
+      }
+    }
+  }
+
+  private func isCurrentRemoteClient(_ client: EchoNativeRemoteClient, source: EchoNativeTrackSource) -> Bool {
+    source == .echo ? echoClient === client : powerampClient === client
+  }
+
+  private func playAdjacent(_ direction: Int) {
+    guard !queue.isEmpty else {
+      if outputMode == .pc { sendRemoteCommand(["command": direction > 0 ? "next" : "previous"], client: echoClient, source: .echo) }
+      if outputMode == .remoteControl { sendRemoteCommand(["command": direction > 0 ? "next" : "previous"], client: powerampClient, source: .remote) }
+      return
+    }
+    let index = currentTrack.flatMap { value in queue.firstIndex(where: { trackKey($0) == trackKey(value) }) } ?? (direction > 0 ? -1 : 0)
+    let nextIndex = (index + direction + queue.count) % queue.count
+    play(queue[nextIndex])
+  }
+
+  private func seek(toMilliseconds value: Double) {
+    let position = max(0, min(value, playerModel.durationMs))
+    playerModel.positionMs = position
+    switch outputMode {
+    case .local, .phone, .remoteStream, .streaming:
+      do { try audioEngine.seekTo(seconds: position / 1000) } catch { showError(error) }
+    case .pc:
+      sendRemoteCommand(["command": "seekTo", "positionMs": position], client: echoClient, source: .echo)
+    case .remoteControl:
+      sendRemoteCommand(["command": "seekTo", "positionMs": position], client: powerampClient, source: .remote)
+    }
+  }
+
+  private func setVolume(_ value: Double) {
+    let volume = max(0, min(1, value))
+    playerModel.volume = volume
+    switch outputMode {
+    case .local, .phone, .remoteStream, .streaming: audioEngine.setVolume(volume)
+    case .pc: sendRemoteCommand(["command": "setVolume", "volume": volume], client: echoClient, source: .echo)
+    case .remoteControl: sendRemoteCommand(["command": "setVolume", "volume": volume], client: powerampClient, source: .remote)
+    }
+  }
+
+  private func switchOutput(_ rawMode: String) {
+    let previousMode = outputMode
+    let mapped: EchoNativeOutputMode?
+    switch rawMode {
+    case "echo": mapped = .pc
+    case "remote": mapped = .remoteControl
+    default: mapped = EchoNativeOutputMode(rawValue: rawMode)
+    }
+    guard let mode = mapped else { return }
+    if mode == previousMode { return }
+    if (mode == .pc || mode == .phone), echoClient == nil {
+      connectMode = "echo"
+      playerModel.activePage = "connect"
+      renderPages()
+      return
+    }
+    if (mode == .remoteControl || mode == .remoteStream), powerampClient == nil {
+      connectMode = "remote"
+      playerModel.activePage = "connect"
+      renderPages()
+      return
+    }
+    if previousMode == .pc, mode != .pc, mode != .phone,
+      echoStatus?.playback.state == "playing" || echoStatus?.playback.state == "loading" {
+      sendRemoteCommand(["command": "playPause"], client: echoClient, source: .echo)
+    }
+    if previousMode == .remoteControl, mode != .remoteControl, mode != .remoteStream,
+      powerampStatus?.playback.state == "playing" || powerampStatus?.playback.state == "loading" {
+      sendRemoteCommand(["command": "playPause"], client: powerampClient, source: .remote)
+    }
+    if mode == .local {
+      guard let track = (currentTrack?.source == .local ? currentTrack : nil) ?? localTracks.first else {
+        librarySource = "local"; playerModel.activePage = "library"; renderPages(); return
+      }
+      activeQueuePlaylistId = ""
+      play(track, forcedMode: .local)
+      return
+    }
+    if mode == .streaming {
+      guard let track = (currentTrack?.source == .streaming ? currentTrack : nil) ?? neteaseTracks.first else {
+        librarySource = "streaming"; playerModel.activePage = "library"; renderPages(); return
+      }
+      activeQueuePlaylistId = ""
+      play(track, forcedMode: .streaming)
+      return
+    }
+    if mode == .phone {
+      var track = echoStatus?.playback.track ?? (currentTrack?.source == .echo ? currentTrack : nil) ?? echoTracks.first
+      track?.source = .echo
+      guard let track else { connectMode = "echo"; playerModel.activePage = "connect"; renderPages(); return }
+      let position = echoStatus?.playback.track?.id == track.id ? echoStatus?.playback.positionMs ?? 0 : 0
+      activeQueuePlaylistId = ""
+      play(track, forcedMode: .phone, positionMs: position, pauseRemoteAfterStart: previousMode == .pc)
+      return
+    }
+    if mode == .remoteStream {
+      var track = powerampStatus?.playback.track ?? (currentTrack?.source == .remote ? currentTrack : nil) ?? powerampTracks.first
+      track?.source = .remote
+      guard let track else { connectMode = "remote"; playerModel.activePage = "connect"; renderPages(); return }
+      let position = powerampStatus?.playback.track?.id == track.id ? powerampStatus?.playback.positionMs ?? 0 : 0
+      activeQueuePlaylistId = ""
+      play(track, forcedMode: .remoteStream, positionMs: position, pauseRemoteAfterStart: previousMode == .remoteControl)
+      return
+    }
+    playbackGeneration &+= 1
+    let generation = playbackGeneration
+    if mode == .pc || mode == .remoteControl {
+      switch previousMode {
+      case .local, .phone, .remoteStream, .streaming: audioEngine.pause()
+      case .pc, .remoteControl: break
+      }
+    }
+    outputMode = mode
+    playerModel.outputMode = mode.rawValue
+    playerModel.modeLabel = modeLabel(mode)
+    if let currentTrack { playerModel.tags = tags(for: currentTrack) }
+    if mode == .pc, previousMode == .phone, let currentTrack, currentTrack.source == .echo {
+      audioEngine.pause()
+      sendRemoteCommand([
+        "command": "handoff",
+        "trackId": currentTrack.id,
+        "positionMs": playerModel.positionMs,
+        "target": "pc",
+      ], client: echoClient, source: .echo, expectedGeneration: generation)
+      return
+    }
+    if mode == .pc, let echoStatus { applyControlledPlayback(echoStatus, source: .echo); return }
+    if mode == .pc, let track = echoTracks.first { play(track, forcedMode: .pc); return }
+    if mode == .remoteControl, previousMode == .remoteStream, let currentTrack, currentTrack.source == .remote {
+      audioEngine.pause()
+      handoffToPoweramp(currentTrack, positionMs: playerModel.positionMs, generation: generation)
+      return
+    }
+    if mode == .remoteControl, let powerampStatus { applyControlledPlayback(powerampStatus, source: .remote); return }
+    if mode == .remoteControl, let track = powerampTracks.first { play(track, forcedMode: .remoteControl) }
+  }
+
+  private func handoffToPoweramp(_ track: EchoNativeCoreTrack, positionMs: Double, generation: Int) {
+    guard let client = powerampClient else { showError(EchoNativeNetworkError.invalidConnection); return }
+    Task {
+      do {
+        var status = try await client.command(["command": "playTrack", "trackId": track.id])
+        guard powerampClient === client, playbackGeneration == generation else { return }
+        if positionMs > 0 {
+          status = try await client.command(["command": "seekTo", "positionMs": positionMs])
+        }
+        guard powerampClient === client, playbackGeneration == generation else { return }
+        applyRemoteStatus(status, kind: .poweramp)
+      } catch {
+        if powerampClient === client, playbackGeneration == generation { showError(error) }
+      }
+    }
+  }
+
+  private func clearCurrentPlayback() {
+    playbackGeneration &+= 1
+    playbackLoadTask?.cancel()
+    playbackLoadTask = nil
+    lyricsGeneration &+= 1
+    lyricsTask?.cancel()
+    lyricsTask = nil
+    metadataGeneration &+= 1
+    metadataTask?.cancel()
+    metadataTask = nil
+    audioLoading = false
+    externalMetadataLoading = false
+    audioEngine.stop()
+    currentTrack = nil
+    playerModel.artist = ""
+    playerModel.artworkUrl = ""
+    playerModel.controlsEnabled = false
+    playerModel.durationMs = 0
+    playerModel.isFavorite = false
+    playerModel.isPlaying = false
+    playerModel.activeLyricIndex = 0
+    playerModel.lyricTexts = []
+    playerModel.lyricTimesMs = []
+    playerModel.positionMs = 0
+    playerModel.tags = []
+    playerModel.title = ""
+    clearExternalMetadataPicker()
+    updateLoadingState()
+    nowPlayingController.clear()
+    lastNowPlayingTrackKey = ""
+  }
+
+  private func updatePlayerTrack(_ track: EchoNativeCoreTrack) {
+    playerModel.title = track.title
+    playerModel.artist = track.artist.isEmpty ? (persistent.settings.language == "en" ? "Unknown Artist" : "未知艺术家") : track.artist
+    playerModel.artworkUrl = track.artworkUrl ?? ""
+    playerModel.durationMs = track.durationMs
+    playerModel.controlsEnabled = true
+    playerModel.isFavorite = persistent.favoriteTrackKeys.contains(trackKey(track))
+    playerModel.modeLabel = modeLabel(outputMode)
+    playerModel.outputMode = outputMode.rawValue
+    playerModel.tags = tags(for: track)
+    playerModel.queueCount = queue.count
+  }
+
+  private func publishNowPlaying() {
+    guard let track = currentTrack else { return }
+    let position = playerModel.positionMs / 1000
+    let key = trackKey(track)
+    guard lastNowPlayingTrackKey != key || lastNowPlayingState != playerModel.isPlaying
+      || abs(position - lastNowPlayingPosition) >= 0.9 else { return }
+    lastNowPlayingTrackKey = key
+    lastNowPlayingState = playerModel.isPlaying
+    lastNowPlayingPosition = position
+    nowPlayingController.update(
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      artworkURL: track.artworkUrl ?? "",
+      duration: playerModel.durationMs / 1000,
+      position: position,
+      isPlaying: playerModel.isPlaying
+    )
+  }
+
+  private func handleRemoteCommand(_ command: NowPlayingRemoteCommand, position: Double?) {
+    switch command {
+    case .next: playAdjacent(1)
+    case .previous: playAdjacent(-1)
+    case .pause: if playerModel.isPlaying { togglePlayPause() }
+    case .play: if !playerModel.isPlaying { togglePlayPause() }
+    case .toggle: togglePlayPause()
+    case .seek: if let position { seek(toMilliseconds: position * 1000) }
+    }
+  }
+
+  private func updateQueueModel() {
+    let source = currentTrack?.source.rawValue ?? "local"
+    let payload: [String: Any] = [
+      "canEdit": true,
+      "clearLabel": localized("Clear", "清空"),
+      "emptyLabel": localized("The queue is empty.", "当前播放列表暂无内容。"),
+      "items": queue.enumerated().map { index, track in [
+        "artist": track.artist,
+        "current": currentTrack.map({ trackKey($0) }) == trackKey(track),
+        "id": "\(trackKey(track)):\(index)",
+        "meta": track.album.isEmpty ? track.sourceLabel : track.album,
+        "source": track.source.rawValue,
+        "title": track.title,
+        "trackId": track.id,
+      ] as [String: Any] },
+      "moveDownLabel": localized("Move down", "下移"),
+      "moveUpLabel": localized("Move up", "上移"),
+      "playlistId": activeQueuePlaylistId,
+      "removeLabel": localized("Remove", "移除"),
+      "source": source,
+      "subtitle": localized("\(queue.count) tracks", "\(queue.count) 首歌曲"),
+      "title": localized("Queue", "播放列表"),
+    ]
+    playerModel.queueCount = queue.count
+    playerModel.updateQueue(payloadJSON: json(payload))
+  }
+
+  private func moveQueueItem(_ payload: [String: Any]) {
+    guard let index = payload["index"] as? Int, let direction = payload["value"] as? Int else { return }
+    let destination = index + direction
+    guard queue.indices.contains(index), queue.indices.contains(destination) else { return }
+    queue.swapAt(index, destination)
+    if outputMode == .remoteControl || outputMode == .remoteStream { powerampQueueManagedLocally = true }
+    synchronizeActivePlaylist()
+    updateQueueModel(); persistQueue()
+    synchronizeControlledQueue()
+  }
+
+  private func removeQueueItem(_ payload: [String: Any]) {
+    guard let index = payload["index"] as? Int, queue.indices.contains(index) else { return }
+    queue.remove(at: index)
+    if outputMode == .remoteControl || outputMode == .remoteStream { powerampQueueManagedLocally = true }
+    synchronizeActivePlaylist()
+    updateQueueModel(); persistQueue()
+    synchronizeControlledQueue()
+  }
+
+  private func clearQueue(_ payload: [String: Any]) {
+    let playlistId = payload["playlistId"] as? String ?? activeQueuePlaylistId
+    queue = []
+    if outputMode == .remoteControl || outputMode == .remoteStream { powerampQueueManagedLocally = true }
+    if !playlistId.isEmpty,
+      let index = persistent.playlists.firstIndex(where: { $0.id == playlistId }) {
+      persistent.playlists[index].tracks.removeAll()
+    }
+    updateQueueModel(); persistQueue(); persist(); synchronizeControlledQueue()
+  }
+
+  private func synchronizeControlledQueue() {
+    guard outputMode == .pc else { return }
+    let controlledQueue = queue.filter { $0.source == .echo }
+    if controlledQueue.isEmpty {
+      sendRemoteCommand(["command": "queueClear", "output": "pc"], client: echoClient, source: .echo)
+      return
+    }
+    sendRemoteCommand([
+      "command": "queueReorder",
+      "trackIds": controlledQueue.map(\.id),
+      "startTrackId": currentTrack.flatMap { current in
+        current.source == .echo && controlledQueue.contains(where: { $0.id == current.id }) ? current.id : nil
+      } ?? controlledQueue[0].id,
+      "output": "pc",
+    ], client: echoClient, source: .echo)
+  }
+
+  private func restoreQueue() {
+    var playlistsChanged = false
+    for index in persistent.playlists.indices {
+      let tracks = resolvedTracks(persistent.playlists[index].tracks)
+      if tracks != persistent.playlists[index].tracks {
+        persistent.playlists[index].tracks = tracks
+        playlistsChanged = true
+      }
+    }
+    let values = persistent.queueTrackKeys.compactMap(track(forKey:))
+    queue = values
+    powerampQueueManagedLocally = values.contains { $0.source == .remote }
+    updateQueueModel()
+    if playlistsChanged { persist() }
+  }
+
+  private func synchronizeActivePlaylist() {
+    guard !activeQueuePlaylistId.isEmpty,
+      let index = persistent.playlists.firstIndex(where: { $0.id == activeQueuePlaylistId })
+    else { return }
+    persistent.playlists[index].tracks = queue
+  }
+
+  private func persistQueue() {
+    persistent.queueTrackKeys = queue.map { trackKey($0) }
+    persist()
+  }
+
+  private func applyEqPreset(_ preset: String) {
+    let gains: [Double]
+    switch preset {
+    case "bass": gains = [6, 5, 3, 1, 0, 0, 0, 0, 0, 0]
+    case "clarity": gains = [-1, -1, 0, 1, 2, 3, 4, 4, 3, 2]
+    case "lateNight": gains = [2, 2, 1, 0, -1, -1, 0, 1, 2, 2]
+    case "vocal": gains = [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1]
+    case "warm": gains = [3, 2, 2, 1, 0, -1, -1, 0, 1, 1]
+    default: gains = Array(repeating: 0, count: 10)
+    }
+    playerModel.equalizer.gains = gains
+    playerModel.equalizer.preset = preset
+    pagesModel.equalizer.gains = gains
+    pagesModel.equalizer.preset = preset
+    persistent.settings.eqGains = gains
+    persistent.settings.eqPreset = preset
+    audioEngine.setEq(gains: gains)
+    persist(); renderPages()
+  }
+
+  private func toggleFavorite(_ track: EchoNativeCoreTrack) {
+    let key = trackKey(track)
+    if persistent.favoriteTrackKeys.contains(key) { persistent.favoriteTrackKeys.remove(key) }
+    else { persistent.favoriteTrackKeys.insert(key) }
+    playerModel.isFavorite = persistent.favoriteTrackKeys.contains(key)
+    persist(); renderPages()
+  }
+
+  private func addRecent(_ track: EchoNativeCoreTrack) {
+    let key = trackKey(track)
+    persistent.recentTrackKeys.removeAll { $0 == key }
+    persistent.recentTrackKeys.insert(key, at: 0)
+    persistent.recentTrackKeys = Array(persistent.recentTrackKeys.prefix(100))
+    persist()
+  }
+
+  private func createPlaylist(_ payload: [String: Any]) {
+    guard let name = payload["text"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    var tracks: [EchoNativeCoreTrack] = []
+    if let id = payload["id"] as? String,
+      let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:)),
+      let value = track(id: id, source: source) { tracks = [value] }
+    persistent.playlists.append(EchoNativeSavedPlaylist(
+      createdAt: Date().timeIntervalSince1970,
+      favorite: false,
+      id: UUID().uuidString,
+      name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+      pinned: false,
+      tracks: tracks
+    ))
+    persist(); renderPages()
+  }
+
+  private func renamePlaylist(_ payload: [String: Any]) {
+    guard let id = payload["playlistId"] as? String, let name = payload["text"] as? String,
+      !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      let index = persistent.playlists.firstIndex(where: { $0.id == id }) else { return }
+    persistent.playlists[index].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    persist(); renderPages()
+  }
+
+  private func deletePlaylist(_ payload: [String: Any]) {
+    guard let id = payload["playlistId"] as? String else { return }
+    persistent.playlists.removeAll { $0.id == id }
+    if selectedPlaylistId == id { selectedPlaylistId = "" }
+    if activeQueuePlaylistId == id { activeQueuePlaylistId = "" }
+    persist(); renderPages()
+  }
+
+  private func mutatePlaylist(_ payload: [String: Any], mutation: (inout EchoNativeSavedPlaylist) -> Void) {
+    guard let id = payload["playlistId"] as? String, let index = persistent.playlists.firstIndex(where: { $0.id == id }) else { return }
+    mutation(&persistent.playlists[index]); persist(); renderPages()
+  }
+
+  private func addTrackToPlaylist(_ payload: [String: Any]) {
+    guard let playlistId = payload["playlistId"] as? String,
+      let id = payload["id"] as? String,
+      let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:)),
+      let value = track(id: id, source: source),
+      let index = persistent.playlists.firstIndex(where: { $0.id == playlistId }) else { return }
+    if !persistent.playlists[index].tracks.contains(where: { trackKey($0) == trackKey(value) }) {
+      persistent.playlists[index].tracks.append(value)
+      if activeQueuePlaylistId == playlistId {
+        queue.append(value); updateQueueModel(); synchronizeControlledQueue(); persistQueue()
+      } else {
+        persist()
+      }
+      renderPages()
+    }
+  }
+
+  private func removeTrackFromPlaylist(_ payload: [String: Any]) {
+    guard let playlistId = payload["playlistId"] as? String,
+      let id = payload["trackId"] as? String,
+      let source = payload["source"] as? String,
+      let index = persistent.playlists.firstIndex(where: { $0.id == playlistId }) else { return }
+    persistent.playlists[index].tracks.removeAll { $0.id == id && $0.source.rawValue == source }
+    if activeQueuePlaylistId == playlistId {
+      queue.removeAll { $0.id == id && $0.source.rawValue == source }
+      updateQueueModel(); synchronizeControlledQueue(); persistQueue()
+    } else {
+      persist()
+    }
+    renderPages()
+  }
+
+  private func addCollectionToPlaylist(_ payload: [String: Any]) {
+    guard let playlistId = payload["playlistId"] as? String,
+      let index = persistent.playlists.firstIndex(where: { $0.id == playlistId }) else { return }
+    let tracks = selectedCollectionTracks()
+    let existing = Set(persistent.playlists[index].tracks.map { trackKey($0) })
+    let additions = tracks.filter { !existing.contains(trackKey($0)) }
+    persistent.playlists[index].tracks.append(contentsOf: additions)
+    if activeQueuePlaylistId == playlistId {
+      queue.append(contentsOf: additions); updateQueueModel(); synchronizeControlledQueue(); persistQueue()
+    } else {
+      persist()
+    }
+    renderPages()
+  }
+
+  private func createPlaylistFromCollection(_ payload: [String: Any]) {
+    let name = payload["text"] as? String ?? localized("New playlist", "新建歌单")
+    persistent.playlists.append(EchoNativeSavedPlaylist(
+      createdAt: Date().timeIntervalSince1970,
+      favorite: false,
+      id: UUID().uuidString,
+      name: name,
+      pinned: false,
+      tracks: selectedCollectionTracks()
+    ))
+    persist(); renderPages()
+  }
+
+  private func insertTrackNext(_ payload: [String: Any]) {
+    guard let id = payload["id"] as? String,
+      let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:)),
+      let value = track(id: id, source: source)
+    else { return }
+    let index = currentTrack.flatMap { current in queue.firstIndex(where: { trackKey($0) == trackKey(current) }) } ?? -1
+    activeQueuePlaylistId = ""
+    queue.removeAll { trackKey($0) == trackKey(value) }
+    queue.insert(value, at: min(queue.count, index + 1))
+    if source == .remote { powerampQueueManagedLocally = true }
+    updateQueueModel(); persistQueue(); synchronizeControlledQueue()
+  }
+
+  private func deleteLocalTrack(_ payload: [String: Any]) {
+    guard let id = payload["id"] as? String, let value = track(id: id, source: .local) else { return }
+    let key = trackKey(value)
+    let wasCurrent = currentTrack.map(trackKey) == key
+    do { try EchoNativeLocalLibrary.delete(value) } catch { showError(error); return }
+    localTracks.removeAll { $0.id == id }
+    queue.removeAll { trackKey($0) == key }
+    for index in persistent.playlists.indices {
+      persistent.playlists[index].tracks.removeAll { trackKey($0) == key }
+    }
+    persistent.favoriteTrackKeys.remove(key)
+    persistent.recentTrackKeys.removeAll { $0 == key }
+    externalLyricsByTrackKey.removeValue(forKey: key)
+    if wasCurrent { clearCurrentPlayback() }
+    synchronizeActivePlaylist()
+    persistQueue(); updateQueueModel(); renderPages()
+  }
+
+  private func importLocalMusic() {
+    guard let presenter else { return }
+    let existingKeys = Set(localTracks.map(trackKey))
+    localBusy = true; renderPages()
+    Task {
+      do { _ = try await EchoNativeLocalLibrary.importFiles(from: presenter) }
+      catch { showError(error) }
+      await refreshLocalLibrary()
+      if persistent.settings.autoQueueImportedLocalTracks {
+        let additions = localTracks.filter { !existingKeys.contains(trackKey($0)) }
+        let queued = Set(queue.map(trackKey))
+        queue.append(contentsOf: additions.filter { !queued.contains(trackKey($0)) })
+        updateQueueModel(); persistQueue()
+      }
+    }
+  }
+
+  private func importLocalLyrics(_ payload: [String: Any]) {
+    guard let presenter, let id = payload["id"] as? String, let track = track(id: id, source: .local) else { return }
+    Task {
+      do {
+        let imported = try await EchoNativeLocalLibrary.importLyrics(for: track, from: presenter)
+        if imported {
+          await refreshLocalLibrary()
+          if currentTrack.map({ trackKey($0) }) == trackKey(track) { loadLyricsForCurrentTrack() }
+        }
+      } catch { showError(error) }
+    }
+  }
+
+  private func updateConnectionField(_ payload: [String: Any], remote: Bool) {
+    guard let field = payload["field"] as? String else { return }
+    let value = payload["text"] as? String ?? ""
+    if remote {
+      switch field {
+      case "host": persistent.powerampConnection.host = value
+      case "name": persistent.powerampConnection.name = value
+      case "port": if let port = Int(value) { persistent.powerampConnection.port = port }
+      case "token": persistent.powerampConnection.token = value
+      default: break
+      }
+    } else {
+      switch field {
+      case "host": persistent.echoConnection.host = value
+      case "port": if let port = Int(value) { persistent.echoConnection.port = port }
+      case "token": persistent.echoConnection.token = value
+      default: break
+      }
+    }
+  }
+
+  private func saveConnection(remote: Bool) {
+    let connection = remote ? persistent.powerampConnection : persistent.echoConnection
+    guard !connection.host.isEmpty, !connection.token.isEmpty, (1...65535).contains(connection.port) else {
+      showConnectionError(errorMessage(EchoNativeNetworkError.invalidConnection)); return
+    }
+    persist(); configureClients(); startPolling()
+    Task {
+      if remote { await refreshPoweramp(loadLibrary: true) }
+      else { await refreshEcho(loadLibrary: true) }
+    }
+  }
+
+  private func testConnection(remote: Bool) {
+    guard (remote ? powerampClient != nil : echoClient != nil) else {
+      showConnectionError(errorMessage(EchoNativeNetworkError.invalidConnection))
+      return
+    }
+    Task {
+      if remote { await refreshPoweramp(loadLibrary: true) }
+      else { await refreshEcho(loadLibrary: true) }
+      let message = remote ? powerampError : echoError
+      if !message.isEmpty { showConnectionError(message) }
+    }
+  }
+
+  private func savePowerampConnection(_ payload: [String: Any]) {
+    if let host = payload["host"] as? String { persistent.powerampConnection.host = host }
+    if let name = payload["name"] as? String { persistent.powerampConnection.name = name }
+    if let port = (payload["port"] as? String).flatMap(Int.init) { persistent.powerampConnection.port = port }
+    if let token = payload["token"] as? String { persistent.powerampConnection.token = token }
+    persistent.powerampConnection.enabled = true
+    saveConnection(remote: true)
+  }
+
+  private func setConnectionEnabled(_ payload: [String: Any], remote: Bool) {
+    let enabled = payload["enabled"] as? Bool ?? false
+    if remote {
+      persistent.powerampConnection.enabled = enabled
+      if !enabled {
+        powerampOnline = false; powerampStatus = nil; powerampError = ""
+        if librarySource == "remote" { librarySource = "local" }
+        if outputMode == .remoteControl || outputMode == .remoteStream { resetDisconnectedPlayback() }
+      }
+    } else {
+      persistent.echoConnection.enabled = enabled
+      if !enabled {
+        echoOnline = false; echoStatus = nil; echoError = ""
+        if librarySource == "echo" { librarySource = "local" }
+        if outputMode == .pc || outputMode == .phone { resetDisconnectedPlayback() }
+      }
+    }
+    persist(); configureClients(); startPolling(); renderPages()
+  }
+
+  private func resetDisconnectedPlayback() {
+    clearCurrentPlayback()
+    outputMode = .local
+    playerModel.outputMode = EchoNativeOutputMode.local.rawValue
+    playerModel.modeLabel = modeLabel(.local)
+  }
+
+  private func applyPairing(_ raw: String, remote: Bool) {
+    guard let components = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+      showConnectionError(errorMessage(EchoNativeNetworkError.invalidConnection)); return
+    }
+    var values: [String: String] = [:]
+    for item in components.queryItems ?? [] {
+      if let value = item.value { values[item.name] = value }
+    }
+    let scheme = components.scheme?.lowercased() ?? ""
+    let validScheme = remote
+      ? scheme == "echo-poweramp"
+      : scheme == "echo" || scheme == "http" || scheme == "https"
+    let host = values["host"] ?? ((scheme == "http" || scheme == "https") ? components.host : nil)
+    let port = values["port"].flatMap(Int.init) ?? components.port ?? (remote ? 27806 : 26789)
+    guard validScheme, let host, !host.isEmpty, (1...65535).contains(port), let token = values["token"], !token.isEmpty else {
+      showConnectionError(errorMessage(EchoNativeNetworkError.invalidConnection)); return
+    }
+    if remote {
+      persistent.powerampConnection.host = host; persistent.powerampConnection.port = port; persistent.powerampConnection.token = token
+      persistent.powerampConnection.name = values["name"] ?? "Poweramp"; persistent.powerampConnection.enabled = true
+    } else {
+      persistent.echoConnection.host = host; persistent.echoConnection.port = port; persistent.echoConnection.token = token
+      persistent.echoConnection.name = values["name"] ?? "PC ECHO"; persistent.echoConnection.enabled = true
+      persistent.echoConnection.scheme = scheme == "https" || values["scheme"] == "https" ? "https" : "http"
+    }
+    pairingText = raw; saveConnection(remote: remote)
+  }
+
+  private func acceptNeteaseCookie(_ cookie: String) {
+    guard cookie.contains("MUSIC_U=") || cookie.contains("MUSIC_A=") else {
+      streamingStatus = localized("Invalid NetEase session.", "网易云登录凭据无效")
+      renderPages()
+      return
+    }
+    clearNeteaseQrLogin()
+    EchoNativePersistence.setNeteaseCookie(cookie)
+    configureClients()
+    Task { await loadNeteaseAccount() }
+  }
+
+  private func startNeteaseQrLogin() {
+    guard persistent.settings.neteaseAccessMode == "selfHosted" else {
+      streamingStatus = localized("Use official web sign in.", "请使用官方网页登录")
+      renderPages()
+      return
+    }
+    let rawBaseUrl = persistent.settings.neteaseApiBaseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let components = URLComponents(string: rawBaseUrl),
+      let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
+      components.host?.isEmpty == false
+    else {
+      showConnectionError(localized("Enter a valid self-hosted API URL.", "请输入有效的自托管 API 地址"))
+      return
+    }
+
+    clearNeteaseQrLogin()
+    streamingQrGeneration &+= 1
+    let generation = streamingQrGeneration
+    let client = EchoNativeNeteaseClient(baseUrl: rawBaseUrl, cookie: "")
+    streamingBusy = true
+    streamingStatus = localized("Creating QR code...", "正在生成二维码...")
+    renderPages()
+    streamingQrTask = Task {
+      defer {
+        if streamingQrGeneration == generation {
+          streamingQrTask = nil
+          streamingBusy = false
+          renderPages()
+        }
+      }
+      do {
+        let login = try await client.createQrLogin()
+        guard streamingQrGeneration == generation else { return }
+        streamingQrKey = login.key
+        streamingQrUrl = login.url
+        streamingStatus = localized("Scan with NetEase Cloud Music.", "请使用网易云音乐扫码")
+        renderPages()
+
+        while !Task.isCancelled, streamingQrGeneration == generation {
+          do {
+            let result = try await client.checkQrLogin(key: login.key)
+            guard streamingQrGeneration == generation else { return }
+            if result.code == 803 {
+              guard let cookie = result.cookie,
+                cookie.contains("MUSIC_U=") || cookie.contains("MUSIC_A=")
+              else {
+                streamingQrKey = ""
+                streamingQrUrl = ""
+                streamingStatus = localized(
+                  "Signed in, but the API did not return a session cookie.",
+                  "已确认登录，但 API 未返回会话凭据"
+                )
+                return
+              }
+              streamingQrKey = ""
+              streamingQrUrl = ""
+              EchoNativePersistence.setNeteaseCookie(cookie)
+              configureClients()
+              streamingStatus = localized("Signed in.", "登录成功")
+              await loadNeteaseAccount()
+              return
+            }
+            if result.code == 800 {
+              streamingQrKey = ""
+              streamingQrUrl = ""
+              streamingStatus = localized("QR code expired.", "二维码已过期，请重新生成")
+              return
+            }
+            let status = result.code == 802
+              ? localized("Confirm sign in on your phone.", "请在手机上确认登录")
+              : localized("Waiting for scan.", "等待扫码")
+            if streamingStatus != status { streamingStatus = status; renderPages() }
+          } catch is CancellationError {
+            return
+          } catch {
+            guard streamingQrGeneration == generation else { return }
+            let status = errorMessage(error)
+            if streamingStatus != status { streamingStatus = status; renderPages() }
+          }
+          do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+          catch { return }
+        }
+      } catch is CancellationError {
+        return
+      } catch {
+        if streamingQrGeneration == generation {
+          streamingStatus = errorMessage(error)
+        }
+      }
+    }
+  }
+
+  private func resumeNeteaseQrLogin() {
+    if streamingQrTask == nil, !streamingQrKey.isEmpty { startNeteaseQrLogin() }
+  }
+
+  private func clearNeteaseQrLogin() {
+    streamingQrGeneration &+= 1
+    streamingQrTask?.cancel()
+    streamingQrTask = nil
+    streamingQrKey = ""
+    streamingQrUrl = ""
+    streamingBusy = false
+  }
+
+  private func loadNeteaseAccount() async {
+    guard let neteaseClient else { return }
+    streamingBusy = true; renderPages()
+    defer {
+      if self.neteaseClient === neteaseClient {
+        streamingBusy = false
+        renderPages()
+      }
+    }
+    do {
+      let profile = try await neteaseClient.profile()
+      guard self.neteaseClient === neteaseClient else { return }
+      let playlists = try await neteaseClient.playlists(userId: profile.userId)
+      guard self.neteaseClient === neteaseClient else { return }
+      neteaseProfile = profile
+      neteasePlaylists = playlists
+      streamingStatus = ""
+    } catch {
+      if self.neteaseClient === neteaseClient { streamingStatus = errorMessage(error) }
+    }
+  }
+
+  private func openStreamingPlaylist(_ payload: [String: Any]) {
+    guard let id = payload["id"] as? String, let neteaseClient else { return }
+    selectedStreamingPlaylistId = id; streamingBusy = true; renderPages()
+    Task {
+      defer {
+        if self.neteaseClient === neteaseClient,
+          selectedStreamingPlaylistId == id || selectedStreamingPlaylistId.isEmpty {
+          streamingBusy = false
+          renderPages()
+        }
+      }
+      do {
+        let tracks = try await neteaseClient.playlistTracks(id: id)
+        guard self.neteaseClient === neteaseClient, selectedStreamingPlaylistId == id else { return }
+        neteaseTracks = tracks
+        libraryPage = 0
+      }
+      catch {
+        if self.neteaseClient === neteaseClient, selectedStreamingPlaylistId == id {
+          streamingStatus = errorMessage(error)
+        }
+      }
+    }
+  }
+
+  private func toggleStreamingPlaylist(_ payload: [String: Any], pinned: Bool) {
+    guard let id = payload["id"] as? String else { return }
+    if pinned {
+      if streamingPinnedPlaylistIds.contains(id) { streamingPinnedPlaylistIds.remove(id) } else { streamingPinnedPlaylistIds.insert(id) }
+    } else {
+      if streamingFavoritePlaylistIds.contains(id) { streamingFavoritePlaylistIds.remove(id) } else { streamingFavoritePlaylistIds.insert(id) }
+    }
+    persist(); renderPages()
+  }
+
+  private func scheduleStreamingSearchIfNeeded() {
+    searchTask?.cancel()
+    guard librarySource == "streaming", streamingLibraryMode == "search", let neteaseClient else { return }
+    let query = libraryQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty else { neteaseTracks = []; return }
+    searchTask = Task {
+      try? await Task.sleep(nanoseconds: 350_000_000)
+      guard !Task.isCancelled else { return }
+      do {
+        let tracks = try await neteaseClient.search(query)
+        guard self.neteaseClient === neteaseClient,
+          librarySource == "streaming", streamingLibraryMode == "search",
+          libraryQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query
+        else { return }
+        neteaseTracks = tracks
+        renderPages()
+      }
+      catch {
+        if self.neteaseClient === neteaseClient,
+          librarySource == "streaming", streamingLibraryMode == "search",
+          libraryQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query {
+          streamingStatus = errorMessage(error)
+          renderPages()
+        }
+      }
+    }
+  }
+
+  private func updateSettingToggle(_ payload: [String: Any]) {
+    guard let key = payload["key"] as? String, let enabled = payload["enabled"] as? Bool else { return }
+    switch key {
+    case "followSystemAppearance": persistent.settings.followSystemAppearance = enabled; playerModel.followSystemAppearance = enabled
+    case "loudness": persistent.settings.loudnessEnabled = enabled; audioEngine.setLoudness(enabled)
+    case "autoLyrics": persistent.settings.autoOpenLyricsForLocalTracks = enabled
+    case "autoQueueImports": persistent.settings.autoQueueImportedLocalTracks = enabled
+    case "confirmDelete": persistent.settings.confirmBeforeDeletingLocalTracks = enabled
+    case "artworkGlow": persistent.settings.showArtworkGlow = enabled; playerModel.showArtworkGlow = enabled
+    case "artworkBackground": persistent.settings.artworkBackgroundEnabled = enabled; playerModel.artworkBackgroundEnabled = enabled
+    case "externalMetadataSearch":
+      persistent.settings.externalMetadataEnabled = enabled
+      resetLibraryArtworkLookup()
+    case "externalMetadataSkipExisting": persistent.settings.externalMetadataSkipExisting = enabled
+    case "lrcapi":
+      persistent.settings.lrcApiExternalDataEnabled = enabled
+      resetLibraryArtworkLookup()
+    case "lrclib": persistent.settings.lrclibExternalDataEnabled = enabled
+    case "netease":
+      persistent.settings.neteaseExternalDataEnabled = enabled
+      resetLibraryArtworkLookup()
+    case "showPowerampRemoteConnection":
+      persistent.settings.showPowerampRemote = enabled
+      if !enabled, connectMode == "remote" { connectMode = "echo" }
+    default:
+      if key.hasPrefix("audioTag.") { persistent.settings.audioTagVisibility[String(key.dropFirst(9))] = enabled }
+    }
+    persist(); renderPages()
+  }
+
+  private func updateSettingSelection(_ payload: [String: Any]) {
+    guard let key = payload["key"] as? String, let selection = payload["selection"] as? String else { return }
+    switch key {
+    case "language":
+      persistent.settings.language = selection
+      playerModel.language = selection
+      playerModel.equalizer.language = selection
+      pagesModel.equalizer.language = selection
+    case "defaultPage": persistent.settings.defaultPage = selection
+    case "defaultLibrarySource": persistent.settings.defaultLibrarySource = selection; librarySource = selection; resetLibraryPosition()
+    case "defaultLocalView":
+      persistent.settings.defaultLocalLibraryView = selection
+      if librarySource == "local" { libraryView = selection; resetLibraryPosition() }
+    case "externalSelectionMode": persistent.settings.externalDataSelectionMode = selection
+    case "neteaseAccessMode":
+      clearNeteaseQrLogin()
+      persistent.settings.neteaseAccessMode = selection
+      if selection == "direct" { persistent.settings.neteaseApiBaseUrl = "https://music.163.com" }
+      configureClients()
+    case "manualAppearance": persistent.settings.darkModeEnabled = selection == "dark"; playerModel.darkModeEnabled = selection == "dark"
+    default: break
+    }
+    persist(); renderPages()
+  }
+
+  private func performSettingAction(_ payload: [String: Any]) {
+    switch payload["key"] as? String {
+    case "resetTags": persistent.settings.audioTagVisibility = EchoNativeCoreSettings().audioTagVisibility; persist(); renderPages()
+    case "rescanMetadata": Task { await refreshLocalLibrary() }
+    case "clearLocalQueue": activeQueuePlaylistId = ""; queue.removeAll { $0.source == .local }; updateQueueModel(); persistQueue()
+    case "clearRecent": persistent.recentTrackKeys = []; persist(); renderPages()
+    default: break
+    }
+  }
+
+  private func refreshVisibleLibrary() {
+    Task {
+      switch librarySource {
+      case "echo": await refreshEcho(loadLibrary: true)
+      case "remote": await refreshPoweramp(loadLibrary: true)
+      case "local": await refreshLocalLibrary()
+      case "streaming": await loadNeteaseAccount()
+      default:
+        await refreshLocalLibrary()
+        await refreshEcho(loadLibrary: true)
+        await refreshPoweramp(loadLibrary: true)
+      }
+    }
+  }
+
+  private func refreshVisibleLibraryIfNeeded() {
+    refreshVisibleLibrary()
+    renderPages()
+  }
+
+  private func selectCollection(_ payload: [String: Any]) {
+    selectedCollectionId = payload["id"] as? String ?? ""
+    libraryQuery = payload["text"] as? String ?? ""
+    librarySort = payload["selection"] as? String ?? librarySort
+    libraryPage = 0
+    renderPages()
+  }
+
+  private func playCollection(_ payload: [String: Any]) {
+    var values = selectedCollectionTracks()
+    if payload["selection"] as? String == "track" { values = albumOrdered(values) }
+    guard let first = values.first else { return }
+    activeQueuePlaylistId = ""
+    queue = values
+    play(first)
+    playerModel.activePage = "control"
+    renderPages()
+  }
+
+  private func selectedCollectionTracks() -> [EchoNativeCoreTrack] {
+    let keys = collectionTrackKeys[selectedCollectionId] ?? []
+    return keys.compactMap(track(forKey:))
+  }
+
+  private func loadLyricsForCurrentTrack() {
+    guard let track = currentTrack else { return }
+    lyricsGeneration &+= 1
+    let generation = lyricsGeneration
+    playerModel.lyricTexts = []
+    playerModel.lyricTimesMs = []
+    lyricsTask = Task {
+      var lyrics = ""
+      lyrics = externalLyricsByTrackKey[trackKey(track)] ?? ""
+      if lyrics.isEmpty, let raw = track.lyricsUrl, let url = URL(string: raw) { lyrics = (try? String(contentsOf: url, encoding: .utf8)) ?? "" }
+      if lyrics.isEmpty, track.source == .echo { lyrics = (try? await echoClient?.lyrics(trackId: track.id)) ?? "" }
+      if lyrics.isEmpty, track.source == .remote { lyrics = (try? await powerampClient?.lyrics(trackId: track.id)) ?? "" }
+      guard lyricsGeneration == generation, currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
+      let lines = EchoNativeMetadataService.parseLyrics(lyrics)
+      playerModel.lyricTexts = lines.map(\.text)
+      playerModel.lyricTimesMs = lines.map(\.milliseconds)
+      if lyricsGeneration == generation { lyricsTask = nil }
+    }
+  }
+
+  private func refreshExternalMetadata(manual: Bool) {
+    guard let track = currentTrack else { return }
+    let key = trackKey(track)
+    let settings = persistent.settings
+    let hasExistingMetadata = track.artworkUrl?.isEmpty == false || track.hasLyrics
+      || externalLyricsByTrackKey[key]?.isEmpty == false || !playerModel.lyricTexts.isEmpty
+    guard manual || settings.externalMetadataEnabled else { return }
+    guard manual || !settings.externalMetadataSkipExisting || !hasExistingMetadata else { return }
+    guard manual || !ignoredExternalMetadataTrackKeys.contains(key) else { return }
+    if manual {
+      ignoredExternalMetadataTrackKeys.remove(key)
+      failedArtworkUrls.removeAll()
+    }
+    metadataGeneration &+= 1
+    let generation = metadataGeneration
+    externalMetadataLoading = true
+    updateLoadingState()
+    metadataTask = Task {
+      defer {
+        if metadataGeneration == generation {
+          metadataTask = nil
+          externalMetadataLoading = false
+          updateLoadingState()
+        }
+      }
+      do {
+        let candidates = try await EchoNativeMetadataService.candidates(
+          for: track,
+          sources: EchoNativeMetadataService.Sources(
+            lrcApi: settings.lrcApiExternalDataEnabled,
+            lrclib: settings.lrclibExternalDataEnabled,
+            netease: settings.neteaseExternalDataEnabled
+          )
+        )
+        guard metadataGeneration == generation, currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
+        if settings.externalDataSelectionMode == "ask" {
+          externalMetadataCandidates = candidates
+          externalMetadataTrackKey = key
+          playerModel.updateExternalSourcePicker(payloadJSON: externalMetadataPickerJSON(candidates, track: track, generation: generation))
+        } else {
+          applyExternalMetadata(EchoNativeMetadataService.automaticResult(from: candidates), to: track)
+        }
+      } catch {
+        if metadataGeneration == generation, manual { showError(error) }
+      }
+    }
+  }
+
+  func scheduleLibraryArtworkLookup(_ tracks: [EchoNativeCoreTrack]) {
+    let settings = persistent.settings
+    guard libraryArtworkTask == nil,
+      playerModel.activePage == "library" || playerModel.activePage == "search",
+      settings.externalMetadataEnabled,
+      settings.lrcApiExternalDataEnabled || settings.neteaseExternalDataEnabled
+    else { return }
+
+    let pending = tracks.map(resolvedTrack).filter { track in
+      let key = trackKey(track)
+      guard track.artworkUrl?.isEmpty != false, !libraryArtworkLookupKeys.contains(key) else { return false }
+      return !settings.externalMetadataSkipExisting || !track.hasLyrics
+    }
+    guard !pending.isEmpty else { return }
+    pending.forEach { libraryArtworkLookupKeys.insert(trackKey($0)) }
+    libraryArtworkGeneration &+= 1
+    let generation = libraryArtworkGeneration
+    libraryArtworkTask = Task {
+      var changed = false
+      for requestedTrack in pending {
+        guard !Task.isCancelled, libraryArtworkGeneration == generation else { return }
+        guard let candidates = try? await EchoNativeMetadataService.candidates(
+          for: requestedTrack,
+          sources: EchoNativeMetadataService.Sources(
+            lrcApi: settings.lrcApiExternalDataEnabled,
+            lrclib: false,
+            netease: settings.neteaseExternalDataEnabled
+          ),
+          includeNeteaseLyrics: false
+        ), let artwork = EchoNativeMetadataService.automaticResult(from: candidates).artworkUrl,
+          !artwork.isEmpty,
+          libraryArtworkGeneration == generation
+        else { continue }
+        var updated = resolvedTrack(requestedTrack)
+        guard updated.artworkUrl?.isEmpty != false else { continue }
+        updated.artworkUrl = artwork
+        replaceTrack(updated)
+        if currentTrack.map(trackKey) == trackKey(updated) {
+          currentTrack = updated
+          updatePlayerTrack(updated)
+          lastNowPlayingTrackKey = ""
+          publishNowPlaying()
+        }
+        changed = true
+      }
+      guard libraryArtworkGeneration == generation else { return }
+      libraryArtworkTask = nil
+      if changed || playerModel.activePage == "library" || playerModel.activePage == "search" {
+        renderPages()
+      }
+    }
+  }
+
+  private func resetLibraryArtworkLookup() {
+    libraryArtworkGeneration &+= 1
+    libraryArtworkTask?.cancel()
+    libraryArtworkTask = nil
+    libraryArtworkLookupKeys.removeAll()
+  }
+
+  private func externalMetadataPickerJSON(
+    _ candidates: [EchoNativeMetadataService.Candidate],
+    track: EchoNativeCoreTrack,
+    generation: Int
+  ) -> String {
+    let payload: [String: Any] = [
+      "artistLabel": localized("Artist", "艺术家"),
+      "artworkLabel": localized("Artwork", "封面"),
+      "cancelLabel": localized("Cancel", "取消"),
+      "candidates": candidates.map { candidate in
+        let available = [
+          candidate.lyrics.isEmpty ? nil : localized("Lyrics", "歌词"),
+          candidate.artist?.isEmpty == false ? localized("Artist", "艺术家") : nil,
+          candidate.artworkUrl?.isEmpty == false ? localized("Artwork", "封面") : nil,
+        ].compactMap { $0 }
+        return [
+          "albumArt": candidate.artworkUrl ?? "",
+          "artist": candidate.artist ?? "",
+          "availableLabel": available.joined(separator: "/"),
+          "hasArtist": candidate.artist?.isEmpty == false,
+          "hasArtwork": candidate.artworkUrl?.isEmpty == false,
+          "hasLyrics": !candidate.lyrics.isEmpty,
+          "id": candidate.id,
+          "source": candidate.source,
+          "sourceLabel": candidate.sourceLabel,
+          "title": candidate.title,
+        ] as [String: Any]
+      },
+      "doneLabel": localized("Use selection", "使用所选来源"),
+      "id": "\(trackKey(track)):\(generation)",
+      "ignoreLabel": localized("Do not use", "不使用"),
+      "lyricsLabel": localized("Lyrics", "歌词"),
+      "selectedLabel": localized("Selected", "已选择"),
+      "subtitle": localized("Choose a source for each available field.", "分别选择歌词、艺术家和封面的来源。"),
+      "title": track.title,
+      "unavailableLabel": localized("Unavailable", "无此数据"),
+      "useSourceLabel": localized("Use", "使用此来源"),
+    ]
+    return json(payload)
+  }
+
+  private func applyExternalMetadataSelection(_ payload: [String: Any]) {
+    guard externalMetadataTrackKey == currentTrack.map(trackKey),
+      let track = currentTrack,
+      let selections = payload["selections"] as? [String: String]
+    else { clearExternalMetadataPicker(); return }
+    func candidate(_ field: String) -> EchoNativeMetadataService.Candidate? {
+      guard let id = selections[field] else { return nil }
+      return externalMetadataCandidates.first { $0.id == id }
+    }
+    applyExternalMetadata(EchoNativeMetadataService.Result(
+      artist: candidate("artist")?.artist,
+      artworkUrl: candidate("albumArt")?.artworkUrl,
+      lyrics: candidate("lyrics")?.lyrics ?? ""
+    ), to: track)
+    clearExternalMetadataPicker()
+  }
+
+  private func applyExternalMetadata(_ result: EchoNativeMetadataService.Result, to track: EchoNativeCoreTrack) {
+    guard currentTrack.map(trackKey) == trackKey(track) else { return }
+    var updated = track
+    if let artwork = result.artworkUrl, !artwork.isEmpty { updated.artworkUrl = artwork }
+    if let artist = result.artist, !artist.isEmpty { updated.artist = artist }
+    replaceTrack(updated)
+    currentTrack = updated
+    updatePlayerTrack(updated)
+    if !result.lyrics.isEmpty {
+      externalLyricsByTrackKey[trackKey(track)] = result.lyrics
+      let lines = EchoNativeMetadataService.parseLyrics(result.lyrics)
+      playerModel.lyricTexts = lines.map(\.text)
+      playerModel.lyricTimesMs = lines.map(\.milliseconds)
+    }
+    updateQueueModel()
+    renderPages()
+    lastNowPlayingTrackKey = ""
+    publishNowPlaying()
+  }
+
+  private func replaceTrack(_ updated: EchoNativeCoreTrack) {
+    let key = trackKey(updated)
+    func replace(in values: inout [EchoNativeCoreTrack]) {
+      if let index = values.firstIndex(where: { trackKey($0) == key }) { values[index] = updated }
+    }
+    replace(in: &localTracks)
+    replace(in: &echoTracks)
+    replace(in: &powerampTracks)
+    replace(in: &neteaseTracks)
+    replace(in: &queue)
+  }
+
+  private func clearExternalMetadataPicker() {
+    externalMetadataCandidates = []
+    externalMetadataTrackKey = ""
+    playerModel.updateExternalSourcePicker(payloadJSON: "")
+  }
+
+  private func ignoreExternalMetadataPicker() {
+    if !externalMetadataTrackKey.isEmpty { ignoredExternalMetadataTrackKeys.insert(externalMetadataTrackKey) }
+    clearExternalMetadataPicker()
+  }
+
+  private func handleArtworkError(_ url: String) {
+    guard !url.isEmpty else { return }
+    guard failedArtworkUrls.insert(url).inserted else { return }
+    func clear(in values: inout [EchoNativeCoreTrack]) {
+      for index in values.indices where values[index].artworkUrl == url { values[index].artworkUrl = nil }
+    }
+    clear(in: &localTracks)
+    clear(in: &echoTracks)
+    clear(in: &powerampTracks)
+    clear(in: &neteaseTracks)
+    clear(in: &queue)
+    for index in echoAlbums.indices where echoAlbums[index].artworkUrl == url { echoAlbums[index].artworkUrl = nil }
+    for index in powerampAlbums.indices where powerampAlbums[index].artworkUrl == url { powerampAlbums[index].artworkUrl = nil }
+    if currentTrack?.artworkUrl == url {
+      currentTrack?.artworkUrl = nil
+      playerModel.artworkUrl = ""
+      if persistent.settings.externalMetadataEnabled { refreshExternalMetadata(manual: false) }
+    }
+    updateQueueModel()
+    renderPages()
+  }
+
+  private func updateLoadingState() {
+    playerModel.playbackLoading = audioLoading
+    playerModel.metadataLoading = audioLoading || externalMetadataLoading
+  }
+
+  private func track(id: String, source: EchoNativeTrackSource?) -> EchoNativeCoreTrack? {
+    let values = source.map { libraryTracks(for: $0) } ?? allTracks()
+    return values.first { $0.id == id }
+  }
+
+  private func resolvedTrack(_ track: EchoNativeCoreTrack) -> EchoNativeCoreTrack {
+    var value = track
+    if let libraryTrack = self.track(id: track.id, source: track.source) {
+      if value.album.isEmpty { value.album = libraryTrack.album }
+      if value.albumArtist.isEmpty { value.albumArtist = libraryTrack.albumArtist }
+      if value.artist.isEmpty { value.artist = libraryTrack.artist }
+      if value.artworkUrl?.isEmpty != false { value.artworkUrl = libraryTrack.artworkUrl }
+      if value.bitDepth == nil { value.bitDepth = libraryTrack.bitDepth }
+      if value.bitrate == nil { value.bitrate = libraryTrack.bitrate }
+      value.canPlayOnPhone = value.canPlayOnPhone || libraryTrack.canPlayOnPhone
+      if value.codec?.isEmpty != false { value.codec = libraryTrack.codec }
+      if value.discNo == nil { value.discNo = libraryTrack.discNo }
+      if value.durationMs <= 0 { value.durationMs = libraryTrack.durationMs }
+      if value.fileName?.isEmpty != false { value.fileName = libraryTrack.fileName }
+      if value.fileSize <= 0 { value.fileSize = libraryTrack.fileSize }
+      value.hasLyrics = value.hasLyrics || libraryTrack.hasLyrics
+      if value.lyricsUrl?.isEmpty != false { value.lyricsUrl = libraryTrack.lyricsUrl }
+      if value.localUrl?.isEmpty != false { value.localUrl = libraryTrack.localUrl }
+      if value.sampleRate == nil { value.sampleRate = libraryTrack.sampleRate }
+      if value.sourceLabel.isEmpty { value.sourceLabel = libraryTrack.sourceLabel }
+      if value.title.isEmpty { value.title = libraryTrack.title }
+      if value.trackNo == nil { value.trackNo = libraryTrack.trackNo }
+    }
+    if value.artworkUrl?.isEmpty != false { value.artworkUrl = albumArtwork(for: value) }
+    if let artwork = value.artworkUrl, failedArtworkUrls.contains(artwork) { value.artworkUrl = nil }
+    return value
+  }
+
+  private func resolvedTracks(_ tracks: [EchoNativeCoreTrack]) -> [EchoNativeCoreTrack] {
+    tracks.map(resolvedTrack)
+  }
+
+  func track(forKey key: String) -> EchoNativeCoreTrack? {
+    guard let separator = key.firstIndex(of: ":"), let source = EchoNativeTrackSource(rawValue: String(key[..<separator])) else { return nil }
+    return track(id: String(key[key.index(after: separator)...]), source: source)
+  }
+
+  func libraryTracks(for source: EchoNativeTrackSource) -> [EchoNativeCoreTrack] {
+    switch source {
+    case .echo: return echoTracks
+    case .local: return localTracks
+    case .remote: return powerampTracks
+    case .streaming: return neteaseTracks
+    }
+  }
+
+  private func allTracks() -> [EchoNativeCoreTrack] {
+    localTracks + echoTracks + powerampTracks + neteaseTracks
+  }
+
+  func trackKey(_ track: EchoNativeCoreTrack) -> String { "\(track.source.rawValue):\(track.id)" }
+
+  private func albumArtwork(for track: EchoNativeCoreTrack) -> String? {
+    guard !track.album.isEmpty else { return nil }
+    let albums = track.source == .echo ? echoAlbums : track.source == .remote ? powerampAlbums : []
+    let title = normalizedMetadataValue(track.album)
+    let artist = normalizedMetadataValue(track.albumArtist.isEmpty ? track.artist : track.albumArtist)
+    if let exact = albums.first(where: {
+      normalizedMetadataValue($0.title) == title && normalizedMetadataValue($0.albumArtist) == artist
+    })?.artworkUrl {
+      return exact
+    }
+    let titleMatches = albums.filter { normalizedMetadataValue($0.title) == title }
+    return titleMatches.count == 1 ? titleMatches[0].artworkUrl : nil
+  }
+
+  private func normalizedMetadataValue(_ value: String) -> String {
+    value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+      .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func modeForTrack(_ track: EchoNativeCoreTrack) -> EchoNativeOutputMode {
+    switch track.source {
+    case .local: return .local
+    case .echo: return outputMode == .phone ? .phone : .pc
+    case .remote: return outputMode == .remoteStream ? .remoteStream : .remoteControl
+    case .streaming: return .streaming
+    }
+  }
+
+  private func modeLabel(_ mode: EchoNativeOutputMode) -> String {
+    switch mode {
+    case .local: return "Local Mode"
+    case .pc: return "Controlling Mode"
+    case .phone, .remoteStream: return "Streaming Mode"
+    case .remoteControl: return "Poweramp Control"
+    case .streaming: return "Media Mode"
+    }
+  }
+
+  func tags(
+    for track: EchoNativeCoreTrack,
+    includeDuration: Bool = false,
+    includeOutput: Bool = true
+  ) -> [String] {
+    let visible = persistent.settings.audioTagVisibility
+    var values: [String] = []
+    if includeOutput, visible["output"] != false, let output = playbackOutputTag(), !output.isEmpty {
+      values.append(output)
+    }
+    if visible["codec"] != false, let codec = track.codec, !codec.isEmpty { values.append(codec.uppercased()) }
+    let sampleRate = visible["sampleRate"] != false ? track.sampleRate.flatMap(sampleRateTag) : nil
+    let bitDepth = visible["bitDepth"] != false ? track.bitDepth.map { "\($0)Bit" } : nil
+    if let sampleRate, let bitDepth { values.append("\(sampleRate)/\(bitDepth)") }
+    else if let sampleRate { values.append(sampleRate) }
+    else if let bitDepth { values.append(bitDepth) }
+    if visible["bitrate"] != false, let bitrate = track.bitrate, bitrate > 0 {
+      values.append("\(bitrate >= 1000 ? bitrate / 1000 : bitrate)kbps")
+    }
+    if visible["source"] != false {
+      let fallback = track.source == .local ? "Local" : track.source == .echo ? "ECHO" : track.source == .remote ? "Poweramp" : localized("NetEase", "网易云")
+      values.append(track.sourceLabel.isEmpty ? fallback : track.sourceLabel)
+    }
+    if visible["streamable"] != false {
+      values.append(track.canPlayOnPhone ? localized("Streamable", "可串流") : localized("Control only", "仅控制"))
+    }
+    if includeDuration, visible["duration"] != false, track.durationMs > 0 {
+      let seconds = Int(track.durationMs / 1000)
+      values.append(String(format: "%d:%02d", seconds / 60, seconds % 60))
+    }
+    var seen = Set<String>()
+    return values.filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+  }
+
+  private func sampleRateTag(_ rate: Double) -> String? {
+    guard rate > 0 else { return nil }
+    let khz = rate >= 1000 ? rate / 1000 : rate
+    return String(format: khz.rounded() == khz ? "%.0fkHz" : "%.1fkHz", khz)
+  }
+
+  private func playbackOutputTag() -> String? {
+    let raw: String
+    switch outputMode {
+    case .local: raw = "Local"
+    case .pc: raw = echoStatus?.playback.outputMode ?? ""
+    case .phone: raw = localized("Streaming", "串流")
+    case .remoteControl: raw = powerampStatus?.playback.outputMode ?? "Poweramp"
+    case .remoteStream: raw = localized("Poweramp Stream", "Poweramp 串流")
+    case .streaming: raw = localized("NetEase", "网易云")
+    }
+    let normalized = raw.lowercased()
+    if normalized.contains("asio") { return "ASIO" }
+    if normalized.contains("wasapi") || normalized.contains("shared") || normalized.contains("exclusive") { return "WASAPI" }
+    if normalized.contains("system") { return "System" }
+    return raw
+  }
+
+  func albumOrdered(_ tracks: [EchoNativeCoreTrack]) -> [EchoNativeCoreTrack] {
+    tracks.sorted {
+      if ($0.discNo ?? 1) != ($1.discNo ?? 1) { return ($0.discNo ?? 1) < ($1.discNo ?? 1) }
+      if ($0.trackNo ?? Int.max) != ($1.trackNo ?? Int.max) { return ($0.trackNo ?? Int.max) < ($1.trackNo ?? Int.max) }
+      return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+    }
+  }
+
+  private func normalizedGains(_ values: [Double]) -> [Double] {
+    (0..<10).map { index in values.indices.contains(index) ? min(12, max(-12, values[index])) : 0 }
+  }
+
+  private func resetLibraryPosition() {
+    searchTask?.cancel()
+    libraryPage = 0
+    libraryExpanded = false
+    selectedCollectionId = ""
+    selectedPlaylistId = ""
+    selectedStreamingPlaylistId = ""
+  }
+
+  private func updateActiveLyricIndex() {
+    let position = playerModel.positionMs
+    guard let index = playerModel.lyricTimesMs.lastIndex(where: { $0 >= 0 && $0 <= position }) else {
+      if playerModel.activeLyricIndex != 0 { playerModel.activeLyricIndex = 0 }
+      return
+    }
+    if playerModel.activeLyricIndex != index { playerModel.activeLyricIndex = index }
+  }
+
+  private func persist() { EchoNativePersistence.save(persistent) }
+
+  private func number(_ value: Any?) -> Double? {
+    if let value = value as? Double { return value }
+    if let value = value as? Int { return Double(value) }
+    if let value = value as? NSNumber { return value.doubleValue }
+    return nil
+  }
+
+  func localized(_ english: String, _ chinese: String) -> String {
+    persistent.settings.language == "en" ? english : chinese
+  }
+
+  func json(_ value: Any) -> String {
+    guard JSONSerialization.isValidJSONObject(value), let data = try? JSONSerialization.data(withJSONObject: value) else { return "{}" }
+    return String(data: data, encoding: .utf8) ?? "{}"
+  }
+
+  private func showError(_ error: Error) {
+    playerModel.alertTitle = localized("Playback error", "播放异常")
+    playerModel.alertMessage = errorMessage(error)
+  }
+
+  private func showConnectionError(_ message: String) {
+    playerModel.alertTitle = localized("Connection error", "连接异常")
+    playerModel.alertMessage = message
+  }
+
+  private func errorMessage(_ error: Error) -> String {
+    guard persistent.settings.language == "en", let networkError = error as? EchoNativeNetworkError else {
+      return error.localizedDescription
+    }
+    switch networkError {
+    case .invalidConnection: return "The address, port, or pairing token is invalid."
+    case .invalidResponse: return "The remote service returned an unsupported response."
+    case let .server(code, message): return "\(code) \(message)"
+    }
+  }
+}

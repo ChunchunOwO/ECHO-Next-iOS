@@ -6,6 +6,7 @@
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
+    "test:library": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/library/collections.test.mjs src/playback/native-core.test.mjs src/playback/queue.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

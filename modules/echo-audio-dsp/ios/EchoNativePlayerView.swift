@@ -1,6 +1,7 @@
 import Combine
 import ExpoModulesCore
 import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -173,16 +174,14 @@ func echoGlassGroup<Content: View>(
 
 private let nativeEqFrequencies = ["31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
 
-func normalizedNativeEqGains(_ gains: [Double]) -> [Double] {
-  nativeEqFrequencies.indices.map { index in
-    min(12, max(-12, index < gains.count ? gains[index] : 0))
-  }
-}
-
 final class EchoNativeEqualizerModel: ObservableObject {
   @Published var gains = Array(repeating: 0.0, count: 10)
   @Published var language = "zh"
   @Published var preset = "flat"
+}
+
+final class EchoNativePlaybackClockModel: ObservableObject {
+  @Published var positionMs = 0.0
 }
 
 struct EchoNativeQueueItem: Decodable, Identifiable {
@@ -217,6 +216,7 @@ struct EchoNativeExternalSourceCandidate: Decodable, Identifiable {
   let hasArtwork: Bool
   let hasLyrics: Bool
   let id: String
+  let source: String
   let sourceLabel: String
   let title: String
 }
@@ -238,8 +238,12 @@ struct EchoNativeExternalSourcePickerPayload: Decodable, Identifiable {
 }
 
 final class EchoNativePlayerModel: ObservableObject {
+  let clock = EchoNativePlaybackClockModel()
+  let equalizer = EchoNativeEqualizerModel()
   @Published var activePage = "control"
   @Published var activeLyricIndex = 0
+  @Published var alertMessage = ""
+  @Published var alertTitle = ""
   @Published var artist = ""
   @Published var artworkBackgroundEnabled = true
   @Published var artworkUrl = ""
@@ -259,7 +263,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var metadataLoading = false
   @Published var modeLabel = "Controlling Mode"
   @Published var outputMode = "pc"
-  @Published var positionMs = 0.0
+  @Published var playbackLoading = false
   @Published var queueCount = 0
   @Published var queuePayload: EchoNativeQueuePayload?
   @Published var repeatOne = false
@@ -267,9 +271,13 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var tags: [String] = []
   @Published var title = ""
   @Published var volume = 1.0
-  let equalizer = EchoNativeEqualizerModel()
   private var lastExternalSourcePickerJSON = ""
   private var lastQueuePayloadJSON = ""
+
+  var positionMs: Double {
+    get { clock.positionMs }
+    set { clock.positionMs = newValue }
+  }
 
   func updateQueue(payloadJSON: String) {
     guard payloadJSON != lastQueuePayloadJSON else { return }
@@ -304,22 +312,15 @@ final class EchoNativePlayerModel: ObservableObject {
   }
 }
 
-final class EchoNativeEqLauncherModel: ObservableObject {
-  @Published var description = ""
-  @Published var label = ""
-  @Published var title = "EQ"
-  let equalizer = EchoNativeEqualizerModel()
-}
-
-public final class EchoNativePlayerView: ExpoView {
-  let model = EchoNativePlayerModel()
-  let pagesModel = EchoNativePagesModel()
-  let onAction = EventDispatcher()
+public final class EchoNativeAppView: ExpoView {
+  private let store = EchoNativeAppStore()
 
   private lazy var hostingController = UIHostingController(
-    rootView: EchoNativeAppScreen(playerModel: model, pagesModel: pagesModel) { [weak self] payload in
-      self?.onAction(payload)
-    }
+    rootView: EchoNativeAppScreen(
+      playerModel: store.playerModel,
+      pagesModel: store.pagesModel,
+      onAction: store.handle
+    )
   )
 
   public required init(appContext: AppContext? = nil) {
@@ -334,54 +335,21 @@ public final class EchoNativePlayerView: ExpoView {
     hostingController.view.frame = bounds
   }
 
-  public override func didMoveToWindow() {
-    super.didMoveToWindow()
-    if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
-      if !(parent is UINavigationController) && !(parent is UITabBarController) {
-        parent.addChild(hostingController)
-      }
-      addSubview(hostingController.view)
-      hostingController.didMove(toParent: parent)
-      hostingController.view.frame = bounds
-    } else if window == nil {
-      hostingController.view.removeFromSuperview()
-      hostingController.removeFromParent()
-    }
-  }
-}
-
-public final class EchoNativeEqLauncherView: ExpoView {
-  let model = EchoNativeEqLauncherModel()
-  let onAction = EventDispatcher()
-
-  private lazy var hostingController = UIHostingController(
-    rootView: EchoNativeEqLauncherScreen(model: model) { [weak self] payload in
-      self?.onAction(payload)
-    }
-  )
-
-  public required init(appContext: AppContext? = nil) {
-    super.init(appContext: appContext)
-    clipsToBounds = true
-    hostingController.view.backgroundColor = .clear
-    hostingController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-  }
-
-  public override func layoutSubviews() {
-    super.layoutSubviews()
-    hostingController.view.frame = bounds
+  func migrateLegacy(_ payloadJSON: String) {
+    store.migrateLegacy(payloadJSON: payloadJSON)
   }
 
   public override func didMoveToWindow() {
     super.didMoveToWindow()
+    if window != nil { store.start() }
     if window != nil, hostingController.view.superview == nil, let parent = findHostingViewController() {
-      if !(parent is UINavigationController) && !(parent is UITabBarController) {
-        parent.addChild(hostingController)
-      }
+      store.presenter = parent
+      parent.addChild(hostingController)
       addSubview(hostingController.view)
       hostingController.didMove(toParent: parent)
       hostingController.view.frame = bounds
     } else if window == nil {
+      store.presenter = nil
       hostingController.view.removeFromSuperview()
       hostingController.removeFromParent()
     }
@@ -392,10 +360,28 @@ private struct EchoNativeAppScreen: View {
   @ObservedObject var playerModel: EchoNativePlayerModel
   @ObservedObject var pagesModel: EchoNativePagesModel
   let onAction: ([String: Any]) -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     ZStack {
-      echoWarmBackground.ignoresSafeArea()
+      Group {
+        if playerModel.activePage == "control" {
+          EchoNativeArtworkBackdrop(
+            enabled: playerModel.artworkBackgroundEnabled,
+            identity: "\(playerModel.title)::\(playerModel.artist)",
+            urlString: playerModel.artworkBackgroundEnabled ? playerModel.artworkUrl : ""
+          ) {
+            onAction(["action": "artworkError", "url": playerModel.artworkUrl])
+          }
+          .transition(.opacity)
+        } else {
+          echoWarmBackground
+            .transition(.opacity)
+        }
+      }
+      .ignoresSafeArea()
+      .allowsHitTesting(false)
+      .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: playerModel.activePage)
       Group {
         #if compiler(>=6.0)
         if #available(iOS 18.0, *) {
@@ -412,6 +398,16 @@ private struct EchoNativeAppScreen: View {
     .sheet(item: $playerModel.externalSourcePicker) { payload in
       EchoNativeExternalSourcePicker(payload: payload, onAction: onAction)
         .echoMediumSheet()
+    }
+    .alert(playerModel.alertTitle, isPresented: Binding(
+      get: { !playerModel.alertMessage.isEmpty },
+      set: { if !$0 { playerModel.alertMessage = "" } }
+    )) {
+      Button(playerModel.language == "en" ? "OK" : "好", role: .cancel) {
+        playerModel.alertMessage = ""
+      }
+    } message: {
+      Text(playerModel.alertMessage)
     }
     .preferredColorScheme(playerModel.followSystemAppearance ? nil : (playerModel.darkModeEnabled ? .dark : .light))
   }
@@ -432,7 +428,7 @@ private struct EchoNativeAppScreen: View {
   private var adaptiveTabView: some View {
     TabView(selection: selection) {
       Tab(title("control"), systemImage: "headphones", value: "control") {
-        themedTab(playerBackground: true) {
+        themedTab {
           EchoNativePlayerScreen(model: playerModel, onAction: onAction)
         }
       }
@@ -464,7 +460,7 @@ private struct EchoNativeAppScreen: View {
 
   private var legacyTabView: some View {
     TabView(selection: selection) {
-      themedTab(playerBackground: true) {
+      themedTab {
         EchoNativePlayerScreen(model: playerModel, onAction: onAction)
       }
         .tag("control")
@@ -493,28 +489,10 @@ private struct EchoNativeAppScreen: View {
     .background(Color.clear)
   }
 
-  private func themedTab<Content: View>(
-    playerBackground: Bool = false,
-    @ViewBuilder content: () -> Content
-  ) -> some View {
-    ZStack {
-      if playerBackground {
-        EchoNativeArtworkBackdrop(
-          enabled: playerModel.artworkBackgroundEnabled,
-          identity: "\(playerModel.title)::\(playerModel.artist)",
-          urlString: playerModel.artworkBackgroundEnabled ? playerModel.artworkUrl : ""
-        ) {
-          onAction(["action": "artworkError", "url": playerModel.artworkUrl])
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-      } else {
-        echoWarmBackground.ignoresSafeArea()
-      }
-
-      content()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
+  private func themedTab<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    content()
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color.clear)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
@@ -535,10 +513,8 @@ struct EchoNativePlayerScreen: View {
   let onAction: ([String: Any]) -> Void
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-  @State private var isSeeking = false
   @State private var isSettingVolume = false
   @State private var lastLyricsInteraction = Date.distantPast
-  @State private var seekValue = 0.0
   @State private var showEqualizer = false
   @State private var showQueue = false
   @State private var volumeValue = 1.0
@@ -567,11 +543,7 @@ struct EchoNativePlayerScreen: View {
         .echoBlurredSheet()
     }
     .onAppear {
-      seekValue = model.positionMs
       volumeValue = model.volume
-    }
-    .onChange(of: model.positionMs) { value in
-      if !isSeeking { seekValue = value }
     }
     .onChange(of: model.volume) { value in
       if !isSettingVolume { volumeValue = value }
@@ -595,7 +567,7 @@ struct EchoNativePlayerScreen: View {
       trackDetails(compact: compact)
       progressControl
       transportControls(compact: compact)
-      secondaryControls(lyricsMode: false)
+      secondaryControls(lyricsMode: false, compact: compact)
       volumeControl
       outputControl
     }
@@ -613,7 +585,7 @@ struct EchoNativePlayerScreen: View {
       VStack(spacing: compact ? 6 : 9) {
         progressControl
         transportControls(compact: true)
-        secondaryControls(lyricsMode: true)
+        secondaryControls(lyricsMode: true, compact: compact)
         volumeControl
       }
     }
@@ -858,28 +830,13 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var progressControl: some View {
-    VStack(spacing: 4) {
-      Slider(
-        value: $seekValue,
-        in: 0...max(1, model.durationMs),
-        onEditingChanged: { editing in
-          isSeeking = editing
-          if !editing {
-            onAction(["action": "seek", "value": seekValue])
-          }
-        }
-      )
-      .tint(echoAccent)
-      .disabled(!model.controlsEnabled || model.durationMs <= 0)
-      .accessibilityLabel(model.language == "en" ? "Playback position" : "播放进度")
-      .accessibilityValue("\(formatTime(seekValue)) / \(formatTime(model.durationMs))")
-      HStack {
-        Text(formatTime(seekValue))
-        Spacer()
-        Text(formatTime(model.durationMs))
-      }
-      .font(.system(size: 10, weight: .medium, design: .monospaced))
-      .foregroundColor(echoInk.opacity(0.48))
+    EchoNativeProgressControl(
+      clock: model.clock,
+      controlsEnabled: model.controlsEnabled,
+      durationMs: model.durationMs,
+      language: model.language
+    ) { value in
+      onAction(["action": "seek", "value": value])
     }
   }
 
@@ -896,17 +853,25 @@ struct EchoNativePlayerScreen: View {
         Button {
           onAction(["action": "playPause"])
         } label: {
-          Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-            .font(.system(size: compact ? 26 : 30, weight: .bold))
-            .foregroundColor(echoInk)
-            .offset(x: model.isPlaying ? 0 : 2)
-            .frame(width: compact ? 66 : 76, height: compact ? 66 : 76)
-            .echoGlass(tint: Color.white.opacity(0.2), clear: false, in: Circle())
+          Group {
+            if model.playbackLoading {
+              ProgressView().controlSize(.regular)
+            } else {
+              Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                .offset(x: model.isPlaying ? 0 : 2)
+            }
+          }
+          .font(.system(size: compact ? 26 : 30, weight: .bold))
+          .foregroundColor(echoInk)
+          .frame(width: compact ? 66 : 76, height: compact ? 66 : 76)
+          .echoGlass(tint: Color.white.opacity(0.2), clear: false, in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!model.controlsEnabled)
-        .opacity(model.controlsEnabled ? 1 : 0.35)
-        .accessibilityLabel(model.language == "en" ? (model.isPlaying ? "Pause" : "Play") : (model.isPlaying ? "暂停" : "播放"))
+        .disabled(!model.controlsEnabled || model.playbackLoading)
+        .opacity(model.controlsEnabled && !model.playbackLoading ? 1 : 0.5)
+        .accessibilityLabel(model.playbackLoading
+          ? (model.language == "en" ? "Loading audio" : "正在加载音频")
+          : (model.language == "en" ? (model.isPlaying ? "Pause" : "Play") : (model.isPlaying ? "暂停" : "播放")))
         roundButton(
           symbol: "forward.end.fill",
           label: model.language == "en" ? "Next" : "下一首",
@@ -918,9 +883,9 @@ struct EchoNativePlayerScreen: View {
     }
   }
 
-  private func secondaryControls(lyricsMode: Bool) -> some View {
+  private func secondaryControls(lyricsMode: Bool, compact: Bool) -> some View {
     echoGlassGroup(spacing: 8) {
-      HStack(spacing: 18) {
+      HStack(spacing: compact ? 4 : 10) {
         iconButton(
           symbol: model.repeatOne ? "repeat.1" : "repeat",
           label: model.language == "en" ? "Repeat one" : "单曲循环",
@@ -955,7 +920,7 @@ struct EchoNativePlayerScreen: View {
           Text("EQ")
             .font(.system(size: 12, weight: .bold))
             .foregroundColor(echoInk)
-            .frame(width: 42, height: 42)
+            .frame(width: 44, height: 44)
             .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
         }
         .buttonStyle(.plain)
@@ -1010,21 +975,44 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var outputControl: some View {
-    Picker("", selection: Binding(
-      get: { model.outputMode },
-      set: { value in
-        onAction(["action": "output", "mode": value])
+    VStack(spacing: 7) {
+      Picker("", selection: Binding(
+        get: { outputSource },
+        set: { onAction(["action": "outputSource", "mode": $0]) }
+      )) {
+        Text(model.language == "en" ? "Local" : "本地").tag("local")
+        Text(model.language == "en" ? "Media" : "流媒体").tag("streaming")
+        Text("ECHO").tag("echo")
+        Text(model.language == "en" ? "Remote" : "远程").tag("remote")
       }
-    )) {
-      Text(model.language == "en" ? "Local" : "本地").tag("local")
-      Text(model.language == "en" ? "Media" : "流媒体").tag("streaming")
-      Text(model.language == "en" ? "Control" : "控制").tag("pc")
-      Text(model.language == "en" ? "Stream" : "串流").tag("phone")
-      Text(model.language == "en" ? "Poweramp" : "远程").tag("remoteStream")
+      .pickerStyle(.segmented)
+
+      if outputSource == "echo" || outputSource == "remote" {
+        Picker("", selection: Binding(
+          get: { model.outputMode },
+          set: { onAction(["action": "output", "mode": $0]) }
+        )) {
+          Text(model.language == "en" ? "Control" : "控制")
+            .tag(outputSource == "echo" ? "pc" : "remoteControl")
+          Text(model.language == "en" ? "Stream" : "串流")
+            .tag(outputSource == "echo" ? "phone" : "remoteStream")
+        }
+        .pickerStyle(.segmented)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+      }
     }
-    .pickerStyle(.segmented)
     .tint(echoAccent)
     .accessibilityLabel(model.language == "en" ? "Playback output" : "播放输出")
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: outputSource)
+  }
+
+  private var outputSource: String {
+    switch model.outputMode {
+    case "local": return "local"
+    case "streaming": return "streaming"
+    case "remoteControl", "remoteStream": return "remote"
+    default: return "echo"
+    }
   }
 
   private func roundButton(symbol: String, label: String, size: CGFloat, action: @escaping () -> Void) -> some View {
@@ -1046,7 +1034,7 @@ struct EchoNativePlayerScreen: View {
       Image(systemName: symbol)
         .font(.system(size: 16, weight: .semibold))
         .foregroundColor(active ? echoAccent : echoInk)
-        .frame(width: 42, height: 42)
+        .frame(width: 44, height: 44)
         .echoGlass(
           tint: active ? Color.black.opacity(0.14) : Color.white.opacity(0.12),
           clear: !active,
@@ -1066,6 +1054,52 @@ struct EchoNativePlayerScreen: View {
   private var artistLabel: String {
     let artist = model.artist.trimmingCharacters(in: .whitespacesAndNewlines)
     return artist.isEmpty ? (model.language == "en" ? "Unknown Artist" : "未知艺术家") : artist
+  }
+}
+
+private struct EchoNativeProgressControl: View {
+  @ObservedObject var clock: EchoNativePlaybackClockModel
+  let controlsEnabled: Bool
+  let durationMs: Double
+  let language: String
+  let onSeek: (Double) -> Void
+  @State private var isSeeking = false
+  @State private var seekValue = 0.0
+
+  var body: some View {
+    VStack(spacing: 4) {
+      Slider(
+        value: $seekValue,
+        in: 0...max(1, durationMs),
+        onEditingChanged: { editing in
+          isSeeking = editing
+          if !editing { onSeek(seekValue) }
+        }
+      )
+      .tint(echoAccent)
+      .disabled(!controlsEnabled || durationMs <= 0)
+      .accessibilityLabel(language == "en" ? "Playback position" : "播放进度")
+      .accessibilityValue("\(formatTime(seekValue)) / \(formatTime(durationMs))")
+      HStack {
+        Text(formatTime(seekValue))
+        Spacer()
+        Text(formatTime(durationMs))
+      }
+      .font(.system(size: 10, weight: .medium, design: .monospaced))
+      .foregroundColor(echoInk.opacity(0.48))
+    }
+    .onAppear { seekValue = min(clock.positionMs, max(0, durationMs)) }
+    .onChange(of: clock.positionMs) { value in
+      if !isSeeking { seekValue = min(value, max(0, durationMs)) }
+    }
+    .onChange(of: durationMs) { value in
+      if !isSeeking { seekValue = min(clock.positionMs, max(0, value)) }
+    }
+  }
+
+  private func formatTime(_ milliseconds: Double) -> String {
+    let seconds = max(0, Int(milliseconds / 1000))
+    return String(format: "%d:%02d", seconds / 60, seconds % 60)
   }
 }
 
@@ -1318,9 +1352,7 @@ private struct EchoNativeExternalSourcePicker: View {
     .interactiveDismissDisabled()
     .onAppear {
       for field in requiredFields where selectedSources[field] == nil {
-        selectedSources[field] = payload.candidates.first(where: { candidate in
-          field == "lyrics" ? candidate.hasLyrics : field == "artist" ? candidate.hasArtist : candidate.hasArtwork
-        })?.id
+        selectedSources[field] = preferredCandidate(for: field)?.id
       }
     }
   }
@@ -1335,6 +1367,21 @@ private struct EchoNativeExternalSourcePicker: View {
 
   private var selectionComplete: Bool {
     requiredFields.allSatisfy { selectedSources[$0] != nil }
+  }
+
+  private func preferredCandidate(for field: String) -> EchoNativeExternalSourceCandidate? {
+    let sources = field == "lyrics"
+      ? ["lrclib", "lrcapi", "netease"]
+      : field == "albumArt" ? ["netease", "lrcapi", "lrclib"] : ["lrcapi", "netease", "lrclib"]
+    let available: (EchoNativeExternalSourceCandidate) -> Bool = { candidate in
+      field == "lyrics" ? candidate.hasLyrics : field == "artist" ? candidate.hasArtist : candidate.hasArtwork
+    }
+    for source in sources {
+      if let candidate = payload.candidates.first(where: { $0.source == source && available($0) }) {
+        return candidate
+      }
+    }
+    return payload.candidates.first(where: available)
   }
 
   private func fieldButton(
@@ -1465,6 +1512,7 @@ private struct EchoNativeQueueSheet: View {
                     onAction([
                       "action": "queueMove",
                       "id": item.trackId,
+                      "index": index,
                       "playlistId": payload.playlistId,
                       "source": item.source,
                       "value": -1,
@@ -1478,6 +1526,7 @@ private struct EchoNativeQueueSheet: View {
                     onAction([
                       "action": "queueMove",
                       "id": item.trackId,
+                      "index": index,
                       "playlistId": payload.playlistId,
                       "source": item.source,
                       "value": 1,
@@ -1487,6 +1536,7 @@ private struct EchoNativeQueueSheet: View {
                     onAction([
                       "action": "queueRemove",
                       "id": item.trackId,
+                      "index": index,
                       "playlistId": payload.playlistId,
                       "source": item.source,
                     ])
@@ -1592,8 +1642,8 @@ struct EchoNativeArtwork: View {
           fallback
         }
       }
-      .onAppear { localLoader.load(url) }
-      .onChange(of: urlString) { _ in localLoader.load(url) }
+      .onAppear { localLoader.load(url, maxPixelSize: localArtworkPixelSize) }
+      .onChange(of: urlString) { _ in localLoader.load(url, maxPixelSize: localArtworkPixelSize) }
       .onChange(of: localLoader.failed) { failed in
         if failed { onError() }
       }
@@ -1612,6 +1662,8 @@ struct EchoNativeArtwork: View {
       fallback
     }
   }
+
+  private var localArtworkPixelSize: CGFloat { squarePreview ? 900 : 1_600 }
 
   @ViewBuilder
   private var fallback: some View {
@@ -1635,77 +1687,46 @@ struct EchoNativeArtwork: View {
 private final class EchoNativeLocalArtworkLoader: ObservableObject {
   private static let cache: NSCache<NSString, UIImage> = {
     let cache = NSCache<NSString, UIImage>()
-    cache.countLimit = 80
+    cache.countLimit = 60
+    cache.totalCostLimit = 64 * 1024 * 1024
     return cache
   }()
   @Published var failed = false
   @Published var image: UIImage?
-  private var requestedPath = ""
+  private var requestedKey = ""
 
-  func load(_ url: URL) {
+  func load(_ url: URL, maxPixelSize: CGFloat) {
     let path = url.path
-    guard path != requestedPath || image == nil else { return }
-    requestedPath = path
+    let pixelSize = max(1, Int(maxPixelSize.rounded()))
+    let key = "\(path)::\(pixelSize)"
+    guard key != requestedKey || image == nil else { return }
+    requestedKey = key
     failed = false
-    if let cached = Self.cache.object(forKey: path as NSString) {
+    if let cached = Self.cache.object(forKey: key as NSString) {
       image = cached
       return
     }
     image = nil
     DispatchQueue.global(qos: .userInitiated).async {
-      let decoded = UIImage(contentsOfFile: path)
+      let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceThumbnailMaxPixelSize: pixelSize,
+      ]
+      let decoded = CGImageSourceCreateWithURL(url as CFURL, nil)
+        .flatMap { CGImageSourceCreateThumbnailAtIndex($0, 0, options as CFDictionary) }
+        .map { UIImage(cgImage: $0) }
       DispatchQueue.main.async { [weak self] in
-        guard let self, self.requestedPath == path else { return }
+        guard let self, self.requestedKey == key else { return }
         if let decoded {
-          Self.cache.setObject(decoded, forKey: path as NSString)
+          let cost = decoded.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+          Self.cache.setObject(decoded, forKey: key as NSString, cost: cost)
           self.image = decoded
         } else {
           self.failed = true
         }
       }
-    }
-  }
-}
-
-private struct EchoNativeEqLauncherScreen: View {
-  @ObservedObject var model: EchoNativeEqLauncherModel
-  let onAction: ([String: Any]) -> Void
-  @State private var showEqualizer = false
-
-  var body: some View {
-    Button {
-      showEqualizer = true
-    } label: {
-      HStack(spacing: 12) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text(model.title)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(.white)
-          Text(model.description)
-            .font(.system(size: 11))
-            .foregroundColor(.white.opacity(0.5))
-            .lineLimit(2)
-        }
-        Spacer()
-        Text(model.label)
-          .font(.system(size: 11, weight: .bold))
-          .foregroundColor(echoAccent)
-        Image(systemName: "chevron.right")
-          .font(.system(size: 12, weight: .bold))
-          .foregroundColor(.white.opacity(0.5))
-      }
-      .padding(.horizontal, 12)
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .echoGlass(
-        tint: Color.black.opacity(0.12),
-        clear: false,
-        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-      )
-    }
-    .buttonStyle(.plain)
-    .accessibilityLabel("\(model.title), \(model.label)")
-    .sheet(isPresented: $showEqualizer) {
-      EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
     }
   }
 }
@@ -1786,11 +1807,11 @@ struct EchoNativeEqualizerSheet: View {
                   gain: model.gains[index],
                   label: nativeEqFrequencies[index],
                   plotHeight: plotHeight,
-                  onChange: { gain in
+                  onChange: { gain, commit in
                     activeBand = index
                     model.preset = "custom"
                     model.gains[index] = gain
-                    onAction(["action": "eqChange", "index": index, "value": gain])
+                    onAction(["action": "eqChange", "commit": commit, "index": index, "value": gain])
                   }
                 )
                 .onTapGesture { activeBand = index }
@@ -1847,7 +1868,7 @@ private struct EchoNativeEqBand: View {
   let gain: Double
   let label: String
   let plotHeight: CGFloat
-  let onChange: (Double) -> Void
+  let onChange: (Double, Bool) -> Void
 
   var body: some View {
     VStack(spacing: 7) {
@@ -1870,11 +1891,10 @@ private struct EchoNativeEqBand: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-          let ratio = min(1, max(0, value.location.y / geometry.size.height))
-          let rawGain = 12 - Double(ratio) * 24
-          onChange((rawGain * 2).rounded() / 2)
-        })
+        .gesture(DragGesture(minimumDistance: 0)
+          .onChanged { value in onChange(gain(at: value.location.y, height: geometry.size.height), false) }
+          .onEnded { value in onChange(gain(at: value.location.y, height: geometry.size.height), true) }
+        )
       }
       .frame(height: plotHeight)
       Text(label)
@@ -1887,7 +1907,12 @@ private struct EchoNativeEqBand: View {
     .accessibilityLabel("\(label) \(String(format: "%+.1f dB", gain))")
     .accessibilityAdjustableAction { direction in
       let delta = direction == .increment ? 0.5 : -0.5
-      onChange(min(12, max(-12, gain + delta)))
+      onChange(min(12, max(-12, gain + delta)), true)
     }
+  }
+
+  private func gain(at y: CGFloat, height: CGFloat) -> Double {
+    let ratio = min(1, max(0, y / max(1, height)))
+    return ((12 - Double(ratio) * 24) * 2).rounded() / 2
   }
 }

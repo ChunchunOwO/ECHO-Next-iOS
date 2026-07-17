@@ -88,6 +88,15 @@ const randomHex = (length: number): string => Array.from(
   () => Math.floor(Math.random() * 16).toString(16).toUpperCase(),
 ).join('');
 
+const stableDeviceId = (cookies: Record<string, string>): string => {
+  const browserId = (cookies._ntes_nuid ?? '').replace(/[^a-f\d]/giu, '').toUpperCase();
+  const sessionId = cookies.MUSIC_U || cookies.MUSIC_A || '';
+  const sessionDeviceId = sessionId ? CryptoJS.SHA256(sessionId).toString().toUpperCase() : '';
+  return cookies.deviceId
+    || (browserId.length >= 52 ? browserId.slice(0, 52) : '')
+    || (sessionDeviceId ? sessionDeviceId.slice(0, 52) : randomHex(52));
+};
+
 const eapiEncrypt = (path: string, value: object): string => {
   const text = JSON.stringify(value);
   const digest = CryptoJS.MD5(`nobody${path}use${text}md5forencrypt`).toString();
@@ -106,7 +115,7 @@ const directEapiRequest = async <T>(
 ): Promise<ApiResponse<T>> => {
   const now = Date.now();
   const currentCookies = cookieValues(cookie);
-  const deviceId = currentCookies.deviceId || randomHex(52);
+  const deviceId = stableDeviceId(currentCookies);
   const header: Record<string, string> = {
     __csrf: currentCookies.__csrf || '',
     appver: '9.0.90',
@@ -232,7 +241,8 @@ export const createNeteaseQrLogin = async (
     const response = await directEapiRequest<{ unikey?: string }>('/api/login/qrcode/unikey', { type: 3 });
     const key = response.body.unikey;
     if (!key) throw new Error('无法生成登录二维码');
-    const chainId = `v1_unknown-${Math.floor(Math.random() * 1e6)}_web_login_${Date.now()}`;
+    const deviceId = cookieValues(response.cookie).deviceId || `unknown-${Math.floor(Math.random() * 1e6)}`;
+    const chainId = `v1_${deviceId}_web_login_${Date.now()}`;
     return {
       cookie: response.cookie,
       key,

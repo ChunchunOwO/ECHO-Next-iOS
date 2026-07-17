@@ -40,6 +40,7 @@ private struct EchoNativeLibraryTrack: Decodable, Identifiable {
   let tags: [String]
   let title: String
   let trackNo: Int?
+  var stableId: String { "\(source):\(id)" }
 }
 
 private struct EchoNativeStreamingPlaylist: Decodable, Identifiable {
@@ -196,10 +197,11 @@ private struct EchoNativeLibraryLabels: Decodable {
 private struct EchoNativeLibraryPayload: Decodable {
   let busy: Bool
   let canPlayLocal: Bool
+  let confirmDelete: Bool
   let collections: [EchoNativeLibraryCollection]
   let filter: String
   let filterOptions: [EchoNativePageOption]
-  let indexTitles: [String]
+  var indexTitles: [String]?
   let labels: EchoNativeLibraryLabels
   let pagination: EchoNativeLibraryPagination
   let paginationScope: String
@@ -328,16 +330,19 @@ final class EchoNativePagesModel: ObservableObject {
     nextPayload.connection = nextPayload.connection ?? payload?.connection
     nextPayload.library = nextPayload.library ?? payload?.library
     nextPayload.settings = nextPayload.settings ?? payload?.settings
-    if let library = nextPayload.library,
-      library.indexTitles != libraryIndexTitles
-        || library.paginationScope != libraryIndexScope {
-      libraryIndexTitles = library.indexTitles
-      libraryIndexScope = library.paginationScope
-      libraryIndexTargets = EchoNativeLibraryIndex.targets(
-        for: library.indexTitles,
-        scope: library.paginationScope,
-        pageSize: library.pagination.pageSize
-      )
+    if var library = nextPayload.library {
+      if let indexTitles = library.indexTitles,
+        indexTitles != libraryIndexTitles || library.paginationScope != libraryIndexScope {
+        libraryIndexTitles = indexTitles
+        libraryIndexScope = library.paginationScope
+        libraryIndexTargets = EchoNativeLibraryIndex.targets(
+          for: indexTitles,
+          scope: library.paginationScope,
+          pageSize: library.pagination.pageSize
+        )
+      }
+      library.indexTitles = libraryIndexTitles
+      nextPayload.library = library
     }
     payload = nextPayload
     equalizer.language = nextPayload.language
@@ -357,11 +362,15 @@ struct EchoNativePagesScreen: View {
   @State private var playlistEditor: EchoNativePlaylistEditorState?
   @State private var playlistSelection: EchoNativePlaylistSelection?
   @State private var playlistPendingDeletion: EchoNativePlaylist?
+  @State private var trackPendingDeletion: EchoNativeLibraryTrack?
   @State private var showStreamingLogoutConfirmation = false
+  @State private var showNeteaseWebLogin = false
   @State private var showNeteaseQrSaveError = false
   @State private var selectedAlbumId = ""
   @State private var selectedAlbumArtworkUrl = ""
   @State private var selectedAlbumTitle = ""
+  @State private var selectedCollectionIsAlbum = false
+  @State private var libraryCollectionContentHeight: CGFloat = 0
   @State private var libraryTrackContentHeight: CGFloat = 0
   @State private var activeLibraryIndexKey: String?
   @State private var isLibraryIndexPressed = false
@@ -417,6 +426,11 @@ struct EchoNativePagesScreen: View {
     .sheet(isPresented: $showEqualizer) {
       EchoNativeEqualizerSheet(model: model.equalizer, onAction: onAction)
     }
+    .fullScreenCover(isPresented: $showNeteaseWebLogin) {
+      EchoNeteaseLoginSheet(language: model.payload?.language ?? "zh") { cookie in
+        onAction(["action": "streamingWebLogin", "text": cookie])
+      }
+    }
     .sheet(item: $playlistEditor) { editor in
       EchoNativePlaylistEditorSheet(
         editor: editor,
@@ -460,6 +474,22 @@ struct EchoNativePagesScreen: View {
       Button(model.payload?.library?.labels.cancel ?? "取消", role: .cancel) {}
     } message: {
       Text(playlistPendingDeletion?.name ?? "")
+    }
+    .confirmationDialog(
+      model.payload?.language == "en" ? "Delete this local file?" : "删除这个本地文件？",
+      isPresented: Binding(
+        get: { trackPendingDeletion != nil },
+        set: { if !$0 { trackPendingDeletion = nil } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button(model.payload?.library?.labels.deleteTrack ?? "删除歌曲", role: .destructive) {
+        if let track = trackPendingDeletion { onAction(["action": "trackDelete", "id": track.id]) }
+        trackPendingDeletion = nil
+      }
+      Button(model.payload?.library?.labels.cancel ?? "取消", role: .cancel) {}
+    } message: {
+      Text(trackPendingDeletion?.title ?? "")
     }
     .alert(
       model.payload?.language == "en" ? "Sign out of NetEase Cloud Music?" : "退出网易云音乐？",
@@ -539,13 +569,9 @@ struct EchoNativePagesScreen: View {
 
   private func libraryPage(_ library: EchoNativeLibraryPayload, searchOnly: Bool = false) -> some View {
     let normalizedQuery = library.query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let displayedPlaylists = normalizedQuery.isEmpty ? library.playlists : library.playlists.filter { playlist in
-      playlist.name.lowercased().contains(normalizedQuery)
-        || playlist.tracks.contains { track in
-          track.title.lowercased().contains(normalizedQuery)
-            || track.artist.lowercased().contains(normalizedQuery)
-        }
-    }
+    let displayedPlaylists = normalizedQuery.isEmpty
+      ? library.playlists
+      : library.playlists.filter { $0.name.lowercased().contains(normalizedQuery) }
     let displayedStreamingPlaylists = normalizedQuery.isEmpty
       ? library.streaming.playlists
       : library.streaming.playlists.filter { playlist in
@@ -561,15 +587,17 @@ struct EchoNativePagesScreen: View {
     let collectionIndexKeys = library.collections.map { libraryIndexKey($0.title) }
     let trackIndexKeys = sortedTracks.map { libraryIndexKey($0.title) }
     let canPaginate = library.pagination.totalCount > library.pagination.pageSize
-    let paginationExpansionLabel = !selectedAlbumId.isEmpty
+    let paginationExpansionLabel = !selectedAlbumId.isEmpty && selectedCollectionIsAlbum
       ? (model.payload?.language == "en"
         ? "Show all \(library.pagination.totalCount) album tracks"
         : "展开专辑内全部 \(library.pagination.totalCount) 首")
       : (model.payload?.language == "en"
         ? "Browse all \(library.pagination.totalCount) items"
         : "展开全部 \(library.pagination.totalCount) 项并分页浏览")
-    let indexTargets = model.libraryIndexTargets
-    let contentAnimationKey = "\(library.source)::\(library.view)::\(library.filter)::\(library.pagination.page)"
+    let indexTargets = selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title"
+      ? model.libraryIndexTargets
+      : []
+    let contentAnimationKey = "\(library.paginationScope)::\(library.pagination.page)"
     return ScrollViewReader { proxy in
       ScrollView(showsIndicators: false) {
         LazyVStack(alignment: .leading, spacing: 14) {
@@ -719,7 +747,8 @@ struct EchoNativePagesScreen: View {
           }
         }
 
-        if library.source == "streaming" && library.streaming.loggedIn && library.streaming.libraryMode == "playlists" {
+        if library.source == "streaming" && library.streaming.loggedIn
+          && library.streaming.libraryMode == "playlists" && library.streaming.selectedPlaylistId.isEmpty {
           HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
               Text(library.labels.playlists)
@@ -734,23 +763,44 @@ struct EchoNativePagesScreen: View {
             }
           }
 
-          if streamingPlaylistDisplayMode == "grid" {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
-              ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
-                streamingPlaylistGridCard(playlist, labels: library.labels)
-                  .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
-                    ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: "streaming")
-                    : playlist.id)
+          HStack(alignment: .top, spacing: 6) {
+            Group {
+              if streamingPlaylistDisplayMode == "grid" {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
+                  ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
+                    streamingPlaylistGridCard(playlist, labels: library.labels)
+                      .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
+                            ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope)
+                        : playlist.id)
+                  }
+                }
+              } else {
+                LazyVStack(spacing: 0) {
+                  ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
+                    streamingPlaylistRow(playlist, labels: library.labels)
+                      .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
+                            ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope)
+                        : playlist.id)
+                  }
+                }
               }
             }
-          } else {
-            LazyVStack(spacing: 0) {
-              ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
-                streamingPlaylistRow(playlist, labels: library.labels)
-                  .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
-                    ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: "streaming")
-                    : playlist.id)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+              GeometryReader { geometry in
+                Color.clear
+                  .onAppear { libraryCollectionContentHeight = geometry.size.height }
+                  .onChange(of: geometry.size.height) { libraryCollectionContentHeight = $0 }
               }
+            }
+
+            if indexTargets.count > 1, !displayedStreamingPlaylists.isEmpty {
+              libraryAlphabetIndex(
+                indexTargets,
+                height: libraryCollectionContentHeight,
+                pagination: library.pagination,
+                proxy: proxy
+              )
             }
           }
         }
@@ -764,23 +814,44 @@ struct EchoNativePagesScreen: View {
               collectionDisplayMode = collectionDisplayMode == "grid" ? "list" : "grid"
             }
           }
-          if collectionDisplayMode == "grid" {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
-              ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
-                libraryCollectionGridCard(collection)
-                  .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
-                    ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: "collections")
-                    : collection.id)
+          HStack(alignment: .top, spacing: 6) {
+            Group {
+              if collectionDisplayMode == "grid" {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 16) {
+                  ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
+                    libraryCollectionGridCard(collection)
+                      .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
+                        ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope)
+                        : collection.id)
+                  }
+                }
+              } else {
+                LazyVStack(spacing: 0) {
+                  ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
+                    libraryCollectionRow(collection)
+                      .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
+                        ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope)
+                        : collection.id)
+                  }
+                }
               }
             }
-          } else {
-            LazyVStack(spacing: 0) {
-              ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
-                libraryCollectionRow(collection)
-                  .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
-                    ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: "collections")
-                    : collection.id)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+              GeometryReader { geometry in
+                Color.clear
+                  .onAppear { libraryCollectionContentHeight = geometry.size.height }
+                  .onChange(of: geometry.size.height) { libraryCollectionContentHeight = $0 }
               }
+            }
+
+            if indexTargets.count > 1, !library.collections.isEmpty {
+              libraryAlphabetIndex(
+                indexTargets,
+                height: libraryCollectionContentHeight,
+                pagination: library.pagination,
+                proxy: proxy
+              )
             }
           }
         }
@@ -811,11 +882,17 @@ struct EchoNativePagesScreen: View {
 
         if !library.tracks.isEmpty {
           HStack(spacing: 10) {
-            if !selectedAlbumId.isEmpty {
+            let streamingPlaylistSelected = library.source == "streaming"
+              && !library.streaming.selectedPlaylistId.isEmpty
+            if !selectedAlbumId.isEmpty || streamingPlaylistSelected {
               Button {
-                clearAlbumSelection()
-                updateLibrary { $0.query = "" }
-                onAction(["action": "libraryQuery", "text": ""])
+                if streamingPlaylistSelected {
+                  onAction(["action": "streamingPlaylistClose"])
+                } else {
+                  clearAlbumSelection()
+                  updateLibrary { $0.query = "" }
+                  onAction(["action": "libraryQuery", "text": ""])
+                }
               } label: {
                 Image(systemName: "chevron.left")
                   .font(.system(size: 13, weight: .bold))
@@ -823,11 +900,13 @@ struct EchoNativePagesScreen: View {
                   .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
               }
               .buttonStyle(.plain)
-              .accessibilityLabel(model.payload?.language == "en" ? "Back to albums" : "返回专辑")
+              .accessibilityLabel(model.payload?.language == "en" ? "Back to collections" : "返回分类")
 
-              EchoNativeArtwork(urlString: selectedAlbumArtworkUrl, onError: {})
-                .frame(width: 42, height: 42)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+              if !selectedAlbumId.isEmpty {
+                EchoNativeArtwork(urlString: selectedAlbumArtworkUrl, onError: {})
+                  .frame(width: 42, height: 42)
+                  .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+              }
             }
             Text(!selectedAlbumTitle.isEmpty
               ? selectedAlbumTitle
@@ -837,7 +916,7 @@ struct EchoNativePagesScreen: View {
               .font(.system(size: 18, weight: .bold, design: .rounded))
               .lineLimit(1)
             Spacer(minLength: 8)
-            if !selectedAlbumId.isEmpty {
+            if !selectedAlbumId.isEmpty && selectedCollectionIsAlbum {
               albumPlayMenu
               albumSortMenu
             }
@@ -867,16 +946,16 @@ struct EchoNativePagesScreen: View {
             columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
             spacing: 16
           ) {
-            ForEach(Array(sortedTracks.enumerated()), id: \.element.id) { index, track in
+            ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { index, track in
               libraryTrackGridCard(track, labels: library.labels)
                 .id(index == 0 || trackIndexKeys[index - 1] != trackIndexKeys[index]
-                  ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: "tracks")
-                  : track.id)
+                  ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope)
+                  : track.stableId)
             }
           }
           .transition(.opacity.combined(with: .scale(scale: 0.98)))
         } else {
-          ForEach(Array(sortedTracks.enumerated()), id: \.element.id) { index, track in
+          ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { index, track in
             if !track.group.isEmpty && (index == 0 || sortedTracks[index - 1].group != track.group) {
               Text(track.group)
                 .font(.system(size: 12, weight: .bold))
@@ -892,8 +971,8 @@ struct EchoNativePagesScreen: View {
             }
             libraryTrackRow(track, labels: library.labels)
               .id(index == 0 || trackIndexKeys[index - 1] != trackIndexKeys[index]
-                ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: "tracks")
-                : track.id)
+                ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope)
+                : track.stableId)
           }
         }
         if canPaginate && !library.pagination.expanded {
@@ -921,7 +1000,7 @@ struct EchoNativePagesScreen: View {
             }
           }
 
-          if !library.tracks.isEmpty && indexTargets.count > 1 {
+          if !library.tracks.isEmpty && library.collections.isEmpty && indexTargets.count > 1 {
             libraryAlphabetIndex(
               indexTargets,
               height: libraryTrackContentHeight,
@@ -1088,14 +1167,11 @@ struct EchoNativePagesScreen: View {
   }
 
   private func selectCollection(_ collection: EchoNativeLibraryCollection) {
-    if collection.id.contains("-artist:") {
-      clearAlbumSelection()
-    } else {
-      pendingAlbumScroll = true
-      selectedAlbumId = collection.id
-      selectedAlbumArtworkUrl = collection.artworkUrl
-      selectedAlbumTitle = collection.title
-    }
+    pendingAlbumScroll = true
+    selectedAlbumId = collection.id
+    selectedAlbumArtworkUrl = collection.artworkUrl
+    selectedAlbumTitle = collection.title
+    selectedCollectionIsAlbum = !collection.id.contains("-artist:")
     updateLibrary { $0.query = collection.query }
     onAction([
       "action": "libraryCollectionSelect",
@@ -1225,6 +1301,7 @@ struct EchoNativePagesScreen: View {
     selectedAlbumId = ""
     selectedAlbumArtworkUrl = ""
     selectedAlbumTitle = ""
+    selectedCollectionIsAlbum = false
   }
 
   private func libraryPaginationControls(_ pagination: EchoNativeLibraryPagination) -> some View {
@@ -1565,24 +1642,28 @@ struct EchoNativePagesScreen: View {
           Label(model.payload?.language == "en" ? "Stream to iPhone" : "串流到 iPhone", systemImage: "iphone.and.arrow.forward")
         }
       }
+      Button {
+        onAction(["action": "trackQueue", "id": track.id, "source": track.source])
+      } label: {
+        Label(labels.addToQueue, systemImage: "text.badge.plus")
+      }
+      Button {
+        onAction(["action": "trackNext", "id": track.id, "source": track.source])
+      } label: {
+        Label(labels.playNext, systemImage: "text.insert")
+      }
       if track.isLocal {
-        Button {
-          onAction(["action": "trackQueue", "id": track.id])
-        } label: {
-          Label(labels.addToQueue, systemImage: "text.badge.plus")
-        }
-        Button {
-          onAction(["action": "trackNext", "id": track.id])
-        } label: {
-          Label(labels.playNext, systemImage: "text.insert")
-        }
         Button {
           onAction(["action": "trackLyrics", "id": track.id])
         } label: {
           Label(labels.importLyrics, systemImage: "doc.text")
         }
         Button(role: .destructive) {
-          onAction(["action": "trackDelete", "id": track.id])
+          if model.payload?.library?.confirmDelete == false {
+            onAction(["action": "trackDelete", "id": track.id])
+          } else {
+            trackPendingDeletion = track
+          }
         } label: {
           Label(labels.deleteTrack, systemImage: "trash")
         }
@@ -1670,21 +1751,40 @@ struct EchoNativePagesScreen: View {
               .padding(14)
               .echoGlass(tint: Color.white.opacity(0.1), clear: false, interactive: false, in: RoundedRectangle(cornerRadius: 19))
             } else {
-              Button {
-                onAction(["action": "streamingLogin"])
-              } label: {
-                HStack(spacing: 8) {
-                  if connection.streaming.busy { ProgressView().controlSize(.small) }
-                  Image(systemName: "qrcode")
-                  Text(model.payload?.language == "en" ? "QR code sign in" : "扫码登录")
+              if connection.streaming.accessMode == "direct" {
+                Button {
+                  showNeteaseWebLogin = true
+                } label: {
+                  Label(
+                    model.payload?.language == "en" ? "Official web sign in" : "官方网页登录",
+                    systemImage: "safari"
+                  )
+                  .font(.system(size: 13, weight: .bold))
+                  .frame(maxWidth: .infinity)
+                  .frame(height: 46)
+                  .echoGlass(tint: echoAccent.opacity(0.09), clear: false, in: RoundedRectangle(cornerRadius: 15))
                 }
-                .font(.system(size: 13, weight: .bold))
-                .frame(maxWidth: .infinity)
-                .frame(height: 46)
-                .echoGlass(tint: echoAccent.opacity(0.09), clear: false, in: RoundedRectangle(cornerRadius: 15))
+                .buttonStyle(.plain)
+                .disabled(connection.streaming.busy)
               }
-              .buttonStyle(.plain)
-              .disabled(connection.streaming.busy || connection.streaming.apiBaseUrl.isEmpty)
+
+              if connection.streaming.accessMode == "selfHosted" {
+                Button {
+                  onAction(["action": "streamingLogin"])
+                } label: {
+                  HStack(spacing: 8) {
+                    if connection.streaming.busy { ProgressView().controlSize(.small) }
+                    Image(systemName: "qrcode")
+                    Text(model.payload?.language == "en" ? "QR code sign in" : "扫码登录")
+                  }
+                  .font(.system(size: 13, weight: .bold))
+                  .frame(maxWidth: .infinity)
+                  .frame(height: 46)
+                  .echoGlass(tint: echoAccent.opacity(0.09), clear: false, in: RoundedRectangle(cornerRadius: 15))
+                }
+                .buttonStyle(.plain)
+                .disabled(connection.streaming.busy || connection.streaming.apiBaseUrl.isEmpty)
+              }
 
               if !connection.streaming.qrUrl.isEmpty {
                 EchoNativeQRCode(value: connection.streaming.qrUrl)
@@ -1727,8 +1827,12 @@ struct EchoNativePagesScreen: View {
             }
 
             Text(model.payload?.language == "en"
-              ? "Direct access may change without notice. Self-hosting is more controllable. Session credentials stay in iOS Keychain."
-              : "直连接口可能随网易云调整而变化；自托管更可控。登录凭据仅保存在 iOS 钥匙串。")
+              ? (connection.streaming.accessMode == "direct"
+                ? "Use official web sign-in. Session credentials stay in iOS Keychain."
+                : "This uses your NeteaseCloudMusicApi service. Session credentials stay in iOS Keychain.")
+              : (connection.streaming.accessMode == "direct"
+                ? "使用官方网页登录。登录凭据仅保存在 iOS 钥匙串。"
+                : "当前通过你的 NeteaseCloudMusicApi 服务登录。登录凭据仅保存在 iOS 钥匙串。"))
               .font(.system(size: 10, weight: .medium))
               .foregroundColor(echoInk.opacity(0.42))
               .fixedSize(horizontal: false, vertical: true)
@@ -2348,7 +2452,7 @@ private struct EchoNativePlaylistDetailSheet: View {
       if let playlist, !playlist.tracks.isEmpty {
         ScrollView(showsIndicators: false) {
           LazyVStack(spacing: 0) {
-            ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { _, track in
+            ForEach(Array(playlist.tracks.enumerated()), id: \.element.stableId) { _, track in
               HStack(spacing: 11) {
                 Button {
                   dismiss()

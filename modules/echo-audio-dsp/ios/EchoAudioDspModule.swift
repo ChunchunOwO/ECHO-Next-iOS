@@ -6,7 +6,7 @@ import Foundation
 import MediaPlayer
 import UIKit
 
-private enum NowPlayingRemoteCommand: String {
+enum NowPlayingRemoteCommand: String {
   case next
   case pause
   case play
@@ -24,7 +24,7 @@ private struct NowPlayingMetadata {
   let title: String
 }
 
-private final class NowPlayingController {
+final class NowPlayingController {
   typealias CommandHandler = (NowPlayingRemoteCommand, Double?) -> Void
 
   private let commandCenter = MPRemoteCommandCenter.shared()
@@ -57,6 +57,7 @@ private final class NowPlayingController {
     position: Double,
     isPlaying: Bool
   ) {
+    let shouldActivateSession = !isActive
     isActive = true
     setRemoteCommandsEnabled(true)
     metadata = NowPlayingMetadata(
@@ -67,7 +68,7 @@ private final class NowPlayingController {
       position: max(0, position),
       title: title
     )
-    activateAudioSession()
+    if shouldActivateSession { activateAudioSession() }
 
     let nextArtworkURL = artworkURL.trimmingCharacters(in: .whitespacesAndNewlines)
     if nextArtworkURL != self.artworkURL {
@@ -208,7 +209,15 @@ private final class NowPlayingController {
   }
 }
 
-private final class DspPlaybackEngine {
+struct DspPlaybackStatus {
+  let currentTime: Double
+  let didJustFinish: Bool
+  let duration: Double
+  let playing: Bool
+  let volume: Double
+}
+
+final class DspPlaybackEngine {
   private let engine = AVAudioEngine()
   private let player = AVAudioPlayerNode()
   private let eq = AVAudioUnitEQ(numberOfBands: 10)
@@ -221,6 +230,7 @@ private final class DspPlaybackEngine {
   private var playing = false
   private var finished = false
   private var configured = false
+  private var scheduleGeneration: UInt64 = 0
 
   init() {
     configureEqBands(Array(repeating: 0, count: 10))
@@ -228,6 +238,14 @@ private final class DspPlaybackEngine {
   }
 
   func playFile(uri: String, positionMs: Double, volume: Double, gains: [Double], loudnessEnabled: Bool) throws {
+    scheduleGeneration &+= 1
+    if engine.isRunning { engine.stop() }
+    player.stop()
+    player.reset()
+    audioFile = nil
+    playing = false
+    finished = false
+    durationSeconds = 0
     guard let url = URL(string: uri), url.isFileURL else {
       throw DspError.invalidUri
     }
@@ -246,9 +264,8 @@ private final class DspPlaybackEngine {
     dynamics?.bypass = !loudnessEnabled
     player.volume = Float(max(0, min(1, volume)))
 
-    player.stop()
-    player.reset()
     scheduleCurrentFile(shouldMarkFinished: true)
+    guard !finished else { return }
 
     if !engine.isRunning {
       try engine.start()
@@ -278,8 +295,10 @@ private final class DspPlaybackEngine {
   }
 
   func stop() {
+    scheduleGeneration &+= 1
     player.stop()
     player.reset()
+    if engine.isRunning { engine.stop() }
     playing = false
     finished = false
     offsetSeconds = 0
@@ -288,6 +307,7 @@ private final class DspPlaybackEngine {
 
   func seekTo(seconds: Double) throws {
     guard audioFile != nil else { return }
+    scheduleGeneration &+= 1
     let wasPlaying = playing
     offsetSeconds = max(0, min(seconds, durationSeconds))
     scheduledStartFrame = AVAudioFramePosition(offsetSeconds * sampleRate)
@@ -295,13 +315,13 @@ private final class DspPlaybackEngine {
     player.stop()
     player.reset()
     scheduleCurrentFile(shouldMarkFinished: true)
-    if wasPlaying {
+    if wasPlaying && !finished {
       if !engine.isRunning {
         try engine.start()
       }
       player.play()
     }
-    playing = wasPlaying
+    playing = wasPlaying && !finished
   }
 
   func setVolume(_ volume: Double) {
@@ -316,14 +336,15 @@ private final class DspPlaybackEngine {
     dynamics?.bypass = !enabled
   }
 
-  func status() -> [String: Any] {
-    [
-      "currentTime": currentTime(),
-      "didJustFinish": finished,
-      "duration": durationSeconds,
-      "playing": playing,
-      "volume": Double(player.volume)
-    ]
+  func playbackStatus() -> DspPlaybackStatus {
+    let actuallyPlaying = playing && engine.isRunning && player.isPlaying
+    return DspPlaybackStatus(
+      currentTime: currentTime(),
+      didJustFinish: finished,
+      duration: durationSeconds,
+      playing: actuallyPlaying,
+      volume: Double(player.volume)
+    )
   }
 
   private func configureAudioSession() throws {
@@ -360,6 +381,7 @@ private final class DspPlaybackEngine {
 
   private func scheduleCurrentFile(shouldMarkFinished: Bool) {
     guard let audioFile else { return }
+    let generation = scheduleGeneration
     let startFrame = max(0, min(scheduledStartFrame, audioFile.length))
     let remainingFrames = max(0, audioFile.length - startFrame)
     guard remainingFrames > 0 else {
@@ -372,10 +394,11 @@ private final class DspPlaybackEngine {
       audioFile,
       startingFrame: startFrame,
       frameCount: AVAudioFrameCount(min(Int64(UInt32.max), remainingFrames)),
-      at: nil
-    ) { [weak self] in
+      at: nil,
+      completionCallbackType: .dataPlayedBack
+    ) { [weak self] _ in
       DispatchQueue.main.async {
-        guard let self else { return }
+        guard let self, self.scheduleGeneration == generation else { return }
         self.offsetSeconds = self.durationSeconds
         self.playing = false
         self.finished = shouldMarkFinished
@@ -456,151 +479,13 @@ private enum DspError: Error {
 }
 
 public final class EchoAudioDspModule: Module {
-  private let playbackEngine = DspPlaybackEngine()
-  private lazy var nowPlayingController = NowPlayingController { [weak self] command, position in
-    var payload: [String: Any?] = ["action": command.rawValue]
-    if let position {
-      payload["positionSeconds"] = position
-    }
-    self?.sendEvent("onRemoteCommand", payload)
-  }
-
   public func definition() -> ModuleDefinition {
     Name("EchoAudioDsp")
-    Events("onRemoteCommand")
 
-    View(EchoNativePlayerView.self) {
-      Events("onAction")
-
-      Prop("activeLyricIndex") { (view: EchoNativePlayerView, value: Int) in setIfChanged(view.model, \.activeLyricIndex, value) }
-      Prop("activePage") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.activePage, value) }
-      Prop("artist") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.artist, value) }
-      Prop("artworkBackgroundEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.artworkBackgroundEnabled, value) }
-      Prop("artworkUrl") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.artworkUrl, value) }
-      Prop("connectionLabel") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.connectionLabel, value) }
-      Prop("connectionOnline") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.connectionOnline, value) }
-      Prop("controlsEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.controlsEnabled, value) }
-      Prop("darkModeEnabled") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.darkModeEnabled, value) }
-      Prop("durationMs") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.durationMs, value) }
-      Prop("externalSourcePickerPayload") { (view: EchoNativePlayerView, value: String) in
-        view.model.updateExternalSourcePicker(payloadJSON: value)
+    View(EchoNativeAppView.self) {
+      Prop("migrationPayload") { (view: EchoNativeAppView, value: String) in
+        view.migrateLegacy(value)
       }
-      Prop("followSystemAppearance") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.followSystemAppearance, value) }
-      Prop("isFavorite") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.isFavorite, value) }
-      Prop("eqGains") { (view: EchoNativePlayerView, value: [Double]) in
-        let gains = normalizedNativeEqGains(value)
-        setIfChanged(view.model.equalizer, \.gains, gains)
-        setIfChanged(view.pagesModel.equalizer, \.gains, gains)
-      }
-      Prop("eqPreset") { (view: EchoNativePlayerView, value: String) in
-        setIfChanged(view.model.equalizer, \.preset, value)
-        setIfChanged(view.pagesModel.equalizer, \.preset, value)
-      }
-      Prop("isPlaying") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.isPlaying, value) }
-      Prop("language") { (view: EchoNativePlayerView, value: String) in
-        setIfChanged(view.model, \.language, value)
-        setIfChanged(view.model.equalizer, \.language, value)
-        setIfChanged(view.pagesModel.equalizer, \.language, value)
-      }
-      Prop("lyricTexts") { (view: EchoNativePlayerView, value: [String]) in setIfChanged(view.model, \.lyricTexts, value) }
-      Prop("lyricTimesMs") { (view: EchoNativePlayerView, value: [Double]) in setIfChanged(view.model, \.lyricTimesMs, value) }
-      Prop("lyricsVisible") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.lyricsVisible, value) }
-      Prop("metadataLoading") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.metadataLoading, value) }
-      Prop("modeLabel") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.modeLabel, value) }
-      Prop("outputMode") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.outputMode, value) }
-      Prop("pagePayload") { (view: EchoNativePlayerView, value: String) in view.pagesModel.update(payloadJSON: value) }
-      Prop("positionMs") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.positionMs, value) }
-      Prop("queueCount") { (view: EchoNativePlayerView, value: Int) in setIfChanged(view.model, \.queueCount, value) }
-      Prop("queuePayload") { (view: EchoNativePlayerView, value: String) in view.model.updateQueue(payloadJSON: value) }
-      Prop("repeatOne") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.repeatOne, value) }
-      Prop("showArtworkGlow") { (view: EchoNativePlayerView, value: Bool) in setIfChanged(view.model, \.showArtworkGlow, value) }
-      Prop("tags") { (view: EchoNativePlayerView, value: [String]) in setIfChanged(view.model, \.tags, value) }
-      Prop("title") { (view: EchoNativePlayerView, value: String) in setIfChanged(view.model, \.title, value) }
-      Prop("volume") { (view: EchoNativePlayerView, value: Double) in setIfChanged(view.model, \.volume, value) }
-    }
-
-    View(EchoNativeEqLauncherView.self) {
-      Events("onAction")
-
-      Prop("description") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model, \.description, value) }
-      Prop("eqGains") { (view: EchoNativeEqLauncherView, value: [Double]) in
-        setIfChanged(view.model.equalizer, \.gains, normalizedNativeEqGains(value))
-      }
-      Prop("eqPreset") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model.equalizer, \.preset, value) }
-      Prop("label") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model, \.label, value) }
-      Prop("language") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model.equalizer, \.language, value) }
-      Prop("title") { (view: EchoNativeEqLauncherView, value: String) in setIfChanged(view.model, \.title, value) }
-    }
-
-    AsyncFunction("playFile") { (uri: String, positionMs: Double, volume: Double, gains: [Double], loudnessEnabled: Bool) in
-      try self.playbackEngine.playFile(
-        uri: uri,
-        positionMs: positionMs,
-        volume: volume,
-        gains: gains,
-        loudnessEnabled: loudnessEnabled
-      )
-    }
-
-    AsyncFunction("pause") {
-      self.playbackEngine.pause()
-    }
-
-    AsyncFunction("resume") {
-      try self.playbackEngine.resume()
-    }
-
-    AsyncFunction("stop") {
-      self.playbackEngine.stop()
-    }
-
-    AsyncFunction("seekTo") { (seconds: Double) in
-      try self.playbackEngine.seekTo(seconds: seconds)
-    }
-
-    AsyncFunction("setVolume") { (volume: Double) in
-      self.playbackEngine.setVolume(volume)
-    }
-
-    AsyncFunction("setEq") { (gains: [Double]) in
-      self.playbackEngine.setEq(gains: gains)
-    }
-
-    AsyncFunction("setLoudness") { (enabled: Bool) in
-      self.playbackEngine.setLoudness(enabled)
-    }
-
-    AsyncFunction("updateNowPlaying") { (
-      title: String,
-      artist: String,
-      album: String,
-      artworkURL: String,
-      duration: Double,
-      position: Double,
-      isPlaying: Bool
-    ) in
-      self.nowPlayingController.update(
-        title: title,
-        artist: artist,
-        album: album,
-        artworkURL: artworkURL,
-        duration: duration,
-        position: position,
-        isPlaying: isPlaying
-      )
-    }
-
-    AsyncFunction("clearNowPlaying") {
-      self.nowPlayingController.clear()
-    }
-
-    AsyncFunction("getStatus") { () -> [String: Any] in
-      self.playbackEngine.status()
-    }
-
-    OnDestroy {
-      self.playbackEngine.stop()
-      self.nowPlayingController.clear()
     }
   }
 }
