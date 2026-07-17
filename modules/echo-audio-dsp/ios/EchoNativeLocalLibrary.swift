@@ -132,7 +132,7 @@ enum EchoNativeLocalLibrary {
   }
 
   private static func streamDescription(_ track: AVAssetTrack?) -> AudioStreamBasicDescription? {
-    guard let description = track?.formatDescriptions.first as? CMAudioFormatDescription,
+    guard let description = track?.formatDescriptions.first,
       let pointer = CMAudioFormatDescriptionGetStreamBasicDescription(description)
     else {
       return nil
