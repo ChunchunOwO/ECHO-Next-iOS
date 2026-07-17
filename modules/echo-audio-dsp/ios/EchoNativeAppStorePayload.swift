@@ -9,7 +9,7 @@ extension EchoNativeAppStore {
     playerModel.darkModeEnabled = persistent.settings.darkModeEnabled
     playerModel.followSystemAppearance = persistent.settings.followSystemAppearance
     playerModel.language = persistent.settings.language
-    playerModel.repeatOne = persistent.settings.repeatOne
+    playerModel.playbackMode = persistent.settings.playbackMode
     playerModel.showArtworkGlow = persistent.settings.showArtworkGlow
     let page = playerModel.activePage
     let payload: [String: Any] = [

@@ -77,7 +77,7 @@ fileprivate struct EchoNativeLibraryIndexTarget: Identifiable {
   let key: String
   let page: Int
   let scope: String
-  var id: String { "library-index-\(scope)-\(key)" }
+  var id: String { "library-index-\(scope)-\(page)-\(key)" }
 }
 
 private enum EchoNativeLibraryIndex {
@@ -375,6 +375,7 @@ struct EchoNativePagesScreen: View {
   @State private var activeLibraryIndexKey: String?
   @State private var isLibraryIndexPressed = false
   @State private var pendingLibraryIndexTarget: EchoNativeLibraryIndexTarget?
+  @State private var pendingLibraryPageScroll = false
   @State private var pendingAlbumScroll = false
   @AppStorage("echo.library.albumTrackSort") private var albumTrackSort = "default"
   @AppStorage("echo.library.echoDisplayMode") private var trackDisplayMode = "list"
@@ -521,9 +522,17 @@ struct EchoNativePagesScreen: View {
 
   private func pageHeader(_ payload: EchoNativePagePayload, title: String) -> some View {
     HStack(alignment: .center, spacing: 14) {
-      Text(title)
-        .font(.system(size: 32, weight: .bold, design: .rounded))
-        .lineLimit(1)
+      HStack(spacing: 9) {
+        if let symbol = pageHeaderSymbol {
+          Image(systemName: symbol)
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundColor(echoInk.opacity(0.62))
+            .accessibilityHidden(true)
+        }
+        Text(title)
+          .font(.system(size: 32, weight: .bold, design: .rounded))
+          .lineLimit(1)
+      }
       Spacer(minLength: 8)
       HStack(spacing: 7) {
         Circle()
@@ -558,6 +567,15 @@ struct EchoNativePagesScreen: View {
     }
   }
 
+  private var pageHeaderSymbol: String? {
+    switch page {
+    case "library": return "music.note.list"
+    case "connect": return "link"
+    case "settings": return "gearshape"
+    default: return nil
+    }
+  }
+
   private func statusColor(_ status: EchoNativePageStatus) -> Color {
     status.broken ? echoAccent : (status.online ? echoGold : echoInk.opacity(0.5))
   }
@@ -586,6 +604,12 @@ struct EchoNativePagesScreen: View {
     let streamingPlaylistIndexKeys = displayedStreamingPlaylists.map { libraryIndexKey($0.name) }
     let collectionIndexKeys = library.collections.map { libraryIndexKey($0.title) }
     let trackIndexKeys = sortedTracks.map { libraryIndexKey($0.title) }
+    let firstRowId = (
+      streamingPlaylistIndexKeys.first
+        ?? collectionIndexKeys.first
+        ?? trackIndexKeys.first
+    ).map { libraryIndexAnchor(forKey: $0, scope: library.paginationScope, page: library.pagination.page) }
+    let pageFirstRowId = "library-page-first-\(library.paginationScope)-\(library.pagination.page)"
     let canPaginate = library.pagination.totalCount > library.pagination.pageSize
     let paginationExpansionLabel = !selectedAlbumId.isEmpty && selectedCollectionIsAlbum
       ? (model.payload?.language == "en"
@@ -770,7 +794,7 @@ struct EchoNativePagesScreen: View {
                   ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
                     streamingPlaylistGridCard(playlist, labels: library.labels)
                       .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
-                            ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope)
+                            ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : playlist.id)
                   }
                 }
@@ -779,7 +803,7 @@ struct EchoNativePagesScreen: View {
                   ForEach(Array(displayedStreamingPlaylists.enumerated()), id: \.element.id) { index, playlist in
                     streamingPlaylistRow(playlist, labels: library.labels)
                       .id(index == 0 || streamingPlaylistIndexKeys[index - 1] != streamingPlaylistIndexKeys[index]
-                            ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope)
+                            ? libraryIndexAnchor(forKey: streamingPlaylistIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : playlist.id)
                   }
                 }
@@ -803,6 +827,7 @@ struct EchoNativePagesScreen: View {
               )
             }
           }
+          .id(pageFirstRowId)
         }
 
         if !library.collections.isEmpty {
@@ -821,7 +846,7 @@ struct EchoNativePagesScreen: View {
                   ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
                     libraryCollectionGridCard(collection)
                       .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
-                        ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope)
+                        ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : collection.id)
                   }
                 }
@@ -830,7 +855,7 @@ struct EchoNativePagesScreen: View {
                   ForEach(Array(library.collections.enumerated()), id: \.element.id) { index, collection in
                     libraryCollectionRow(collection)
                       .id(index == 0 || collectionIndexKeys[index - 1] != collectionIndexKeys[index]
-                        ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope)
+                        ? libraryIndexAnchor(forKey: collectionIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                         : collection.id)
                   }
                 }
@@ -854,6 +879,7 @@ struct EchoNativePagesScreen: View {
               )
             }
           }
+          .id(pageFirstRowId)
         }
 
         HStack(spacing: 10) {
@@ -949,7 +975,7 @@ struct EchoNativePagesScreen: View {
             ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { index, track in
               libraryTrackGridCard(track, labels: library.labels)
                 .id(index == 0 || trackIndexKeys[index - 1] != trackIndexKeys[index]
-                  ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope)
+                  ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                   : track.stableId)
             }
           }
@@ -971,7 +997,7 @@ struct EchoNativePagesScreen: View {
             }
             libraryTrackRow(track, labels: library.labels)
               .id(index == 0 || trackIndexKeys[index - 1] != trackIndexKeys[index]
-                ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope)
+                ? libraryIndexAnchor(forKey: trackIndexKeys[index], scope: library.paginationScope, page: library.pagination.page)
                 : track.stableId)
           }
         }
@@ -991,7 +1017,6 @@ struct EchoNativePagesScreen: View {
           }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
-          .id("library-album-first-track")
           .background {
             GeometryReader { geometry in
               Color.clear
@@ -1009,6 +1034,9 @@ struct EchoNativePagesScreen: View {
             )
           }
         }
+        .id(library.tracks.isEmpty
+          ? "library-track-content-\(library.paginationScope)-\(library.pagination.page)"
+          : pageFirstRowId)
       }
       .padding(.horizontal, 20)
       .padding(.top, 12)
@@ -1020,22 +1048,21 @@ struct EchoNativePagesScreen: View {
       .echoScrollClipDisabled()
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: contentAnimationKey)
       .onChange(of: library.pagination.page) { _ in
-        guard let target = pendingLibraryIndexTarget, target.page == library.pagination.page else { return }
-        scrollToLibraryIndex(target, proxy: proxy)
-        pendingLibraryIndexTarget = nil
-      }
-      .onChange(of: "\(library.paginationScope)::\(library.tracks.first?.id ?? "")") { _ in
-        guard pendingAlbumScroll, !library.tracks.isEmpty else { return }
-        pendingAlbumScroll = false
-        DispatchQueue.main.async {
-          if reduceMotion {
-            proxy.scrollTo("library-album-first-track", anchor: .top)
-          } else {
-            withAnimation(.easeInOut(duration: 0.22)) {
-              proxy.scrollTo("library-album-first-track", anchor: .top)
-            }
-          }
+        if let target = pendingLibraryIndexTarget, target.page == library.pagination.page {
+          pendingLibraryIndexTarget = nil
+          pendingLibraryPageScroll = false
+          DispatchQueue.main.async { scrollToLibraryIndex(target, proxy: proxy) }
+          return
         }
+        guard pendingLibraryPageScroll else { return }
+        pendingLibraryPageScroll = false
+        DispatchQueue.main.async { scrollToLibraryAnchor(pageFirstRowId, proxy: proxy) }
+      }
+      .onChange(of: "\(library.paginationScope)::\(firstRowId ?? "")") { _ in
+        guard pendingAlbumScroll else { return }
+        pendingAlbumScroll = false
+        guard let firstRowId else { return }
+        DispatchQueue.main.async { scrollToLibraryAnchor(firstRowId, proxy: proxy) }
       }
       .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
     }
@@ -1045,17 +1072,36 @@ struct EchoNativePagesScreen: View {
     EchoNativeLibraryIndex.key(for: title)
   }
 
-  private func libraryIndexAnchor(forKey key: String, scope: String) -> String {
-    "library-index-\(scope)-\(key)"
+  private func libraryIndexAnchor(forKey key: String, scope: String, page: Int) -> String {
+    "library-index-\(scope)-\(page)-\(key)"
   }
 
   private func scrollToLibraryIndex(_ target: EchoNativeLibraryIndexTarget, proxy: ScrollViewProxy) {
+    scrollToLibraryAnchor(target.id, proxy: proxy)
+  }
+
+  private func scrollToLibraryAnchor(_ id: String, proxy: ScrollViewProxy) {
     if reduceMotion {
-      proxy.scrollTo(target.id, anchor: .top)
+      proxy.scrollTo(id, anchor: .top)
     } else {
       withAnimation(.easeInOut(duration: 0.18)) {
-        proxy.scrollTo(target.id, anchor: .top)
+        proxy.scrollTo(id, anchor: .top)
       }
+    }
+  }
+
+  private func selectLibraryIndexTarget(
+    _ target: EchoNativeLibraryIndexTarget,
+    pagination: EchoNativeLibraryPagination,
+    proxy: ScrollViewProxy
+  ) {
+    pendingLibraryPageScroll = false
+    if target.page == pagination.page {
+      pendingLibraryIndexTarget = nil
+      scrollToLibraryIndex(target, proxy: proxy)
+    } else {
+      pendingLibraryIndexTarget = target
+      onAction(["action": "libraryIndex", "index": target.page - 1])
     }
   }
 
@@ -1070,29 +1116,30 @@ struct EchoNativePagesScreen: View {
       let rowHeight = geometry.size.height / CGFloat(targets.count)
       VStack(spacing: 0) {
         ForEach(targets) { target in
-          Text(target.key)
-            .font(.system(size: 9, weight: .bold, design: .rounded))
-            .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
-            .frame(width: 22, height: rowHeight)
+          Button {
+            selectLibraryIndexTarget(target, pagination: pagination, proxy: proxy)
+          } label: {
+            Text(target.key)
+              .font(.system(size: 9, weight: .bold, design: .rounded))
+              .foregroundColor(activeLibraryIndexKey == target.key ? echoAccent : echoInk.opacity(0.56))
+              .frame(width: 44, height: rowHeight)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel(target.key)
         }
       }
-      .frame(width: 22, height: geometry.size.height, alignment: .top)
+      .frame(width: 44, height: geometry.size.height, alignment: .top)
       .contentShape(Rectangle())
-      .gesture(
-        DragGesture(minimumDistance: 0)
+      .simultaneousGesture(
+        DragGesture(minimumDistance: 6)
           .onChanged { value in
             isLibraryIndexPressed = true
             let index = min(targets.count - 1, max(0, Int(value.location.y / rowHeight)))
             let target = targets[index]
             guard activeLibraryIndexKey != target.key else { return }
             activeLibraryIndexKey = target.key
-            if target.page == pagination.page {
-              pendingLibraryIndexTarget = nil
-              scrollToLibraryIndex(target, proxy: proxy)
-            } else {
-              pendingLibraryIndexTarget = target
-              onAction(["action": "libraryIndex", "index": target.page - 1])
-            }
+            selectLibraryIndexTarget(target, pagination: pagination, proxy: proxy)
           }
           .onEnded { _ in
             if reduceMotion {
@@ -1121,7 +1168,7 @@ struct EchoNativePagesScreen: View {
         }
       }
     }
-    .frame(width: 22, height: indexHeight)
+    .frame(width: 44, height: indexHeight)
     .zIndex(10)
   }
 
@@ -1167,6 +1214,8 @@ struct EchoNativePagesScreen: View {
   }
 
   private func selectCollection(_ collection: EchoNativeLibraryCollection) {
+    pendingLibraryIndexTarget = nil
+    pendingLibraryPageScroll = false
     pendingAlbumScroll = true
     selectedAlbumId = collection.id
     selectedAlbumArtworkUrl = collection.artworkUrl
@@ -1307,6 +1356,8 @@ struct EchoNativePagesScreen: View {
   private func libraryPaginationControls(_ pagination: EchoNativeLibraryPagination) -> some View {
     HStack(spacing: 10) {
       Button {
+        pendingLibraryIndexTarget = nil
+        pendingLibraryPageScroll = true
         onAction(["action": "libraryPage", "index": pagination.page - 2])
       } label: {
         Image(systemName: "chevron.left")
@@ -1322,6 +1373,8 @@ struct EchoNativePagesScreen: View {
         .frame(minWidth: 48)
 
       Button {
+        pendingLibraryIndexTarget = nil
+        pendingLibraryPageScroll = true
         onAction(["action": "libraryPage", "index": pagination.page])
       } label: {
         Image(systemName: "chevron.right")
@@ -2200,6 +2253,7 @@ struct EchoNativePagesScreen: View {
         }
       }
       .padding(.horizontal, 20)
+      .padding(.top, 12)
       .padding(.bottom, 24)
     }
   }

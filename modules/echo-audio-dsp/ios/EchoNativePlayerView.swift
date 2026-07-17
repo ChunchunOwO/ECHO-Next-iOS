@@ -242,6 +242,7 @@ final class EchoNativePlayerModel: ObservableObject {
   let equalizer = EchoNativeEqualizerModel()
   @Published var activePage = "control"
   @Published var activeLyricIndex = 0
+  @Published var album = ""
   @Published var alertMessage = ""
   @Published var alertTitle = ""
   @Published var artist = ""
@@ -261,12 +262,11 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var lyricTimesMs: [Double] = []
   @Published var lyricsVisible = false
   @Published var metadataLoading = false
-  @Published var modeLabel = "Controlling Mode"
   @Published var outputMode = "pc"
+  @Published var playbackMode = EchoNativePlaybackMode.normal
   @Published var playbackLoading = false
   @Published var queueCount = 0
   @Published var queuePayload: EchoNativeQueuePayload?
-  @Published var repeatOne = false
   @Published var showArtworkGlow = true
   @Published var tags: [String] = []
   @Published var title = ""
@@ -740,9 +740,10 @@ struct EchoNativePlayerScreen: View {
       Text(model.language == "en" ? "NOW PLAYING" : "正在播放")
         .font(.system(size: 10, weight: .bold))
         .foregroundColor(echoInk.opacity(0.48))
-      Text(model.modeLabel)
+      Text(model.album)
         .font(.system(size: 13, weight: .semibold))
         .foregroundColor(echoInk)
+        .lineLimit(1)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
   }
@@ -887,12 +888,12 @@ struct EchoNativePlayerScreen: View {
     echoGlassGroup(spacing: 8) {
       HStack(spacing: compact ? 4 : 10) {
         iconButton(
-          symbol: model.repeatOne ? "repeat.1" : "repeat",
-          label: model.language == "en" ? "Repeat one" : "单曲循环",
-          active: model.repeatOne
+          symbol: playbackModeSymbol,
+          label: model.language == "en" ? "Playback mode" : "播放模式",
+          active: model.playbackMode != .normal,
+          value: playbackModeLabel
         ) {
-          model.repeatOne.toggle()
-          onAction(["action": "repeat"])
+          onAction(["action": "playbackMode"])
         }
         iconButton(
           symbol: lyricsMode ? "quote.bubble.fill" : "quote.bubble",
@@ -942,6 +943,25 @@ struct EchoNativePlayerScreen: View {
         .disabled(model.metadataLoading)
         .opacity(model.metadataLoading ? 0.42 : 1)
       }
+    }
+  }
+
+  private var playbackModeSymbol: String {
+    switch model.playbackMode {
+    case .normal: return "arrow.right.to.line"
+    case .repeatAll: return "repeat"
+    case .repeatOne: return "repeat.1"
+    case .shuffle: return "shuffle"
+    }
+  }
+
+  private var playbackModeLabel: String {
+    let english = model.language == "en"
+    switch model.playbackMode {
+    case .normal: return english ? "Play once" : "正常播放"
+    case .repeatAll: return english ? "Repeat all" : "列表循环"
+    case .repeatOne: return english ? "Repeat one" : "单曲循环"
+    case .shuffle: return english ? "Shuffle" : "随机播放"
     }
   }
 
@@ -1029,21 +1049,37 @@ struct EchoNativePlayerScreen: View {
     .accessibilityLabel(label)
   }
 
-  private func iconButton(symbol: String, label: String, active: Bool, action: @escaping () -> Void) -> some View {
+  private func iconButton(
+    symbol: String,
+    label: String,
+    active: Bool,
+    value: String? = nil,
+    action: @escaping () -> Void
+  ) -> some View {
     Button(action: action) {
-      Image(systemName: symbol)
-        .font(.system(size: 16, weight: .semibold))
-        .foregroundColor(active ? echoAccent : echoInk)
-        .frame(width: 44, height: 44)
-        .echoGlass(
-          tint: active ? Color.black.opacity(0.14) : Color.white.opacity(0.12),
-          clear: !active,
-          in: Circle()
-        )
+      ZStack {
+        Image(systemName: symbol)
+          .id(symbol)
+          .transition(.asymmetric(
+            insertion: .scale(scale: 0.62).combined(with: .opacity),
+            removal: .scale(scale: 1.28).combined(with: .opacity)
+          ))
+      }
+      .font(.system(size: 16, weight: .semibold))
+      .foregroundColor(active ? echoAccent : echoInk)
+      .frame(width: 44, height: 44)
+      .echoGlass(
+        tint: active ? Color.black.opacity(0.14) : Color.white.opacity(0.12),
+        clear: !active,
+        in: Circle()
+      )
     }
     .buttonStyle(.plain)
+    .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.7), value: symbol)
     .accessibilityLabel(label)
-    .accessibilityValue(active ? (model.language == "en" ? "On" : "已开启") : (model.language == "en" ? "Off" : "已关闭"))
+    .accessibilityValue(value ?? (active
+      ? (model.language == "en" ? "On" : "已开启")
+      : (model.language == "en" ? "Off" : "已关闭")))
   }
 
   private func formatTime(_ milliseconds: Double) -> String {

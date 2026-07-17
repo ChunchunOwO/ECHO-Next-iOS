@@ -176,7 +176,7 @@ final class EchoNativeAppStore {
       renderPages()
     case "playPause": togglePlayPause()
     case "previous": playAdjacent(-1)
-    case "next": playAdjacent(1)
+    case "next": playNext()
     case "seek":
       if let value = number(payload["value"]) { seek(toMilliseconds: value) }
     case "volume":
@@ -188,8 +188,9 @@ final class EchoNativeAppStore {
           setVolume(volume)
         }
       }
-    case "repeat":
-      persistent.settings.repeatOne = playerModel.repeatOne
+    case "playbackMode":
+      persistent.settings.playbackMode = persistent.settings.playbackMode.next
+      playerModel.playbackMode = persistent.settings.playbackMode
       persist()
     case "lyrics":
       playerModel.lyricsVisible = true
@@ -367,7 +368,7 @@ final class EchoNativeAppStore {
     playerModel.darkModeEnabled = settings.darkModeEnabled
     playerModel.followSystemAppearance = settings.followSystemAppearance
     playerModel.language = settings.language
-    playerModel.repeatOne = settings.repeatOne
+    playerModel.playbackMode = settings.playbackMode
     playerModel.showArtworkGlow = settings.showArtworkGlow
     playerModel.equalizer.gains = normalizedGains(settings.eqGains)
     playerModel.equalizer.language = settings.language
@@ -595,7 +596,7 @@ final class EchoNativeAppStore {
           let key = trackKey(currentTrack)
           if handledFinishedTrackKey != key {
             handledFinishedTrackKey = key
-            persistent.settings.repeatOne ? play(currentTrack) : playAdjacent(1)
+            playNext(automatic: true)
           }
         }
       }
@@ -623,7 +624,12 @@ final class EchoNativeAppStore {
           play(currentTrack, forcedMode: outputMode, positionMs: playerModel.positionMs)
           return
         }
-        if status.playing { audioEngine.pause() } else { try audioEngine.resume() }
+        if status.playing {
+          audioEngine.pause()
+        } else {
+          handledFinishedTrackKey = ""
+          try audioEngine.resume()
+        }
         playerModel.isPlaying = audioEngine.playbackStatus().playing
       } catch { showError(error) }
     case .pc:
@@ -809,15 +815,39 @@ final class EchoNativeAppStore {
     source == .echo ? echoClient === client : powerampClient === client
   }
 
-  private func playAdjacent(_ direction: Int) {
+  private func playNext(automatic: Bool = false) {
+    switch persistent.settings.playbackMode {
+    case .normal:
+      playAdjacent(1, wraps: false)
+    case .repeatAll:
+      playAdjacent(1)
+    case .repeatOne:
+      if automatic {
+        if let currentTrack { play(currentTrack) }
+      } else {
+        playAdjacent(1, wraps: false)
+      }
+    case .shuffle:
+      guard !queue.isEmpty else { playAdjacent(1, wraps: false); return }
+      let currentKey = currentTrack.map(trackKey)
+      let candidates = queue.filter { trackKey($0) != currentKey }
+      if let track = candidates.randomElement() ?? queue.first { play(track) }
+    }
+  }
+
+  private func playAdjacent(_ direction: Int, wraps: Bool = true) {
     guard !queue.isEmpty else {
       if outputMode == .pc { sendRemoteCommand(["command": direction > 0 ? "next" : "previous"], client: echoClient, source: .echo) }
       if outputMode == .remoteControl { sendRemoteCommand(["command": direction > 0 ? "next" : "previous"], client: powerampClient, source: .remote) }
       return
     }
     let index = currentTrack.flatMap { value in queue.firstIndex(where: { trackKey($0) == trackKey(value) }) } ?? (direction > 0 ? -1 : 0)
-    let nextIndex = (index + direction + queue.count) % queue.count
-    play(queue[nextIndex])
+    let nextIndex = index + direction
+    if queue.indices.contains(nextIndex) {
+      play(queue[nextIndex])
+    } else if wraps {
+      play(queue[(nextIndex + queue.count) % queue.count])
+    }
   }
 
   private func seek(toMilliseconds value: Double) {
@@ -917,7 +947,6 @@ final class EchoNativeAppStore {
     }
     outputMode = mode
     playerModel.outputMode = mode.rawValue
-    playerModel.modeLabel = modeLabel(mode)
     if let currentTrack { playerModel.tags = tags(for: currentTrack) }
     if mode == .pc, previousMode == .phone, let currentTrack, currentTrack.source == .echo {
       audioEngine.pause()
@@ -971,6 +1000,7 @@ final class EchoNativeAppStore {
     externalMetadataLoading = false
     audioEngine.stop()
     currentTrack = nil
+    playerModel.album = ""
     playerModel.artist = ""
     playerModel.artworkUrl = ""
     playerModel.controlsEnabled = false
@@ -991,12 +1021,12 @@ final class EchoNativeAppStore {
 
   private func updatePlayerTrack(_ track: EchoNativeCoreTrack) {
     playerModel.title = track.title
+    playerModel.album = track.album.isEmpty ? localized("Unknown Album", "未知专辑") : track.album
     playerModel.artist = track.artist.isEmpty ? (persistent.settings.language == "en" ? "Unknown Artist" : "未知艺术家") : track.artist
     playerModel.artworkUrl = track.artworkUrl ?? ""
     playerModel.durationMs = track.durationMs
     playerModel.controlsEnabled = true
     playerModel.isFavorite = persistent.favoriteTrackKeys.contains(trackKey(track))
-    playerModel.modeLabel = modeLabel(outputMode)
     playerModel.outputMode = outputMode.rawValue
     playerModel.tags = tags(for: track)
     playerModel.queueCount = queue.count
@@ -1024,7 +1054,7 @@ final class EchoNativeAppStore {
 
   private func handleRemoteCommand(_ command: NowPlayingRemoteCommand, position: Double?) {
     switch command {
-    case .next: playAdjacent(1)
+    case .next: playNext()
     case .previous: playAdjacent(-1)
     case .pause: if playerModel.isPlaying { togglePlayPause() }
     case .play: if !playerModel.isPlaying { togglePlayPause() }
@@ -1410,7 +1440,6 @@ final class EchoNativeAppStore {
     clearCurrentPlayback()
     outputMode = .local
     playerModel.outputMode = EchoNativeOutputMode.local.rawValue
-    playerModel.modeLabel = modeLabel(.local)
   }
 
   private func applyPairing(_ raw: String, remote: Bool) {
@@ -2091,16 +2120,6 @@ final class EchoNativeAppStore {
     case .echo: return outputMode == .phone ? .phone : .pc
     case .remote: return outputMode == .remoteStream ? .remoteStream : .remoteControl
     case .streaming: return .streaming
-    }
-  }
-
-  private func modeLabel(_ mode: EchoNativeOutputMode) -> String {
-    switch mode {
-    case .local: return "Local Mode"
-    case .pc: return "Controlling Mode"
-    case .phone, .remoteStream: return "Streaming Mode"
-    case .remoteControl: return "Poweramp Control"
-    case .streaming: return "Media Mode"
     }
   }
 

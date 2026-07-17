@@ -179,6 +179,22 @@ struct EchoNativeSavedPlaylist: Codable, Identifiable, Sendable {
   var tracks: [EchoNativeCoreTrack]
 }
 
+enum EchoNativePlaybackMode: String, Codable, Sendable {
+  case normal
+  case repeatAll
+  case repeatOne
+  case shuffle
+
+  var next: EchoNativePlaybackMode {
+    switch self {
+    case .normal: return .repeatAll
+    case .repeatAll: return .repeatOne
+    case .repeatOne: return .shuffle
+    case .shuffle: return .normal
+    }
+  }
+}
+
 struct EchoNativeCoreSettings: Codable, Sendable {
   var artworkBackgroundEnabled = true
   var autoOpenLyricsForLocalTracks = true
@@ -210,15 +226,20 @@ struct EchoNativeCoreSettings: Codable, Sendable {
   var neteaseAccessMode = "direct"
   var neteaseApiBaseUrl = "https://music.163.com"
   var neteaseExternalDataEnabled = true
-  var repeatOne = false
+  var playbackMode = EchoNativePlaybackMode.normal
   var confirmBeforeDeletingLocalTracks = true
   var showArtworkGlow = true
   var showPowerampRemote = false
+
+  private enum LegacyCodingKeys: String, CodingKey {
+    case repeatOne
+  }
 
   init() {}
 
   init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
+    let legacyValues = try decoder.container(keyedBy: LegacyCodingKeys.self)
     artworkBackgroundEnabled = try values.decodeIfPresent(Bool.self, forKey: .artworkBackgroundEnabled) ?? true
     autoOpenLyricsForLocalTracks = try values.decodeIfPresent(Bool.self, forKey: .autoOpenLyricsForLocalTracks) ?? true
     autoQueueImportedLocalTracks = try values.decodeIfPresent(Bool.self, forKey: .autoQueueImportedLocalTracks) ?? false
@@ -249,7 +270,10 @@ struct EchoNativeCoreSettings: Codable, Sendable {
     neteaseAccessMode = try values.decodeIfPresent(String.self, forKey: .neteaseAccessMode) ?? "direct"
     neteaseApiBaseUrl = try values.decodeIfPresent(String.self, forKey: .neteaseApiBaseUrl) ?? "https://music.163.com"
     neteaseExternalDataEnabled = try values.decodeIfPresent(Bool.self, forKey: .neteaseExternalDataEnabled) ?? true
-    repeatOne = try values.decodeIfPresent(Bool.self, forKey: .repeatOne) ?? false
+    let rawPlaybackMode = try values.decodeIfPresent(String.self, forKey: .playbackMode)
+    let legacyRepeatOne = try legacyValues.decodeIfPresent(Bool.self, forKey: .repeatOne) ?? false
+    playbackMode = rawPlaybackMode.flatMap(EchoNativePlaybackMode.init(rawValue:))
+      ?? (legacyRepeatOne ? .repeatOne : .normal)
     confirmBeforeDeletingLocalTracks = try values.decodeIfPresent(Bool.self, forKey: .confirmBeforeDeletingLocalTracks) ?? true
     showArtworkGlow = try values.decodeIfPresent(Bool.self, forKey: .showArtworkGlow) ?? true
     showPowerampRemote = try values.decodeIfPresent(Bool.self, forKey: .showPowerampRemote) ?? false
