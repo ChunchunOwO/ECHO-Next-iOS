@@ -14,6 +14,15 @@ test('the app boots the native core and keeps playback mutations ordered', async
   const nativeEntry = app.slice(app.indexOf('function NativeEchoApp'), app.indexOf('export default function App'));
   const appEntry = app.slice(app.indexOf('export default function App'));
   const tick = store.slice(store.indexOf('private func tickPlayback()'), store.indexOf('private func updateEstimatedRemotePosition'));
+  const themedTabStart = player.indexOf('private func themedTab');
+  const titleStart = player.indexOf('private func title');
+  const lyricsScrollerStart = player.indexOf('private func lyricsScroller');
+  const lyricTimeStart = player.indexOf('private func lyricTime');
+
+  assert.ok(themedTabStart >= 0 && titleStart > themedTabStart);
+  assert.ok(lyricsScrollerStart >= 0 && lyricTimeStart > lyricsScrollerStart);
+  const themedTab = player.slice(themedTabStart, titleStart);
+  const lyricsScroller = player.slice(lyricsScrollerStart, lyricTimeStart);
 
   assert.match(nativeEntry, /<EchoNativeAppView/u);
   assert.doesNotMatch(nativeEntry, /migrationPayload === null/u);
@@ -34,6 +43,10 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(player, /case \.normal: return "arrow\.right\.to\.line"/u);
   assert.match(player, /Text\(model\.album\)/u);
   assert.doesNotMatch(player, /model\.repeatOne/u);
+  assert.equal((player.match(/themedTab\(playerBackground: true\)/gu) ?? []).length, 2);
+  assert.match(themedTab, /EchoNativeArtworkBackdrop\(/u);
+  assert.match(themedTab, /echoWarmBackground\.ignoresSafeArea\(\)/u);
+  assert.doesNotMatch(lyricsScroller, /scrollClipDisabled/u);
   assert.match(pages, /pendingLibraryPageScroll = true/u);
   assert.match(pages, /DispatchQueue\.main\.async \{ scrollToLibraryIndex\(target, proxy: proxy\) \}/u);
   assert.match(pages, /DispatchQueue\.main\.async \{ scrollToLibraryAnchor\(pageFirstRowId, proxy: proxy\) \}/u);

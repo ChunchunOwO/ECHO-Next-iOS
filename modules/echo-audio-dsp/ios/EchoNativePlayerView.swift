@@ -360,28 +360,10 @@ private struct EchoNativeAppScreen: View {
   @ObservedObject var playerModel: EchoNativePlayerModel
   @ObservedObject var pagesModel: EchoNativePagesModel
   let onAction: ([String: Any]) -> Void
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     ZStack {
-      Group {
-        if playerModel.activePage == "control" {
-          EchoNativeArtworkBackdrop(
-            enabled: playerModel.artworkBackgroundEnabled,
-            identity: "\(playerModel.title)::\(playerModel.artist)",
-            urlString: playerModel.artworkBackgroundEnabled ? playerModel.artworkUrl : ""
-          ) {
-            onAction(["action": "artworkError", "url": playerModel.artworkUrl])
-          }
-          .transition(.opacity)
-        } else {
-          echoWarmBackground
-            .transition(.opacity)
-        }
-      }
-      .ignoresSafeArea()
-      .allowsHitTesting(false)
-      .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: playerModel.activePage)
+      echoWarmBackground.ignoresSafeArea()
       Group {
         #if compiler(>=6.0)
         if #available(iOS 18.0, *) {
@@ -428,7 +410,7 @@ private struct EchoNativeAppScreen: View {
   private var adaptiveTabView: some View {
     TabView(selection: selection) {
       Tab(title("control"), systemImage: "headphones", value: "control") {
-        themedTab {
+        themedTab(playerBackground: true) {
           EchoNativePlayerScreen(model: playerModel, onAction: onAction)
         }
       }
@@ -460,7 +442,7 @@ private struct EchoNativeAppScreen: View {
 
   private var legacyTabView: some View {
     TabView(selection: selection) {
-      themedTab {
+      themedTab(playerBackground: true) {
         EchoNativePlayerScreen(model: playerModel, onAction: onAction)
       }
         .tag("control")
@@ -489,10 +471,28 @@ private struct EchoNativeAppScreen: View {
     .background(Color.clear)
   }
 
-  private func themedTab<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-    content()
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(Color.clear)
+  private func themedTab<Content: View>(
+    playerBackground: Bool = false,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    ZStack {
+      if playerBackground {
+        EchoNativeArtworkBackdrop(
+          enabled: playerModel.artworkBackgroundEnabled,
+          identity: "\(playerModel.title)::\(playerModel.artist)",
+          urlString: playerModel.artworkBackgroundEnabled ? playerModel.artworkUrl : ""
+        ) {
+          onAction(["action": "artworkError", "url": playerModel.artworkUrl])
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+      } else {
+        echoWarmBackground.ignoresSafeArea()
+      }
+
+      content()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
@@ -698,7 +698,6 @@ struct EchoNativePlayerScreen: View {
         }
         .padding(.vertical, compact ? 56 : 76)
       }
-      .echoScrollClipDisabled()
       .simultaneousGesture(
         DragGesture(minimumDistance: 4)
           .onChanged { _ in lastLyricsInteraction = Date() }
