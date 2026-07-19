@@ -22,7 +22,7 @@ export const albumCollectionKeyForTrack = (
   fallbackTitle: string,
 ): string => albumCollectionKey(
   track.album?.trim() || fallbackTitle,
-  track.albumArtist?.trim() || track.artist?.trim() || '',
+  track.albumArtist?.trim() || '',
 );
 
 export const dedupeTracks = <T extends EchoLinkTrackPreview>(items: T[]): T[] => {

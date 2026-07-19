@@ -235,8 +235,8 @@ enum EchoNativeStreamCache {
       .appendingPathComponent("echo-native-streams", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let rawExtension = track.codec?.lowercased() ?? remoteUrl.pathExtension.lowercased()
-    let ext = ["aac", "flac", "m4a", "mp3", "mp4", "wav"].contains(rawExtension) ? rawExtension : "m4a"
-    let cacheKey = "\(track.source.rawValue)|\(remoteUrl.host ?? "")|\(remoteUrl.port ?? 0)|\(track.id)"
+    let ext = ["aac", "flac", "m4a", "mp3", "mp4", "wav"].contains(rawExtension) ? rawExtension : "audio"
+    let cacheKey = "v2|\(track.source.rawValue)|\(remoteUrl.host ?? "")|\(remoteUrl.port ?? 0)|\(track.id)"
     let digest = SHA256.hash(data: Data(cacheKey.utf8)).prefix(16)
       .map { String(format: "%02x", $0) }
       .joined()
@@ -244,6 +244,10 @@ enum EchoNativeStreamCache {
     if FileManager.default.fileExists(atPath: destination.path) { return destination }
     let (temporary, response) = try await URLSession.shared.download(from: remoteUrl)
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+      throw EchoNativeNetworkError.invalidResponse
+    }
+    let mimeType = response.mimeType?.lowercased() ?? ""
+    guard !mimeType.hasPrefix("text/"), mimeType != "application/json" else {
       throw EchoNativeNetworkError.invalidResponse
     }
     try? FileManager.default.removeItem(at: destination)

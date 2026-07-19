@@ -237,15 +237,26 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
   func playlists(userId: Int64) async throws -> [Playlist] {
     struct Response: Decodable {
       struct Value: Decodable { let coverImgUrl: String?; let id: Int64?; let name: String?; let trackCount: Int? }
+      let more: Bool?
       let playlist: [Value]?
     }
-    let response: Response = try await request(path: direct ? "/api/user/playlist" : "/user/playlist", values: [
-      "uid": String(userId), "limit": "1000", "offset": "0",
-    ])
-    return (response.playlist ?? []).compactMap { value in
-      guard let id = value.id, let name = value.name else { return nil }
-      return Playlist(artworkUrl: Self.secureMediaUrl(value.coverImgUrl), id: String(id), name: name, trackCount: value.trackCount ?? 0)
+    var playlists: [Playlist] = []
+    var seen = Set<String>()
+    var offset = 0
+    while true {
+      var values = ["uid": String(userId), "limit": "100", "offset": String(offset)]
+      if direct { values["includeVideo"] = "true" }
+      let response: Response = try await request(path: direct ? "/api/user/playlist" : "/user/playlist", values: values)
+      let page = response.playlist ?? []
+      let additions = page.compactMap { value -> Playlist? in
+        guard let id = value.id, let name = value.name, seen.insert(String(id)).inserted else { return nil }
+        return Playlist(artworkUrl: Self.secureMediaUrl(value.coverImgUrl), id: String(id), name: name, trackCount: value.trackCount ?? 0)
+      }
+      playlists.append(contentsOf: additions)
+      guard response.more == true, !page.isEmpty, !additions.isEmpty else { break }
+      offset += page.count
     }
+    return playlists
   }
 
   func search(_ keywords: String) async throws -> [EchoNativeCoreTrack] {
@@ -271,15 +282,21 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
       let inlineTracks = (detail.playlist?.tracks ?? []).compactMap(\.track)
       let ids = detail.playlist?.trackIds?.compactMap(\.id) ?? []
       guard !ids.isEmpty else { return inlineTracks }
-      var tracks: [EchoNativeCoreTrack] = []
+      var tracks = inlineTracks
+      var seen = Set(tracks.map(\.id))
       for start in stride(from: 0, to: ids.count, by: 500) {
         let chunk = Array(ids[start..<min(start + 500, ids.count)])
         let data = try JSONSerialization.data(withJSONObject: chunk.map { ["id": $0] })
         let value = String(data: data, encoding: .utf8) ?? "[]"
-        let response: Songs = try await request(path: "/api/v3/song/detail", values: ["c": value])
-        tracks.append(contentsOf: (response.songs ?? []).compactMap(\.track))
+        do {
+          let response: Songs = try await request(path: "/api/v3/song/detail", values: ["c": value])
+          tracks.append(contentsOf: (response.songs ?? []).compactMap(\.track).filter { seen.insert($0.id).inserted })
+        } catch {
+          if tracks.isEmpty { throw error }
+          break
+        }
       }
-      return tracks.isEmpty ? inlineTracks : tracks
+      return tracks
     }
     struct Response: Decodable { let songs: [Song]? }
     var tracks: [EchoNativeCoreTrack] = []
@@ -287,21 +304,24 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     var offset = 0
     while true {
       let response: Response = try await request(path: "/playlist/track/all", values: ["id": id, "limit": "500", "offset": String(offset)])
-      let page = (response.songs ?? []).compactMap(\.track)
+      let songs = response.songs ?? []
+      let page = songs.compactMap(\.track)
       let additions = page.filter { seen.insert($0.id).inserted }
       tracks.append(contentsOf: additions)
-      if page.count < 500 || additions.isEmpty { break }
-      offset += page.count
+      if songs.count < 500 || additions.isEmpty { break }
+      offset += songs.count
     }
     return tracks
   }
 
   func playbackUrl(trackId: String) async throws -> URL {
     struct Response: Decodable { struct Value: Decodable { let url: String? }; let data: [Value]? }
-    let response: Response = try await request(path: direct ? "/api/song/enhance/player/url/v1" : "/song/url/v1", values: [
-      direct ? "ids" : "id": direct ? "[\(trackId)]" : trackId,
-      "level": "exhigh",
-    ])
+    let response: Response
+    if direct {
+      response = try await request(path: "/api/song/enhance/player/url", values: ["ids": "[\(trackId)]", "br": "999000"])
+    } else {
+      response = try await request(path: "/song/url/v1", values: ["id": trackId, "level": "exhigh"])
+    }
     guard let raw = response.data?.first?.url, let url = URL(string: Self.secureMediaUrl(raw)) else {
       throw EchoNativeNetworkError.server(404, "该歌曲当前不可播放。")
     }
@@ -373,6 +393,12 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     }
   }
 
+  private struct ApiStatus: Decodable {
+    let code: Int?
+    let message: String?
+    let msg: String?
+  }
+
   private static func secureMediaUrl(_ value: String?) -> String {
     guard let value, var components = URLComponents(string: value), components.scheme == "http",
       let host = components.host?.lowercased(),
@@ -393,6 +419,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     guard let url = components.url else { throw EchoNativeNetworkError.invalidConnection }
     var request = URLRequest(url: url, timeoutInterval: 20)
     request.httpMethod = direct ? "POST" : "GET"
+    request.setValue("application/json,text/plain,*/*", forHTTPHeaderField: "Accept")
     request.setValue(cookie, forHTTPHeaderField: "Cookie")
     request.setValue("https://music.163.com/", forHTTPHeaderField: "Referer")
     request.setValue(
@@ -416,6 +443,12 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       throw EchoNativeNetworkError.invalidResponse
     }
-    return try JSONDecoder().decode(T.self, from: data)
+    let decoder = JSONDecoder()
+    if let status = try? decoder.decode(ApiStatus.self, from: data), let code = status.code,
+      code != 200, ![800, 801, 802, 803].contains(code) {
+      throw EchoNativeNetworkError.server(code, status.message ?? status.msg ?? "网易云接口请求失败。")
+    }
+    do { return try decoder.decode(T.self, from: data) }
+    catch { throw EchoNativeNetworkError.invalidResponse }
   }
 }

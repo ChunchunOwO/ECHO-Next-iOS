@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 test('the app boots the native core and keeps playback mutations ordered', async () => {
-  const [app, engine, store, payload, coreTypes, metadata, pages, player, remoteClients] = await Promise.all([
+  const [app, engine, store, payload, coreTypes, metadata, pages, player, remoteClients, neteaseLogin] = await Promise.all([
     readFile(new URL('../../App.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../../modules/echo-audio-dsp/ios/EchoAudioDspModule.swift', import.meta.url), 'utf8'),
     readFile(new URL('../../modules/echo-audio-dsp/ios/EchoNativeAppStore.swift', import.meta.url), 'utf8'),
@@ -13,6 +13,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
     readFile(new URL('../../modules/echo-audio-dsp/ios/EchoNativePagesView.swift', import.meta.url), 'utf8'),
     readFile(new URL('../../modules/echo-audio-dsp/ios/EchoNativePlayerView.swift', import.meta.url), 'utf8'),
     readFile(new URL('../../modules/echo-audio-dsp/ios/EchoNativeRemoteClients.swift', import.meta.url), 'utf8'),
+    readFile(new URL('../../modules/echo-audio-dsp/ios/EchoNeteaseLoginView.swift', import.meta.url), 'utf8'),
   ]);
   const nativeEntry = app.slice(app.indexOf('function NativeEchoApp'), app.indexOf('export default function App'));
   const appEntry = app.slice(app.indexOf('export default function App'));
@@ -51,8 +52,10 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(store, /streamingSnapshots\[key\] \?\? track\(forKey: key\)/u);
   assert.match(store, /if mode != \.streaming \{ addRecent\(track\) \}/u);
   assert.match(store, /streamingSearchStatus = errorMessage\(error\)/u);
-  assert.match(payload, /let collections = selectedTracks == nil && source != "all"/u);
+  assert.match(store, /value\.hasPrefix\("MUSIC_U="\)/u);
+  assert.match(payload, /let collections = selectedTracks == nil && source != "all" && source != "streaming"/u);
   assert.match(payload, /option\("history", localized\("History", "历史"\)\)/u);
+  assert.match(payload, /if score >= 0\.9, score > matchedScore/u);
   assert.match(coreTypes, /recentTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.recentTracks\) \?\? \[\]/u);
   assert.match(coreTypes, /streamingQueueTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.streamingQueueTracks\) \?\? \[\]/u);
   assert.match(metadata, /guard !text\.isEmpty else \{ continue \}/u);
@@ -80,5 +83,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.doesNotMatch(pages, /\.searchable\(text: libraryQueryBinding/u);
   assert.match(remoteClients, /secureMediaUrl\(value\.avatarUrl\)/u);
   assert.match(remoteClients, /host == "music\.126\.net" \|\| host\.hasSuffix\("\.music\.126\.net"\)/u);
-  assert.match(remoteClients, /return tracks\.isEmpty \? inlineTracks : tracks/u);
+  assert.match(remoteClients, /path: "\/api\/song\/enhance\/player\/url"/u);
+  assert.match(remoteClients, /response\.more == true/u);
+  assert.match(remoteClients, /code != 200, !\[800, 801, 802, 803\]\.contains\(code\)/u);
+  assert.match(neteaseLogin, /configuration\.websiteDataStore = \.nonPersistent\(\)/u);
 });

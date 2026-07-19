@@ -112,7 +112,7 @@ extension EchoNativeAppStore {
     let sourceTracks = tracksForLibrarySource(source)
     let selectedTracks = selectedCollectionId.isEmpty ? nil : collectionTrackKeys[selectedCollectionId]?.compactMap(track(forKey:))
     let baseTracks = selectedTracks ?? filteredTracks(sourceTracks, source: source)
-    let collections = selectedTracks == nil && source != "all"
+    let collections = selectedTracks == nil && source != "all" && source != "streaming"
       ? collectionsForCurrentView(baseTracks, source: source)
       : []
     let sortedTracks = libraryView == "recent" || (source == "streaming" && streamingLibraryMode == "history")
@@ -261,16 +261,50 @@ extension EchoNativeAppStore {
     }
     var groups: [String: [EchoNativeCoreTrack]] = [:]
     var groupTitles: [String: String] = [:]
+    var groupAlbumArtists: [String: String] = [:]
+    var groupAliases: [String: String] = [:]
+    var groupOrder: [String] = []
     for track in tracks {
       let fallback = localized("Unknown Artist", "未知艺术家")
       let titles = libraryView == "artists"
         ? artistNames(track.artist, fallback: fallback)
         : [track.album.isEmpty ? localized("Uncategorized", "未归类专辑") : track.album]
       for title in titles {
-        let disambiguator = libraryView == "albums" ? normalized(track.albumArtist.isEmpty ? track.artist : track.albumArtist) : ""
-        let key = "\(normalized(title))\u{0}\(disambiguator)"
+        let disambiguator = libraryView == "albums" ? normalized(track.albumArtist) : ""
+        let exactKey = "\(normalized(title))\u{0}\(disambiguator)"
+        let key: String
+        if libraryView != "albums" {
+          key = exactKey
+        } else if let alias = groupAliases[exactKey] {
+          key = alias
+        } else if groups[exactKey] != nil {
+          key = exactKey
+        } else {
+          var matchedKey: String?
+          var matchedScore = 0.0
+          for candidate in groupOrder {
+            guard let candidateTitle = groupTitles[candidate] else { continue }
+            let score = albumMatchScore(
+              title: title,
+              artist: track.albumArtist,
+              otherTitle: candidateTitle,
+              otherArtist: groupAlbumArtists[candidate] ?? ""
+            )
+            if score >= 0.9, score > matchedScore {
+              matchedKey = candidate
+              matchedScore = score
+            }
+          }
+          key = matchedKey ?? exactKey
+          if let matchedKey { groupAliases[exactKey] = matchedKey }
+        }
+        let isNewGroup = groups[key] == nil
         groups[key, default: []].append(track)
-        groupTitles[key] = title
+        if isNewGroup { groupOrder.append(key) }
+        if groupTitles[key] == nil { groupTitles[key] = title }
+        if groupAlbumArtists[key]?.isEmpty != false, !track.albumArtist.isEmpty {
+          groupAlbumArtists[key] = track.albumArtist
+        }
       }
     }
     var nextKeys: [String: [String]] = [:]
@@ -280,13 +314,13 @@ extension EchoNativeAppStore {
         ? localized("Unknown Artist", "未知艺术家")
         : localized("Uncategorized", "未归类专辑"))
       let sourcePrefix = values.allSatisfy { $0.source == first.source } ? first.source.rawValue : source
-      let albumArtist = first.albumArtist.isEmpty ? first.artist : first.albumArtist
+      let albumArtist = groupAlbumArtists[key] ?? first.albumArtist
       let exactAlbum = albumsByKey["\(normalized(title))\u{0}\(normalized(albumArtist))"]
       let titleAlbums = albumsByTitle[normalized(title)] ?? []
       let album = exactAlbum ?? (titleAlbums.count == 1 ? titleAlbums[0] : nil)
       let id = libraryView == "artists"
         ? "\(sourcePrefix)-artist:\(normalized(title))"
-        : "\(sourcePrefix):album:\(normalized(title)):\(normalized(first.albumArtist.isEmpty ? first.artist : first.albumArtist))"
+        : "\(sourcePrefix):album:\(normalized(title)):\(normalized(albumArtist))"
       nextKeys[id] = values.map { trackKey($0) }
       return [
         "artworkUrl": album?.artworkUrl ?? values.first(where: { $0.artworkUrl?.isEmpty == false })?.artworkUrl ?? "",
@@ -563,6 +597,45 @@ extension EchoNativeAppStore {
     value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
       .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func albumMatchScore(
+    title: String,
+    artist: String,
+    otherTitle: String,
+    otherArtist: String
+  ) -> Double {
+    let titleScore = textSimilarity(title, otherTitle)
+    guard titleScore >= 0.9 else { return 0 }
+    let leftArtist = albumComparisonValue(artist)
+    let rightArtist = albumComparisonValue(otherArtist)
+    // A missing album artist cannot safely split compilation tracks by their song artist.
+    guard !leftArtist.isEmpty, !rightArtist.isEmpty else { return titleScore }
+    let artistScore = textSimilarity(leftArtist, rightArtist)
+    return artistScore >= 0.9 ? (titleScore + artistScore) / 2 : 0
+  }
+
+  private func textSimilarity(_ leftValue: String, _ rightValue: String) -> Double {
+    let left = Array(albumComparisonValue(leftValue))
+    let right = Array(albumComparisonValue(rightValue))
+    if left == right { return 1 }
+    guard !left.isEmpty, !right.isEmpty else { return 0 }
+    let longestCount = max(left.count, right.count)
+    guard Double(abs(left.count - right.count)) / Double(longestCount) <= 0.1 else { return 0 }
+    var previous = Array(0...right.count)
+    for (leftIndex, leftCharacter) in left.enumerated() {
+      var current = [leftIndex + 1] + Array(repeating: 0, count: right.count)
+      for (rightIndex, rightCharacter) in right.enumerated() {
+        let substitution = previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
+        current[rightIndex + 1] = min(min(current[rightIndex] + 1, previous[rightIndex + 1] + 1), substitution)
+      }
+      previous = current
+    }
+    return 1 - Double(previous[right.count]) / Double(max(left.count, right.count))
+  }
+
+  private func albumComparisonValue(_ value: String) -> String {
+    normalized(value).filter { $0.isLetter || $0.isNumber }
   }
 
   private func deduplicated(_ tracks: [EchoNativeCoreTrack]) -> [EchoNativeCoreTrack] {

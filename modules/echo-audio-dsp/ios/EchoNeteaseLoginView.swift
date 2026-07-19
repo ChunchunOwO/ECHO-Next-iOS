@@ -63,7 +63,7 @@ private struct EchoNeteaseLoginWebView: UIViewRepresentable {
 
   func makeUIView(context: Context) -> WKWebView {
     let configuration = WKWebViewConfiguration()
-    configuration.websiteDataStore = .default()
+    configuration.websiteDataStore = .nonPersistent()
     configuration.defaultWebpagePreferences.preferredContentMode = .mobile
 
     let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -84,7 +84,6 @@ private struct EchoNeteaseLoginWebView: UIViewRepresentable {
   final class Coordinator: NSObject, WKHTTPCookieStoreObserver, WKNavigationDelegate {
     private static let retainedCookieNames = Set([
       "MUSIC_U",
-      "MUSIC_A",
       "NMTID",
       "WEVNSM",
       "WNMCID",
@@ -141,15 +140,26 @@ private struct EchoNeteaseLoginWebView: UIViewRepresentable {
         guard let self else { return }
         let neteaseCookies = cookies.filter { cookie in
           let domain = cookie.domain.lowercased()
-          return (domain == "music.163.com" || domain.hasSuffix(".163.com"))
+          return (domain == "music.163.com" || domain == ".music.163.com")
             && Self.retainedCookieNames.contains(cookie.name)
         }
-        guard neteaseCookies.contains(where: {
-          ($0.name == "MUSIC_U" || $0.name == "MUSIC_A") && !$0.value.isEmpty
-        }) else {
-          return
+        var cookiesByName: [String: HTTPCookie] = [:]
+        for cookie in neteaseCookies {
+          guard let current = cookiesByName[cookie.name] else {
+            cookiesByName[cookie.name] = cookie
+            continue
+          }
+          let cookieIsRoot = cookie.path == "/"
+          let currentIsRoot = current.path == "/"
+          let cookieIsExactDomain = cookie.domain.lowercased() == "music.163.com"
+          let currentIsExactDomain = current.domain.lowercased() == "music.163.com"
+          if (cookieIsRoot && !currentIsRoot)
+            || (cookieIsRoot == currentIsRoot && cookieIsExactDomain && !currentIsExactDomain) {
+            cookiesByName[cookie.name] = cookie
+          }
         }
-        let value = neteaseCookies
+        guard cookiesByName["MUSIC_U"]?.value.isEmpty == false else { return }
+        let value = cookiesByName.values
           .sorted { $0.name < $1.name }
           .map { "\($0.name)=\($0.value)" }
           .joined(separator: "; ")

@@ -153,7 +153,10 @@ final class EchoNativeAppStore {
     persistent = payload.state
     streamingFavoritePlaylistIds = Set(payload.streamingFavoritePlaylistIds)
     streamingPinnedPlaylistIds = Set(payload.streamingPinnedPlaylistIds)
-    EchoNativePersistence.setNeteaseCookie(payload.neteaseCookie)
+    if !hasNeteaseAccountCookie(EchoNativePersistence.neteaseCookie()),
+      hasNeteaseAccountCookie(payload.neteaseCookie) {
+      EchoNativePersistence.setNeteaseCookie(payload.neteaseCookie)
+    }
     EchoNativePersistence.save(persistent)
     EchoNativePersistence.markLegacyMigrated()
     guard started else { return }
@@ -419,7 +422,8 @@ final class EchoNativeAppStore {
     }
     echoClient = nextEchoClient
     powerampClient = nextPowerampClient
-    let cookie = EchoNativePersistence.neteaseCookie()
+    let storedCookie = EchoNativePersistence.neteaseCookie()
+    let cookie = hasNeteaseAccountCookie(storedCookie) ? storedCookie : ""
     let baseUrl = persistent.settings.neteaseAccessMode == "direct"
       ? "https://music.163.com"
       : persistent.settings.neteaseApiBaseUrl
@@ -1528,7 +1532,7 @@ final class EchoNativeAppStore {
   }
 
   private func acceptNeteaseCookie(_ cookie: String) {
-    guard cookie.contains("MUSIC_U=") || cookie.contains("MUSIC_A=") else {
+    guard hasNeteaseAccountCookie(cookie) else {
       streamingStatus = localized("Invalid NetEase session.", "网易云登录凭据无效")
       renderPages()
       return
@@ -1582,8 +1586,7 @@ final class EchoNativeAppStore {
             let result = try await client.checkQrLogin(key: login.key)
             guard streamingQrGeneration == generation else { return }
             if result.code == 803 {
-              guard let cookie = result.cookie,
-                cookie.contains("MUSIC_U=") || cookie.contains("MUSIC_A=")
+              guard let cookie = result.cookie, hasNeteaseAccountCookie(cookie)
               else {
                 streamingQrKey = ""
                 streamingQrUrl = ""
@@ -2321,6 +2324,13 @@ final class EchoNativeAppStore {
     if let value = value as? Int { return Double(value) }
     if let value = value as? NSNumber { return value.doubleValue }
     return nil
+  }
+
+  private func hasNeteaseAccountCookie(_ cookie: String) -> Bool {
+    cookie.split(separator: ";").contains { part in
+      let value = part.trimmingCharacters(in: .whitespacesAndNewlines)
+      return value.hasPrefix("MUSIC_U=") && value.count > "MUSIC_U=".count
+    }
   }
 
   func localized(_ english: String, _ chinese: String) -> String {
