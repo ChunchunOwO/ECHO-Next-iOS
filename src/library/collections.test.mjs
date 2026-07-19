@@ -54,3 +54,10 @@ test('compilations without album artist stay in one album', () => {
   assert.equal(collections.length, 1);
   assert.deepEqual(collections[0].trackIds, ['a', 'b']);
 });
+
+test('multi-artist album keys ignore artist order and separators', () => {
+  assert.equal(
+    albumCollectionKeyForTrack(track({ albumArtist: 'Artist A feat. Artist B' }), 'Uncategorized'),
+    albumCollectionKeyForTrack(track({ albumArtist: 'Artist B；Artist A' }), 'Uncategorized'),
+  );
+});

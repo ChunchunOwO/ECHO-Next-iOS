@@ -14,7 +14,10 @@ export const normalizeExternalLookupValue = (value: string | null | undefined): 
 );
 
 export const albumCollectionKey = (title: string, albumArtist: string): string => (
-  `${normalizeExternalLookupValue(title)}::${normalizeExternalLookupValue(albumArtist)}`
+  `${normalizeExternalLookupValue(title)}::${[...new Set(albumArtist
+    .split(/\s*(?:,|;|，|；|、|\/|／|&|＆|\+|\||｜)\s*|\s+(?:feat\.?|ft\.?|featuring|x|×)\s+/iu)
+    .map(normalizeExternalLookupValue)
+    .filter(Boolean))].sort().join('|')}`
 );
 
 export const albumCollectionKeyForTrack = (

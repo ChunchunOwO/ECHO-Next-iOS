@@ -230,28 +230,71 @@ private final class EchoNativeDocumentImporter: NSObject, UIDocumentPickerDelega
 }
 
 enum EchoNativeStreamCache {
+  private static let audioExtensions = ["aac", "aiff", "caf", "flac", "m4a", "mp3", "mp4", "wav"]
+
   static func file(for remoteUrl: URL, track: EchoNativeCoreTrack) async throws -> URL {
     let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("echo-native-streams", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let rawExtension = track.codec?.lowercased() ?? remoteUrl.pathExtension.lowercased()
-    let ext = ["aac", "flac", "m4a", "mp3", "mp4", "wav"].contains(rawExtension) ? rawExtension : "audio"
-    let cacheKey = "v2|\(track.source.rawValue)|\(remoteUrl.host ?? "")|\(remoteUrl.port ?? 0)|\(track.id)"
+    let cacheKey = "v3|\(track.source.rawValue)|\(remoteUrl.host ?? "")|\(remoteUrl.port ?? 0)|\(track.id)"
     let digest = SHA256.hash(data: Data(cacheKey.utf8)).prefix(16)
       .map { String(format: "%02x", $0) }
       .joined()
-    let destination = directory.appendingPathComponent(digest).appendingPathExtension(ext)
-    if FileManager.default.fileExists(atPath: destination.path) { return destination }
+    let base = directory.appendingPathComponent(digest)
+    for ext in audioExtensions {
+      let cached = base.appendingPathExtension(ext)
+      if FileManager.default.fileExists(atPath: cached.path), (try? AVAudioFile(forReading: cached)) != nil {
+        return cached
+      }
+    }
     let (temporary, response) = try await URLSession.shared.download(from: remoteUrl)
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       throw EchoNativeNetworkError.invalidResponse
     }
-    let mimeType = response.mimeType?.lowercased() ?? ""
-    guard !mimeType.hasPrefix("text/"), mimeType != "application/json" else {
+    guard let ext = detectedExtension(
+      file: temporary,
+      mimeType: response.mimeType?.lowercased() ?? "",
+      remoteExtension: remoteUrl.pathExtension.lowercased(),
+      codec: track.codec?.lowercased()
+    ) else {
       throw EchoNativeNetworkError.invalidResponse
     }
+    let destination = base.appendingPathExtension(ext)
     try? FileManager.default.removeItem(at: destination)
     try FileManager.default.moveItem(at: temporary, to: destination)
+    guard (try? AVAudioFile(forReading: destination)) != nil else {
+      try? FileManager.default.removeItem(at: destination)
+      throw EchoNativeNetworkError.invalidResponse
+    }
     return destination
+  }
+
+  private static func detectedExtension(
+    file: URL,
+    mimeType: String,
+    remoteExtension: String,
+    codec: String?
+  ) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+    let header = (try? handle.read(upToCount: 16)) ?? Data()
+    try? handle.close()
+    let bytes = [UInt8](header)
+    if bytes.starts(with: [0x66, 0x4c, 0x61, 0x43]) { return "flac" }
+    if bytes.starts(with: [0x63, 0x61, 0x66, 0x66]) { return "caf" }
+    if bytes.count >= 12, Array(bytes[0..<4]) == [0x52, 0x49, 0x46, 0x46],
+      Array(bytes[8..<12]) == [0x57, 0x41, 0x56, 0x45] { return "wav" }
+    if bytes.count >= 12, Array(bytes[0..<4]) == [0x46, 0x4f, 0x52, 0x4d],
+      ["AIFF", "AIFC"].contains(String(bytes: bytes[8..<12], encoding: .ascii) ?? "") { return "aiff" }
+    if bytes.count >= 8, Array(bytes[4..<8]) == [0x66, 0x74, 0x79, 0x70] { return "m4a" }
+    if bytes.count >= 2, bytes[0] == 0xff, bytes[1] & 0xf6 == 0xf0 { return "aac" }
+    if bytes.count >= 2, bytes[0] == 0xff, bytes[1] & 0xe0 == 0xe0 { return "mp3" }
+    let mimeExtensions = [
+      "audio/aac": "aac", "audio/aiff": "aiff", "audio/flac": "flac", "audio/mp4": "m4a",
+      "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-aiff": "aiff", "audio/x-caf": "caf",
+      "audio/x-flac": "flac", "audio/x-m4a": "m4a", "audio/x-wav": "wav",
+    ]
+    if let ext = mimeExtensions[mimeType.components(separatedBy: ";")[0]] { return ext }
+    if let ext = [remoteExtension, codec].compactMap({ $0 }).first(where: { audioExtensions.contains($0) }) { return ext }
+    return nil
   }
 }
