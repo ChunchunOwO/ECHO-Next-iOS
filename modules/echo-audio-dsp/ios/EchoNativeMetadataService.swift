@@ -105,7 +105,16 @@ enum EchoNativeMetadataService {
         result.append(LyricLine(milliseconds: (minutes * 60 + seconds + fraction) * 1000, text: text))
       }
     }
-    if !result.isEmpty { return result.sorted { $0.milliseconds < $1.milliseconds } }
+    if !result.isEmpty {
+      let grouped = Dictionary(grouping: result) { Int($0.milliseconds.rounded()) }
+      return grouped.keys.sorted().compactMap { milliseconds in
+        guard let lines = grouped[milliseconds] else { return nil }
+        var seen = Set<String>()
+        let text = lines.compactMap { seen.insert($0.text).inserted ? $0.text : nil }
+          .joined(separator: "\n")
+        return LyricLine(milliseconds: Double(milliseconds), text: text)
+      }
+    }
     return plainResult
   }
 
@@ -201,7 +210,11 @@ enum EchoNativeMetadataService {
       struct Song: Decodable { struct Album: Decodable { let picUrl: String? }; let album: Album? }
       let songs: [Song]?
     }
-    struct Lyric: Decodable { struct Value: Decodable { let lyric: String? }; let lrc: Value? }
+    struct Lyric: Decodable {
+      struct Value: Decodable { let lyric: String? }
+      let lrc: Value?
+      let tlyric: Value?
+    }
 
     var searchComponents = URLComponents(string: "https://music.163.com/api/search/get/web")!
     searchComponents.queryItems = [
@@ -234,7 +247,10 @@ enum EchoNativeMetadataService {
       }
       let artist = song.artists?.compactMap(\.name).joined(separator: ", ")
       let artwork = detail?.songs?.first?.album?.picUrl
-      let lyrics = lyric?.lrc?.lyric ?? ""
+      let lyrics = [lyric?.lrc?.lyric, lyric?.tlyric?.lyric]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n")
       if artwork?.isEmpty == false || artist?.isEmpty == false || !lyrics.isEmpty {
         result.append(Candidate(
           artist: artist,

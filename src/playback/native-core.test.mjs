@@ -107,6 +107,10 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(coreTypes, /recentTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.recentTracks\) \?\? \[\]/u);
   assert.match(coreTypes, /streamingQueueTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.streamingQueueTracks\) \?\? \[\]/u);
   assert.match(metadata, /guard !text\.isEmpty else \{ continue \}/u);
+  assert.match(metadata, /Dictionary\(grouping: result\) \{ Int\(\$0\.milliseconds\.rounded\(\)\) \}/u);
+  assert.match(metadata, /seen\.insert\(\$0\.text\)\.inserted/u);
+  assert.match(metadata, /\.joined\(separator: "\\n"\)/u);
+  assert.match(metadata, /let tlyric: Value\?/u);
   assert.match(player, /case \.normal: return "arrow\.right\.to\.line"/u);
   assert.match(playerLayout, /let coverMaximum: CGFloat = compact \? 200 : 310/u);
   assert.match(playerLayout, /outputControl/u);
@@ -186,6 +190,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(themedTab, /echoWarmBackground\.ignoresSafeArea\(\)/u);
   assert.doesNotMatch(lyricsScroller, /scrollClipDisabled/u);
   assert.match(lyricsScroller, /let timeMs = line\.milliseconds/u);
+  assert.match(lyricsScroller, /Text\(line\.text\)[\s\S]*\.shadow\(color: active/u);
   assert.match(lyricsScroller, /if timeMs >= 0 \{/u);
   assert.doesNotMatch(lyricsScroller, /timeMs >= 0 && !active/u);
   assert.match(pages, /pendingLibraryPageScroll = true/u);
@@ -220,6 +225,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(remoteClients, /path: "\/api\/song\/enhance\/player\/url"/u);
   assert.match(remoteClients, /func trackDetail\(trackId: String\)/u);
   assert.match(remoteClients, /path: direct \? "\/api\/song\/lyric" : "\/lyric"/u);
+  assert.match(remoteClients, /let tlyric: Lyrics\?/u);
   assert.match(remoteClients, /func albumTracks\(albumId: String\)[\s\S]*library\/albums\/\\\(encodedPathComponent\(albumId\)\)\/tracks/u);
   assert.match(store, /echoClient\.albumTracks\(albumId: albumId\)/u);
   assert.match(store, /loadedAlbumTracks[\s\S]*refreshedTracks \+ loadedAlbumTracks\.filter/u);

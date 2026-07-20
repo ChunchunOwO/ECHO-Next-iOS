@@ -346,6 +346,7 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     struct Response: Decodable {
       struct Lyrics: Decodable { let lyric: String? }
       let lrc: Lyrics?
+      let tlyric: Lyrics?
     }
     let response: Response = try await request(
       path: direct ? "/api/song/lyric" : "/lyric",
@@ -353,7 +354,10 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
         ? ["id": trackId, "lv": "-1", "kv": "-1", "tv": "-1"]
         : ["id": trackId]
     )
-    return response.lrc?.lyric ?? ""
+    return [response.lrc?.lyric, response.tlyric?.lyric]
+      .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+      .joined(separator: "\n")
   }
 
   func playbackUrl(trackId: String) async throws -> URL {
