@@ -289,7 +289,6 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var outputMode = "local"
   @Published var playbackMode = EchoNativePlaybackMode.normal
   @Published var playbackLoading = false
-  @Published var queueCount = 0
   @Published var queuePayload: EchoNativeQueuePayload?
   @Published var showArtworkGlow = true
   @Published var showPlayerOutputInMenu = true
@@ -630,7 +629,7 @@ struct EchoNativePlayerScreen: View {
         .padding(.top, compact ? 7 : 12)
       transportControls(compact: compact)
         .padding(.top, compact ? 5 : 8)
-      secondaryControls(lyricsMode: false, compact: compact)
+      secondaryControls(lyricsMode: false)
         .padding(.top, compact ? 4 : 8)
       volumeControl
         .padding(.top, compact ? 3 : 6)
@@ -654,7 +653,7 @@ struct EchoNativePlayerScreen: View {
       VStack(spacing: compact ? 6 : 9) {
         progressControl
         transportControls(compact: true)
-        secondaryControls(lyricsMode: true, compact: compact)
+        secondaryControls(lyricsMode: true)
         volumeControl
       }
     }
@@ -964,9 +963,9 @@ struct EchoNativePlayerScreen: View {
     }
   }
 
-  private func secondaryControls(lyricsMode: Bool, compact: Bool) -> some View {
+  private func secondaryControls(lyricsMode: Bool) -> some View {
     echoGlassGroup(spacing: 8) {
-      HStack(spacing: compact ? 12 : 20) {
+      HStack(spacing: 0) {
         iconButton(
           symbol: playbackModeSymbol,
           label: model.language == "en" ? "Playback mode" : "播放模式",
@@ -975,6 +974,7 @@ struct EchoNativePlayerScreen: View {
         ) {
           onAction(["action": "playbackMode"])
         }
+        .frame(maxWidth: .infinity)
         iconButton(
           symbol: lyricsMode ? "quote.bubble.fill" : "quote.bubble",
           label: model.language == "en" ? (lyricsMode ? "Close lyrics" : "Lyrics") : (lyricsMode ? "关闭歌词" : "歌词"),
@@ -982,21 +982,15 @@ struct EchoNativePlayerScreen: View {
         ) {
           onAction(["action": lyricsMode ? "lyricsClose" : "lyrics"])
         }
-        ZStack(alignment: .topTrailing) {
-          iconButton(symbol: "list.bullet", label: model.language == "en" ? "Queue" : "播放列表", active: false) {
-            showQueue = true
-          }
-          if model.queueCount > 0 {
-            Text("\(model.queueCount)")
-              .font(.system(size: 8, weight: .bold))
-              .foregroundColor(.white)
-              .padding(3)
-              .background(echoAccent, in: Circle())
-              .offset(x: 3, y: -3)
-          }
+        .frame(maxWidth: .infinity)
+        iconButton(symbol: "list.bullet", label: model.language == "en" ? "Queue" : "播放列表", active: false) {
+          showQueue = true
         }
+        .frame(maxWidth: .infinity)
         moreControls
+          .frame(maxWidth: .infinity)
       }
+      .frame(maxWidth: .infinity)
     }
   }
 

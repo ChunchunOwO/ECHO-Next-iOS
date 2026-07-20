@@ -35,7 +35,7 @@ final class EchoNativeAppStore {
   var libraryQuery = ""
   var libraryPage = 0
   var libraryExpanded = false
-  var librarySort = "title"
+  var librarySort = "default"
   var albumTrackSort = "default"
   var selectedCollectionId = ""
   var selectedPlaylistId = ""
@@ -316,7 +316,7 @@ final class EchoNativeAppStore {
       libraryPage = 0
       renderPages()
     case "librarySort":
-      librarySort = payload["selection"] as? String ?? "title"
+      librarySort = payload["selection"] as? String ?? "default"
       libraryPage = 0
       renderPages()
     case "libraryCollectionSelect": selectCollection(payload)
@@ -1155,7 +1155,6 @@ final class EchoNativeAppStore {
     playerModel.isFavorite = persistent.favoriteTrackKeys.contains(trackKey(track))
     playerModel.outputMode = outputMode.rawValue
     playerModel.tags = tags(for: track)
-    playerModel.queueCount = queue.count
     updateSignalPath(for: track)
   }
 
@@ -1213,7 +1212,6 @@ final class EchoNativeAppStore {
       "subtitle": localized("\(queue.count) tracks", "\(queue.count) 首歌曲"),
       "title": localized("Queue", "播放列表"),
     ]
-    playerModel.queueCount = queue.count
     playerModel.updateQueue(payloadJSON: json(payload))
   }
 

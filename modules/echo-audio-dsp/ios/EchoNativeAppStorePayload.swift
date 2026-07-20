@@ -267,6 +267,7 @@ extension EchoNativeAppStore {
       }
     }
     switch activeLibrarySort() {
+    case "default": return tracks
     case "track": return albumOrdered(tracks)
     case "title": return sortedByText(\.title, tie: \.artist)
     case "artist": return sortedByText(\.artist, tie: \.title)
@@ -275,7 +276,7 @@ extension EchoNativeAppStore {
         ? compareLibraryText($0.title, $1.title)
         : $0.durationMs < $1.durationMs
     }
-    default: return albumOrdered(tracks)
+    default: return tracks
     }
   }
 
@@ -495,6 +496,7 @@ extension EchoNativeAppStore {
   }
 
   private func sortLibraryCollections(_ collections: [[String: Any]]) -> [[String: Any]] {
+    guard librarySort != "default" else { return collections }
     collections.sorted { left, right in
       let leftTitle = left["title"] as? String ?? ""
       let rightTitle = right["title"] as? String ?? ""

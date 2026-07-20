@@ -381,7 +381,7 @@ struct EchoNativePagesScreen: View {
   @State private var pendingLibraryPageScroll = false
   @State private var pendingAlbumScroll = false
   @AppStorage("echo.library.albumTrackSort") private var albumTrackSort = "default"
-  @AppStorage("echo.library.trackSort") private var libraryTrackSort = "title"
+  @AppStorage("echo.library.trackSort") private var libraryTrackSort = "default"
   @AppStorage("echo.library.echoDisplayMode") private var trackDisplayMode = "list"
   @AppStorage("echo.library.collectionDisplayMode") private var collectionDisplayMode = "grid"
   @AppStorage("echo.library.streamingPlaylistDisplayMode") private var streamingPlaylistDisplayMode = "grid"
@@ -1363,6 +1363,7 @@ struct EchoNativePagesScreen: View {
           }
         )
       ) {
+        Label(model.payload?.language == "en" ? "Default order" : "默认排序", systemImage: "list.bullet").tag("default")
         Label(
           model.payload?.language == "en" ? (sortingCollections ? "Name" : "Title") : (sortingCollections ? "名称" : "歌名"),
           systemImage: "textformat"
@@ -1483,21 +1484,6 @@ struct EchoNativePagesScreen: View {
           .background(Color.black.opacity(0.24), in: Capsule())
           .padding(7)
         }
-        Button {
-          onAction(["action": "playlistPlay", "playlistId": playlist.id])
-        } label: {
-          Image(systemName: "play.fill")
-            .font(.system(size: 13, weight: .bold))
-            .foregroundColor(.white)
-            .frame(width: 40, height: 40)
-            .echoGlass(tint: Color.black.opacity(0.25), clear: false, in: Circle())
-        }
-        .buttonStyle(.plain)
-        .disabled(playlist.trackCount == 0)
-        .opacity(playlist.trackCount == 0 ? 0.45 : 1)
-        .padding(7)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-        .accessibilityLabel(model.payload?.language == "en" ? "Play all" : "播放全部")
       }
       .frame(width: 126, height: 126)
 
@@ -1521,6 +1507,12 @@ struct EchoNativePagesScreen: View {
         .buttonStyle(.plain)
         Spacer(minLength: 0)
         Menu {
+          Button {
+            onAction(["action": "playlistPlay", "playlistId": playlist.id])
+          } label: {
+            Label(model.payload?.language == "en" ? "Play all" : "播放全部", systemImage: "play.fill")
+          }
+          .disabled(playlist.trackCount == 0)
           Button {
             onAction(["action": "playlistPin", "playlistId": playlist.id])
           } label: {
@@ -1591,43 +1583,36 @@ struct EchoNativePagesScreen: View {
     _ playlist: EchoNativeStreamingPlaylist,
     labels: EchoNativeLibraryLabels
   ) -> some View {
-    HStack(spacing: 2) {
+    Menu {
       Button {
         onAction(["action": "streamingPlaylistOpen", "id": playlist.id, "play": true])
       } label: {
-        Image(systemName: "play.fill")
-          .font(.system(size: 14, weight: .bold))
-          .frame(width: 44, height: 44)
-          .echoGlass(tint: echoAccent.opacity(0.09), in: Circle())
+        Label(model.payload?.language == "en" ? "Play all" : "播放全部", systemImage: "play.fill")
       }
-      .buttonStyle(.plain)
       .disabled(playlist.trackCount == 0)
-      .accessibilityLabel(model.payload?.language == "en" ? "Play all" : "播放全部")
-      Menu {
-        Button {
-          onAction(["action": "streamingPlaylistPin", "id": playlist.id])
-        } label: {
-          Label(playlist.pinned ? labels.unpinPlaylist : labels.pinPlaylist, systemImage: "pin")
-        }
-        Button {
-          onAction(["action": "streamingPlaylistFavorite", "id": playlist.id])
-        } label: {
-          Label(playlist.favorite ? labels.unFavoritePlaylist : labels.favoritePlaylist, systemImage: "heart")
-        }
+      Button {
+        onAction(["action": "streamingPlaylistPin", "id": playlist.id])
       } label: {
-        ZStack {
-          Image(systemName: "ellipsis")
-            .font(.system(size: 14, weight: .bold))
-          if playlist.pinned || playlist.favorite {
-            Circle()
-              .fill(echoAccent)
-              .frame(width: 6, height: 6)
-              .offset(x: 10, y: -10)
-          }
-        }
-        .frame(width: 44, height: 44)
-        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+        Label(playlist.pinned ? labels.unpinPlaylist : labels.pinPlaylist, systemImage: "pin")
       }
+      Button {
+        onAction(["action": "streamingPlaylistFavorite", "id": playlist.id])
+      } label: {
+        Label(playlist.favorite ? labels.unFavoritePlaylist : labels.favoritePlaylist, systemImage: "heart")
+      }
+    } label: {
+      ZStack {
+        Image(systemName: "ellipsis")
+          .font(.system(size: 14, weight: .bold))
+        if playlist.pinned || playlist.favorite {
+          Circle()
+            .fill(echoAccent)
+            .frame(width: 6, height: 6)
+            .offset(x: 10, y: -10)
+        }
+      }
+      .frame(width: 44, height: 44)
+      .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
     }
   }
 
@@ -2554,25 +2539,20 @@ private struct EchoNativePlaylistDetailSheet: View {
             .foregroundColor(echoInk.opacity(0.5))
         }
         Spacer()
-        if let playlist, !sortedTracks.isEmpty {
-          Button {
-            dismiss()
-            onAction([
-              "action": "playlistPlay",
-              "playlistId": playlist.id,
-              "sort": playlistTrackSort,
-            ])
-          } label: {
-            Image(systemName: "play.fill")
-              .font(.system(size: 14, weight: .bold))
-              .frame(width: 44, height: 44)
-              .echoGlass(tint: echoAccent.opacity(0.09), in: Circle())
-          }
-          .buttonStyle(.plain)
-          .accessibilityLabel(model.payload?.language == "en" ? "Play all" : "播放全部")
-        }
         if !sortedTracks.isEmpty {
           Menu {
+            if let playlist {
+              Button {
+                dismiss()
+                onAction([
+                  "action": "playlistPlay",
+                  "playlistId": playlist.id,
+                  "sort": playlistTrackSort,
+                ])
+              } label: {
+                Label(model.payload?.language == "en" ? "Play all" : "播放全部", systemImage: "play.fill")
+              }
+            }
             Picker(
               model.payload?.language == "en" ? "Sort tracks" : "歌曲排序",
               selection: $playlistTrackSort
@@ -2583,12 +2563,12 @@ private struct EchoNativePlaylistDetailSheet: View {
               Label(model.payload?.language == "en" ? "Duration" : "时长", systemImage: "clock").tag("duration")
             }
           } label: {
-            Image(systemName: "arrow.up.arrow.down")
+            Image(systemName: "ellipsis")
               .font(.system(size: 13, weight: .bold))
               .frame(width: 44, height: 44)
               .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
           }
-          .accessibilityLabel(model.payload?.language == "en" ? "Sort playlist" : "歌单排序")
+          .accessibilityLabel(model.payload?.language == "en" ? "Playlist options" : "歌单选项")
         }
         Button {
           onAction(["action": "playlistClose"])
