@@ -167,8 +167,8 @@ extension EchoNativeAppStore {
     let selectedPlaylist = persistent.playlists.first { $0.id == selectedPlaylistId }
     return [
       "busy": source == "all"
-        ? localBusy || echoBusy || powerampBusy || streamingBusy
-        : source == "local" ? localBusy : source == "remote" ? powerampBusy : source == "streaming" ? streamingBusy : echoBusy,
+        ? localBusy || echoBusy || echoAlbumBusy || powerampBusy || streamingBusy
+        : source == "local" ? localBusy : source == "remote" ? powerampBusy : source == "streaming" ? streamingBusy : echoBusy || echoAlbumBusy,
       "canPlayLocal": !localTracks.isEmpty,
       "confirmDelete": persistent.settings.confirmBeforeDeletingLocalTracks,
       "collections": pagedCollections,
@@ -293,6 +293,35 @@ extension EchoNativeAppStore {
     if libraryCollectionsCacheKey == cacheKey {
       collectionTrackKeys = libraryCollectionsCacheTrackKeys
       return libraryCollectionsCache
+    }
+    if source == "echo", libraryView == "albums" {
+      let query = normalized(libraryQuery)
+      let allowedTitles: Set<String>? = libraryFilter == "streamable"
+        ? Set(sourceTracks.filter(\.canPlayOnPhone).map { normalized($0.album) })
+        : libraryFilter == "local"
+          ? Set(sourceTracks.filter { normalized($0.sourceLabel).contains("local") }.map { normalized($0.album) })
+          : nil
+      let previousKeys = collectionTrackKeys
+      var nextKeys: [String: [String]] = [:]
+      let values: [[String: Any]] = echoAlbums.filter { album in
+        (query.isEmpty || [album.title, album.sourceLabel].contains { normalized($0).contains(query) })
+          && (allowedTitles?.contains(normalized(album.title)) ?? true)
+      }.map { album in
+        let id = "echo:album-id:\(album.id)"
+        nextKeys[id] = previousKeys[id] ?? []
+        return [
+          "artworkUrl": album.artworkUrl ?? "",
+          "id": id,
+          "query": album.title,
+          "subtitle": localized("\(album.trackCount) tracks", "\(album.trackCount) 首"),
+          "title": album.title,
+        ]
+      }.sorted { ($0["title"] as? String ?? "").localizedStandardCompare($1["title"] as? String ?? "") == .orderedAscending }
+      collectionTrackKeys = nextKeys
+      libraryCollectionsCacheKey = cacheKey
+      libraryCollectionsCache = values
+      libraryCollectionsCacheTrackKeys = nextKeys
+      return values
     }
     let tracks = filteredTracks(sourceTracks, source: source)
     let albums = source == "echo" ? echoAlbums : source == "remote" ? powerampAlbums : []

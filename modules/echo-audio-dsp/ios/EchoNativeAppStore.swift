@@ -41,6 +41,7 @@ final class EchoNativeAppStore {
   var selectedStreamingPlaylistId = ""
   var connectMode = "echo"
   var echoBusy = false
+  var echoAlbumBusy = false
   var powerampBusy = false
   var localBusy = false
   var streamingBusy = false
@@ -98,6 +99,7 @@ final class EchoNativeAppStore {
   private var metadataGeneration = 0
   private var libraryArtworkGeneration = 0
   private var streamingQrGeneration = 0
+  private var echoAlbumGeneration = 0
   private var streamingQrKey = ""
   var streamingQrUrl = ""
   private var audioLoading = false
@@ -133,6 +135,8 @@ final class EchoNativeAppStore {
 
   func stop() {
     playbackGeneration &+= 1
+    echoAlbumGeneration &+= 1
+    echoAlbumBusy = false
     progressTask?.cancel()
     echoPollTask?.cancel()
     powerampPollTask?.cancel()
@@ -269,7 +273,11 @@ final class EchoNativeAppStore {
       if let value = payload["selection"] as? String { libraryFilter = value; resetLibraryPosition(); renderPages() }
     case "libraryQuery":
       libraryQuery = payload["text"] as? String ?? ""
-      if libraryQuery.isEmpty { selectedCollectionId = "" }
+      if libraryQuery.isEmpty {
+        echoAlbumGeneration &+= 1
+        selectedCollectionId = ""
+        echoAlbumBusy = false
+      }
       libraryPage = 0
       scheduleStreamingSearchIfNeeded()
       renderPages()
@@ -505,8 +513,12 @@ final class EchoNativeAppStore {
         let values = try await (status, tracks, albums)
         guard self.echoClient === echoClient else { return }
         echoAlbums = values.2
-        echoTracks = values.1
-        echoTracks = echoTracks.map(resolvedTrack)
+        let loadedAlbumTracks = collectionTrackKeys
+          .filter { $0.key.hasPrefix("echo:album-id:") }
+          .flatMap { $0.value.compactMap(track(forKey:)) }
+        let refreshedTracks = values.1.map(resolvedTrack)
+        var refreshedIds = Set(refreshedTracks.map(\.id))
+        echoTracks = refreshedTracks + loadedAlbumTracks.filter { refreshedIds.insert($0.id).inserted }
         applyRemoteStatus(values.0, kind: .echo)
       } else {
         let status = try await echoClient.status()
@@ -1873,7 +1885,45 @@ final class EchoNativeAppStore {
     libraryQuery = payload["text"] as? String ?? ""
     librarySort = payload["selection"] as? String ?? librarySort
     libraryPage = 0
+    guard let albumId = echoAlbumId(from: selectedCollectionId), let echoClient else {
+      renderPages()
+      return
+    }
+    let collectionId = selectedCollectionId
+    echoAlbumGeneration &+= 1
+    let generation = echoAlbumGeneration
+    collectionTrackKeys[collectionId] = []
+    echoAlbumBusy = true
     renderPages()
+    Task {
+      defer {
+        if echoAlbumGeneration == generation, selectedCollectionId == collectionId {
+          echoAlbumBusy = false
+          renderPages()
+        }
+      }
+      do {
+        let fetched = try await echoClient.albumTracks(albumId: albumId).map(resolvedTrack)
+        guard echoAlbumGeneration == generation, self.echoClient === echoClient else { return }
+        let replacements = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
+        let existingIds = Set(echoTracks.map(\.id))
+        let merged = echoTracks.map { replacements[$0.id] ?? $0 } + fetched.filter { !existingIds.contains($0.id) }
+        if merged != echoTracks { echoTracks = merged }
+        let keys = fetched.map(trackKey)
+        collectionTrackKeys[collectionId] = keys
+        libraryCollectionsCacheTrackKeys[collectionId] = keys
+        echoError = ""
+      } catch {
+        guard echoAlbumGeneration == generation, self.echoClient === echoClient else { return }
+        echoError = errorMessage(error)
+      }
+    }
+  }
+
+  private func echoAlbumId(from collectionId: String) -> String? {
+    let prefix = "echo:album-id:"
+    guard collectionId.hasPrefix(prefix) else { return nil }
+    return String(collectionId.dropFirst(prefix.count))
   }
 
   private func playCollection(_ payload: [String: Any]) {
@@ -2313,6 +2363,8 @@ final class EchoNativeAppStore {
 
   private func resetLibraryPosition() {
     searchTask?.cancel()
+    echoAlbumGeneration &+= 1
+    echoAlbumBusy = false
     libraryPage = 0
     libraryExpanded = false
     selectedCollectionId = ""

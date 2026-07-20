@@ -70,6 +70,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(payload, /if libraryCollectionsCacheKey == cacheKey \{[\s\S]*return libraryCollectionsCache/u);
   assert.match(payload, /if cacheable, libraryTracksCacheKey == cacheKey \{ return libraryTracksCache \}/u);
   assert.match(payload, /collectionTrackKeys\[id\]\?\.lazy\.compactMap\(track\(forKey:\)\)\.first/u);
+  assert.match(payload, /if source == "echo", libraryView == "albums"/u);
+  assert.match(payload, /let id = "echo:album-id:\\\(album\.id\)"/u);
   assert.match(payload, /option\("history", localized\("History", "历史"\)\)/u);
   assert.match(collectionsForCurrentView, /let key = normalized\(title\)/u);
   assert.match(collectionsForCurrentView, /formUnion\(trackArtistComparisonValues\(track\.artist\)\)/u);
@@ -106,6 +108,9 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(remoteClients, /secureMediaUrl\(value\.avatarUrl\)/u);
   assert.match(remoteClients, /host == "music\.126\.net" \|\| host\.hasSuffix\("\.music\.126\.net"\)/u);
   assert.match(remoteClients, /path: "\/api\/song\/enhance\/player\/url"/u);
+  assert.match(remoteClients, /func albumTracks\(albumId: String\)[\s\S]*library\/albums\/\\\(encodedPathComponent\(albumId\)\)\/tracks/u);
+  assert.match(store, /echoClient\.albumTracks\(albumId: albumId\)/u);
+  assert.match(store, /loadedAlbumTracks[\s\S]*refreshedTracks \+ loadedAlbumTracks\.filter/u);
   assert.match(remoteClients, /response\.more == true/u);
   assert.match(remoteClients, /code != 200, !\[800, 801, 802, 803\]\.contains\(code\)/u);
   assert.match(neteaseLogin, /configuration\.websiteDataStore = \.nonPersistent\(\)/u);

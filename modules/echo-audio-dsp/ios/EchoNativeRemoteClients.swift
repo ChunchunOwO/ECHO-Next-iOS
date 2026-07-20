@@ -76,14 +76,25 @@ final class EchoNativeRemoteClient: @unchecked Sendable {
   }
 
   func allTracks(query: String = "") async throws -> [EchoNativeCoreTrack] {
+    try await paginatedTracks(path: "library/tracks", query: ["q": query])
+  }
+
+  func albumTracks(albumId: String) async throws -> [EchoNativeCoreTrack] {
+    try await paginatedTracks(path: "library/albums/\(encodedPathComponent(albumId))/tracks")
+  }
+
+  private func paginatedTracks(path: String, query baseQuery: [String: String] = [:]) async throws -> [EchoNativeCoreTrack] {
     var values: [EchoNativeCoreTrack] = []
     var seenIds = Set<String>()
     var page = 1
     var pageSize = 200
     while page <= 500 {
+      var query = baseQuery
+      query["page"] = String(page)
+      query["pageSize"] = String(pageSize)
       let response: TracksResponse = try await request(
-        path: "library/tracks",
-        query: ["page": String(page), "pageSize": String(pageSize), "q": query]
+        path: path,
+        query: query
       )
       if page == 1, !response.tracks.isEmpty, response.tracks.count < pageSize { pageSize = response.tracks.count }
       let pageTracks = response.tracks.map { track in

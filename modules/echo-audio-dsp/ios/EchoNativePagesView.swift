@@ -913,7 +913,8 @@ struct EchoNativePagesScreen: View {
         }
         .frame(minHeight: 38)
 
-        if !library.tracks.isEmpty {
+        if !library.tracks.isEmpty || !selectedAlbumId.isEmpty
+          || (library.source == "streaming" && !library.streaming.selectedPlaylistId.isEmpty) {
           HStack(spacing: 10) {
             let streamingPlaylistSelected = library.source == "streaming"
               && !library.streaming.selectedPlaylistId.isEmpty
@@ -965,11 +966,15 @@ struct EchoNativePagesScreen: View {
           ? streamingContentEmpty
           : (library.tracks.isEmpty && library.collections.isEmpty && displayedPlaylists.isEmpty)) {
           VStack(spacing: 12) {
-            Image(systemName: "music.note.list")
-              .font(.system(size: 28, weight: .medium))
-            Text(library.labels.empty)
-              .font(.system(size: 14, weight: .semibold))
-              .multilineTextAlignment(.center)
+            if library.busy && (!selectedAlbumId.isEmpty || !library.streaming.selectedPlaylistId.isEmpty) {
+              ProgressView()
+            } else {
+              Image(systemName: "music.note.list")
+                .font(.system(size: 28, weight: .medium))
+              Text(library.labels.empty)
+                .font(.system(size: 14, weight: .semibold))
+                .multilineTextAlignment(.center)
+            }
           }
           .foregroundColor(echoInk.opacity(0.4))
           .frame(maxWidth: .infinity)
