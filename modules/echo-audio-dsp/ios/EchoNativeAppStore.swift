@@ -229,6 +229,7 @@ final class EchoNativeAppStore {
       pagesModel.equalizer.preset = "custom"
       persistent.settings.eqGains = playerModel.equalizer.gains
       persistent.settings.eqPreset = "custom"
+      playerModel.eqEnabled = playerModel.equalizer.gains.contains { abs($0) > 0.01 }
       audioEngine.setEq(gains: playerModel.equalizer.gains)
       if payload["commit"] as? Bool != false { persist() }
     case "eqPreset":
@@ -419,6 +420,8 @@ final class EchoNativeAppStore {
     pagesModel.equalizer.gains = normalizedGains(settings.eqGains)
     pagesModel.equalizer.language = settings.language
     pagesModel.equalizer.preset = settings.eqPreset
+    playerModel.eqEnabled = settings.eqGains.contains { abs($0) > 0.01 }
+    playerModel.loudnessEnabled = settings.loudnessEnabled
     librarySource = settings.defaultLibrarySource
     if librarySource == "echo", !persistent.echoConnection.enabled { librarySource = "local" }
     if librarySource == "remote", !persistent.powerampConnection.enabled { librarySource = "local" }
@@ -630,7 +633,10 @@ final class EchoNativeAppStore {
       setIfChanged(playerModel, \.durationMs, status.playback.durationMs)
     }
     setIfChanged(playerModel, \.volume, max(0, min(1, status.playback.volume)))
-    if let currentTrack { setIfChanged(playerModel, \.tags, tags(for: currentTrack)) }
+    if let currentTrack {
+      setIfChanged(playerModel, \.tags, tags(for: currentTrack))
+      updateSignalPath(for: currentTrack)
+    }
     var queueChanged = false
     if activeQueuePlaylistId.isEmpty,
       (source == .echo || !powerampQueueManagedLocally),
@@ -1023,7 +1029,12 @@ final class EchoNativeAppStore {
     }
     outputMode = mode
     playerModel.outputMode = mode.rawValue
-    if let currentTrack { playerModel.tags = tags(for: currentTrack) }
+    if let currentTrack {
+      playerModel.tags = tags(for: currentTrack)
+      updateSignalPath(for: currentTrack)
+    } else {
+      clearSignalPath()
+    }
     if mode == .pc, previousMode == .phone, let currentTrack, currentTrack.source == .echo {
       audioEngine.pause()
       sendRemoteCommand([
@@ -1088,6 +1099,7 @@ final class EchoNativeAppStore {
     playerModel.positionMs = 0
     playerModel.tags = []
     playerModel.title = ""
+    clearSignalPath()
     clearExternalMetadataPicker()
     updateLoadingState()
     nowPlayingController.clear()
@@ -1105,6 +1117,7 @@ final class EchoNativeAppStore {
     playerModel.outputMode = outputMode.rawValue
     playerModel.tags = tags(for: track)
     playerModel.queueCount = queue.count
+    updateSignalPath(for: track)
   }
 
   private func publishNowPlaying() {
@@ -1266,6 +1279,7 @@ final class EchoNativeAppStore {
     pagesModel.equalizer.preset = preset
     persistent.settings.eqGains = gains
     persistent.settings.eqPreset = preset
+    playerModel.eqEnabled = gains.contains { abs($0) > 0.01 }
     audioEngine.setEq(gains: gains)
     persist(); renderPages()
   }
@@ -1799,7 +1813,7 @@ final class EchoNativeAppStore {
     guard let key = payload["key"] as? String, let enabled = payload["enabled"] as? Bool else { return }
     switch key {
     case "followSystemAppearance": persistent.settings.followSystemAppearance = enabled; playerModel.followSystemAppearance = enabled
-    case "loudness": persistent.settings.loudnessEnabled = enabled; audioEngine.setLoudness(enabled)
+    case "loudness": persistent.settings.loudnessEnabled = enabled; playerModel.loudnessEnabled = enabled; audioEngine.setLoudness(enabled)
     case "autoLyrics": persistent.settings.autoOpenLyricsForLocalTracks = enabled
     case "autoQueueImports": persistent.settings.autoQueueImportedLocalTracks = enabled
     case "confirmDelete": persistent.settings.confirmBeforeDeletingLocalTracks = enabled
@@ -2290,6 +2304,59 @@ final class EchoNativeAppStore {
     case .remote: return outputMode == .remoteStream ? .remoteStream : .remoteControl
     case .streaming: return .streaming
     }
+  }
+
+
+  private func updateSignalPath(for track: EchoNativeCoreTrack) {
+    playerModel.eqEnabled = playerModel.equalizer.gains.contains { abs($0) > 0.01 }
+    playerModel.loudnessEnabled = persistent.settings.loudnessEnabled
+    playerModel.signalCodec = track.codec?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+    playerModel.signalSampleRate = track.sampleRate.flatMap(sampleRateTag) ?? ""
+    playerModel.signalBitDepth = track.bitDepth.map { "\($0)Bit" } ?? ""
+    if let bitrate = track.bitrate, bitrate > 0 {
+      playerModel.signalBitrate = "\(bitrate >= 1000 ? bitrate / 1000 : bitrate)kbps"
+    } else {
+      playerModel.signalBitrate = ""
+    }
+    playerModel.signalSourceLabel = track.sourceLabel.isEmpty
+      ? (track.source == .local
+        ? localized("Local", "本地")
+        : track.source == .echo
+          ? "ECHO"
+          : track.source == .remote
+            ? "Poweramp"
+            : localized("NetEase", "网易云"))
+      : track.sourceLabel
+    switch outputMode {
+    case .pc:
+      playerModel.signalDeviceName = echoStatus?.device.name ?? ""
+      playerModel.signalRemoteOutput = echoStatus?.playback.outputMode ?? ""
+    case .phone:
+      playerModel.signalDeviceName = echoStatus?.device.name ?? ""
+      playerModel.signalRemoteOutput = localized("Streaming", "串流")
+    case .remoteControl:
+      playerModel.signalDeviceName = powerampStatus?.device.name ?? ""
+      playerModel.signalRemoteOutput = powerampStatus?.playback.outputMode ?? "Poweramp"
+    case .remoteStream:
+      playerModel.signalDeviceName = powerampStatus?.device.name ?? ""
+      playerModel.signalRemoteOutput = localized("Poweramp Stream", "Poweramp 串流")
+    case .streaming:
+      playerModel.signalDeviceName = neteaseProfile?.name ?? localized("NetEase", "网易云")
+      playerModel.signalRemoteOutput = localized("NetEase", "网易云")
+    case .local:
+      playerModel.signalDeviceName = localized("This iPhone", "本机 iPhone")
+      playerModel.signalRemoteOutput = "AVAudioEngine"
+    }
+  }
+
+  private func clearSignalPath() {
+    playerModel.signalBitDepth = ""
+    playerModel.signalBitrate = ""
+    playerModel.signalCodec = ""
+    playerModel.signalDeviceName = ""
+    playerModel.signalRemoteOutput = ""
+    playerModel.signalSampleRate = ""
+    playerModel.signalSourceLabel = ""
   }
 
   func tags(

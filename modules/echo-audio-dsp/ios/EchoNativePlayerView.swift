@@ -253,11 +253,13 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var controlsEnabled = false
   @Published var darkModeEnabled = false
   @Published var durationMs = 0.0
+  @Published var eqEnabled = false
   @Published var externalSourcePicker: EchoNativeExternalSourcePickerPayload?
   @Published var followSystemAppearance = true
   @Published var isFavorite = false
   @Published var isPlaying = false
   @Published var language = "zh"
+  @Published var loudnessEnabled = false
   @Published var lyricLines: [EchoNativeMetadataService.LyricLine] = []
   @Published var lyricsVisible = false
   @Published var metadataLoading = false
@@ -267,6 +269,13 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var queueCount = 0
   @Published var queuePayload: EchoNativeQueuePayload?
   @Published var showArtworkGlow = true
+  @Published var signalBitDepth = ""
+  @Published var signalBitrate = ""
+  @Published var signalCodec = ""
+  @Published var signalDeviceName = ""
+  @Published var signalRemoteOutput = ""
+  @Published var signalSampleRate = ""
+  @Published var signalSourceLabel = ""
   @Published var tags: [String] = []
   @Published var title = ""
   @Published var volume = 1.0
@@ -522,6 +531,7 @@ struct EchoNativePlayerScreen: View {
   @State private var lastLyricsInteraction = Date.distantPast
   @State private var showEqualizer = false
   @State private var showQueue = false
+  @State private var showSignalPath = false
   @State private var volumeValue = 1.0
 
   var body: some View {
@@ -544,6 +554,11 @@ struct EchoNativePlayerScreen: View {
     }
     .sheet(isPresented: $showQueue) {
       EchoNativeQueueSheet(model: model, onAction: onAction)
+        .echoMediumSheet()
+        .echoBlurredSheet()
+    }
+    .sheet(isPresented: $showSignalPath) {
+      EchoNativeSignalPathSheet(model: model)
         .echoMediumSheet()
         .echoBlurredSheet()
     }
@@ -981,6 +996,11 @@ struct EchoNativePlayerScreen: View {
 
   private var moreControls: some View {
     Menu {
+      Button {
+        showSignalPath = true
+      } label: {
+        Label(model.language == "en" ? "Signal path" : "信号路径", systemImage: "waveform.path.ecg")
+      }
       Button {
         showEqualizer = true
       } label: {
@@ -1789,6 +1809,221 @@ private final class EchoNativeLocalArtworkLoader: ObservableObject {
         }
       }
     }
+  }
+}
+
+
+private struct EchoNativeSignalPathSheet: View {
+  @ObservedObject var model: EchoNativePlayerModel
+  @Environment(\.dismiss) private var dismiss
+
+  private var english: Bool { model.language == "en" }
+
+  private var hasTrack: Bool {
+    !model.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private var usesLocalProcessing: Bool {
+    switch model.outputMode {
+    case "local", "phone", "remoteStream", "streaming": return true
+    default: return false
+    }
+  }
+
+  private var sourceSpec: String {
+    let parts = [model.signalCodec, model.signalSampleRate, model.signalBitDepth, model.signalBitrate]
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    return parts.isEmpty ? (english ? "Format unknown" : "格式未知") : parts.joined(separator: " · ")
+  }
+
+  private var summaryLabel: String {
+    if !hasTrack { return english ? "Waiting for playback" : "等待播放" }
+    if (model.outputMode == "pc" || model.outputMode == "phone") && !model.connectionOnline {
+      return english ? "Path error" : "链路异常"
+    }
+    if (model.outputMode == "remoteControl" || model.outputMode == "remoteStream") && !model.connectionOnline {
+      return english ? "Path error" : "链路异常"
+    }
+    if usesLocalProcessing && (model.eqEnabled || model.loudnessEnabled) {
+      return english ? "Enhanced" : "已增强"
+    }
+    if usesLocalProcessing {
+      return english ? "Native playback" : "原生播放"
+    }
+    return english ? "Remote path" : "远程链路"
+  }
+
+  private var summaryDetail: String {
+    if !hasTrack {
+      return english ? "Start a track to inspect source, processing, and output." : "开始播放后，可查看音源、处理和输出。"
+    }
+    if (model.outputMode == "pc" || model.outputMode == "phone" || model.outputMode == "remoteControl" || model.outputMode == "remoteStream") && !model.connectionOnline {
+      return model.connectionLabel
+    }
+    if usesLocalProcessing && model.eqEnabled && model.loudnessEnabled {
+      return english ? "EQ and loudness are active on this device." : "本机 EQ 与响度归一化已介入。"
+    }
+    if usesLocalProcessing && model.eqEnabled {
+      return english ? "EQ is active on this device." : "本机 EQ 已介入。"
+    }
+    if usesLocalProcessing && model.loudnessEnabled {
+      return english ? "Loudness normalization is active on this device." : "本机响度归一化已介入。"
+    }
+    if usesLocalProcessing {
+      return english ? "No local DSP modules are active." : "本机未开启额外 DSP。"
+    }
+    return english ? "Processing stays on the remote device." : "处理发生在远程设备端。"
+  }
+
+  private var sourceDetail: String {
+    if !hasTrack { return english ? "No current track" : "当前没有歌曲" }
+    let artist = model.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+    let source = model.signalSourceLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+    let base = artist.isEmpty ? model.title : "\(model.title) · \(artist)"
+    return source.isEmpty ? base : "\(base)\n\(source)"
+  }
+
+  private var processingDetail: String {
+    if !hasTrack { return english ? "—" : "—" }
+    if !usesLocalProcessing {
+      return english ? "Remote device owns DSP" : "DSP 由远程设备负责"
+    }
+    var modules: [String] = []
+    if model.eqEnabled { modules.append(english ? "10-band EQ" : "十段 EQ") }
+    if model.loudnessEnabled { modules.append(english ? "Loudness" : "响度归一化") }
+    return modules.isEmpty
+      ? (english ? "Direct / bypass" : "直通 / 旁路")
+      : modules.joined(separator: " + ")
+  }
+
+  private var outputTitle: String {
+    switch model.outputMode {
+    case "local": return english ? "Local output" : "本机输出"
+    case "pc": return english ? "ECHO control" : "ECHO 控制"
+    case "phone": return english ? "ECHO stream" : "ECHO 串流"
+    case "remoteControl": return english ? "Poweramp control" : "Poweramp 控制"
+    case "remoteStream": return english ? "Poweramp stream" : "Poweramp 串流"
+    case "streaming": return english ? "NetEase stream" : "网易云串流"
+    default: return english ? "Output" : "输出"
+    }
+  }
+
+  private var outputDetail: String {
+    var parts: [String] = []
+    let device = model.signalDeviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let remote = model.signalRemoteOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+    switch model.outputMode {
+    case "local":
+      parts.append(english ? "AVAudioEngine on this iPhone" : "本机 AVAudioEngine")
+    case "phone", "remoteStream", "streaming":
+      parts.append(english ? "Downloaded then played locally" : "先缓存再本机播放")
+    case "pc", "remoteControl":
+      parts.append(english ? "Remote device renders audio" : "远程设备负责发声")
+    default:
+      break
+    }
+    if !device.isEmpty { parts.append(device) }
+    if !remote.isEmpty { parts.append(remote) }
+    if model.outputMode == "pc" || model.outputMode == "phone" || model.outputMode == "remoteControl" || model.outputMode == "remoteStream" {
+      parts.append(model.connectionLabel)
+    }
+    return parts.isEmpty ? (english ? "Route unknown" : "路径未知") : parts.joined(separator: " · ")
+  }
+
+  private var tone: Color {
+    if !hasTrack { return echoInk.opacity(0.45) }
+    if (model.outputMode == "pc" || model.outputMode == "phone" || model.outputMode == "remoteControl" || model.outputMode == "remoteStream") && !model.connectionOnline {
+      return echoAccent
+    }
+    if usesLocalProcessing && (model.eqEnabled || model.loudnessEnabled) {
+      return echoGold
+    }
+    return echoInk.opacity(0.72)
+  }
+
+  var body: some View {
+    VStack(spacing: 16) {
+      HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(english ? "Signal path" : "信号路径")
+            .font(.system(size: 24, weight: .bold, design: .rounded))
+          Text(summaryDetail)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.55))
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        Spacer(minLength: 8)
+        Button {
+          dismiss()
+        } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 13, weight: .bold))
+            .frame(width: 44, height: 44)
+            .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(english ? "Close signal path" : "关闭信号路径")
+      }
+
+      VStack(alignment: .leading, spacing: 8) {
+        Text(summaryLabel)
+          .font(.system(size: 18, weight: .bold, design: .rounded))
+          .foregroundColor(tone)
+        Text(sourceSpec)
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundColor(echoInk.opacity(0.62))
+          .lineLimit(2)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(14)
+      .echoGlass(tint: Color.white.opacity(0.08), clear: false, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+      VStack(spacing: 10) {
+        signalNode(
+          index: "01",
+          title: english ? "Source" : "音源",
+          detail: sourceDetail
+        )
+        signalNode(
+          index: "02",
+          title: english ? "Processing" : "处理",
+          detail: processingDetail
+        )
+        signalNode(
+          index: "03",
+          title: outputTitle,
+          detail: outputDetail
+        )
+      }
+
+      Spacer(minLength: 0)
+    }
+    .padding(18)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    .background(echoWarmBackground.ignoresSafeArea())
+  }
+
+  private func signalNode(index: String, title: String, detail: String) -> some View {
+    HStack(alignment: .top, spacing: 12) {
+      Text(index)
+        .font(.system(size: 12, weight: .bold, design: .rounded))
+        .foregroundColor(echoAccent)
+        .frame(width: 28, height: 28)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+      VStack(alignment: .leading, spacing: 4) {
+        Text(title)
+          .font(.system(size: 13, weight: .bold))
+        Text(detail)
+          .font(.system(size: 12, weight: .medium))
+          .foregroundColor(echoInk.opacity(0.62))
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(14)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .echoGlass(tint: Color.white.opacity(0.07), clear: false, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
   }
 }
 
