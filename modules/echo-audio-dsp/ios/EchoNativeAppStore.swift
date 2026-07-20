@@ -7,6 +7,7 @@ struct EchoNativeLibraryCollectionsCacheKey: Equatable {
   let view: String
   let filter: String
   let query: String
+  let sort: String
   let language: String
 }
 
@@ -34,7 +35,8 @@ final class EchoNativeAppStore {
   var libraryQuery = ""
   var libraryPage = 0
   var libraryExpanded = false
-  var librarySort = "default"
+  var librarySort = "title"
+  var albumTrackSort = "default"
   var selectedCollectionId = ""
   var selectedPlaylistId = ""
   var activeQueuePlaylistId = ""
@@ -70,6 +72,7 @@ final class EchoNativeAppStore {
   var libraryTracksCache: [EchoNativeCoreTrack] = []
   var libraryIndexPayloadScope = ""
   var libraryIndexPayloadTitles: [String] = []
+  let libraryTextSortKeyCache = NSCache<NSString, NSString>()
   weak var presenter: UIViewController?
 
   private let audioEngine = DspPlaybackEngine()
@@ -264,7 +267,7 @@ final class EchoNativeAppStore {
       let source = (payload["source"] as? String).flatMap(EchoNativeTrackSource.init(rawValue:))
       if let playlistId = payload["playlistId"] as? String, !playlistId.isEmpty,
         let playlist = persistent.playlists.first(where: { $0.id == playlistId }) {
-        queue = resolvedTracks(playlist.tracks)
+        queue = sortedPlaylistTracks(resolvedTracks(playlist.tracks), by: payload["sort"] as? String)
         activeQueuePlaylistId = playlistId
       } else if action == "trackPlay" {
         activeQueuePlaylistId = ""
@@ -309,7 +312,12 @@ final class EchoNativeAppStore {
       libraryPage = 0
       renderPages()
     case "libraryAlbumSort":
-      librarySort = payload["selection"] as? String ?? "default"
+      albumTrackSort = payload["selection"] as? String ?? "default"
+      libraryPage = 0
+      renderPages()
+    case "librarySort":
+      librarySort = payload["selection"] as? String ?? "title"
+      libraryPage = 0
       renderPages()
     case "libraryCollectionSelect": selectCollection(payload)
     case "collectionPlay": playCollection(payload)
@@ -358,6 +366,7 @@ final class EchoNativeAppStore {
     case "playlistFavorite": mutatePlaylist(payload) { $0.favorite.toggle() }
     case "playlistAddTrack": addTrackToPlaylist(payload)
     case "playlistRemoveTrack": removeTrackFromPlaylist(payload)
+    case "playlistPlay": playPlaylist(payload)
     case "collectionPlaylistAdd": addCollectionToPlaylist(payload)
     case "collectionPlaylistCreate": createPlaylistFromCollection(payload)
     case "connectMode":
@@ -884,11 +893,19 @@ final class EchoNativeAppStore {
         }
       }
       do {
-        let remoteUrl = try await neteaseClient.playbackUrl(trackId: track.id)
-        let file = try await EchoNativeStreamCache.file(for: remoteUrl, track: track)
+        let detailedTrack = try? await neteaseClient.trackDetail(trackId: track.id)
+        var playbackTrack = detailedTrack.map(resolvedTrack) ?? track
+        if playbackTrack.artworkUrl?.isEmpty != false { playbackTrack.artworkUrl = track.artworkUrl }
         guard self.neteaseClient === neteaseClient, playbackGeneration == generation,
           currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
-        playFile(uri: file.absoluteString, track: track, positionMs: positionMs)
+        replaceTrack(playbackTrack)
+        currentTrack = playbackTrack
+        updatePlayerTrack(playbackTrack)
+        let remoteUrl = try await neteaseClient.playbackUrl(trackId: track.id)
+        let file = try await EchoNativeStreamCache.file(for: remoteUrl, track: playbackTrack)
+        guard self.neteaseClient === neteaseClient, playbackGeneration == generation,
+          currentTrack.map({ trackKey($0) }) == trackKey(playbackTrack) else { return }
+        playFile(uri: file.absoluteString, track: playbackTrack, positionMs: positionMs)
         if playerModel.isPlaying, let currentTrack { addRecent(currentTrack) }
       } catch {
         if self.neteaseClient === neteaseClient, playbackGeneration == generation { showError(error) }
@@ -1323,6 +1340,34 @@ final class EchoNativeAppStore {
     persistent.recentTracks.insert(track, at: 0)
     persistent.recentTracks = Array(persistent.recentTracks.prefix(100))
     persist()
+  }
+
+  private func playPlaylist(_ payload: [String: Any]) {
+    guard let id = payload["playlistId"] as? String,
+      let playlist = persistent.playlists.first(where: { $0.id == id }) else { return }
+    queue = sortedPlaylistTracks(resolvedTracks(playlist.tracks), by: payload["sort"] as? String)
+    guard let first = queue.first else { return }
+    activeQueuePlaylistId = id
+    play(first)
+    playerModel.activePage = "control"
+    renderPages()
+  }
+
+  private func sortedPlaylistTracks(_ tracks: [EchoNativeCoreTrack], by sort: String?) -> [EchoNativeCoreTrack] {
+    switch sort {
+    case "title": return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    case "artist": return tracks.sorted {
+      let order = $0.artist.localizedStandardCompare($1.artist)
+      return order == .orderedAscending
+        || (order == .orderedSame && $0.title.localizedStandardCompare($1.title) == .orderedAscending)
+    }
+    case "duration": return tracks.sorted {
+      $0.durationMs == $1.durationMs
+        ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        : $0.durationMs < $1.durationMs
+    }
+    default: return tracks
+    }
   }
 
   private func createPlaylist(_ payload: [String: Any]) {
@@ -1920,7 +1965,7 @@ final class EchoNativeAppStore {
   private func selectCollection(_ payload: [String: Any]) {
     selectedCollectionId = payload["id"] as? String ?? ""
     libraryQuery = payload["text"] as? String ?? ""
-    librarySort = payload["selection"] as? String ?? librarySort
+    albumTrackSort = payload["selection"] as? String ?? albumTrackSort
     libraryPage = 0
     guard let albumId = echoAlbumId(from: selectedCollectionId), let echoClient else {
       renderPages()
@@ -1965,7 +2010,10 @@ final class EchoNativeAppStore {
 
   private func playCollection(_ payload: [String: Any]) {
     var values = selectedCollectionTracks()
-    if payload["selection"] as? String == "track" { values = albumOrdered(values) }
+    let sort = payload["selection"] as? String ?? albumTrackSort
+    values = sort == "default" || sort == "track"
+      ? albumOrdered(values)
+      : sortedPlaylistTracks(values, by: sort)
     guard let first = values.first else { return }
     activeQueuePlaylistId = ""
     queue = values
@@ -1992,6 +2040,7 @@ final class EchoNativeAppStore {
       if lyrics.isEmpty, let raw = track.lyricsUrl, let url = URL(string: raw) { lyrics = (try? String(contentsOf: url, encoding: .utf8)) ?? "" }
       if lyrics.isEmpty, track.source == .echo { lyrics = (try? await echoClient?.lyrics(trackId: track.id)) ?? "" }
       if lyrics.isEmpty, track.source == .remote { lyrics = (try? await powerampClient?.lyrics(trackId: track.id)) ?? "" }
+      if lyrics.isEmpty, track.source == .streaming { lyrics = (try? await neteaseClient?.lyrics(trackId: track.id)) ?? "" }
       guard lyricsGeneration == generation, currentTrack.map({ trackKey($0) }) == trackKey(track) else { return }
       let lines = EchoNativeMetadataService.parseLyrics(lyrics)
       playerModel.lyricLines = lines
@@ -2644,9 +2693,15 @@ final class EchoNativeAppStore {
 
   func albumOrdered(_ tracks: [EchoNativeCoreTrack]) -> [EchoNativeCoreTrack] {
     tracks.sorted {
-      if ($0.discNo ?? 1) != ($1.discNo ?? 1) { return ($0.discNo ?? 1) < ($1.discNo ?? 1) }
-      if ($0.trackNo ?? Int.max) != ($1.trackNo ?? Int.max) { return ($0.trackNo ?? Int.max) < ($1.trackNo ?? Int.max) }
-      return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+      let leftDisc = ($0.discNo ?? 1) > 0 ? ($0.discNo ?? 1) : 1
+      let rightDisc = ($1.discNo ?? 1) > 0 ? ($1.discNo ?? 1) : 1
+      if leftDisc != rightDisc { return leftDisc < rightDisc }
+      let leftTrack = ($0.trackNo ?? 0) > 0 ? ($0.trackNo ?? 0) : Int.max
+      let rightTrack = ($1.trackNo ?? 0) > 0 ? ($1.trackNo ?? 0) : Int.max
+      if leftTrack != rightTrack { return leftTrack < rightTrack }
+      let titleOrder = $0.title.localizedStandardCompare($1.title)
+      if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+      return $0.id < $1.id
     }
   }
 

@@ -379,6 +379,7 @@ struct EchoNativePagesScreen: View {
   @State private var pendingLibraryPageScroll = false
   @State private var pendingAlbumScroll = false
   @AppStorage("echo.library.albumTrackSort") private var albumTrackSort = "default"
+  @AppStorage("echo.library.trackSort") private var libraryTrackSort = "title"
   @AppStorage("echo.library.echoDisplayMode") private var trackDisplayMode = "list"
   @AppStorage("echo.library.collectionDisplayMode") private var collectionDisplayMode = "grid"
   @AppStorage("echo.library.streamingPlaylistDisplayMode") private var streamingPlaylistDisplayMode = "grid"
@@ -600,10 +601,11 @@ struct EchoNativePagesScreen: View {
         ? displayedStreamingPlaylists.isEmpty
         : library.tracks.isEmpty
     )
-    let sortedTracks = sortedAlbumTracks(library.tracks)
+    let sortedTracks = library.tracks
+    let activeTrackSort = selectedCollectionIsAlbum ? albumTrackSort : libraryTrackSort
     let streamingPlaylistIndexKeys = displayedStreamingPlaylists.map { libraryIndexKey($0.name) }
     let collectionIndexKeys = library.collections.map { libraryIndexKey($0.title) }
-    let trackIndexKeys = sortedTracks.map { libraryIndexKey($0.title) }
+    let trackIndexKeys = sortedTracks.map { libraryIndexKey(activeTrackSort == "artist" ? $0.artist : $0.title) }
     // ponytail: Pages are capped at 20 items; firstIndex keeps anchor IDs unique without more state.
     let firstRowId = (
       streamingPlaylistIndexKeys.first
@@ -611,6 +613,7 @@ struct EchoNativePagesScreen: View {
         ?? trackIndexKeys.first
     ).map { libraryIndexAnchor(forKey: $0, scope: library.paginationScope, page: library.pagination.page) }
     let pageFirstRowId = "library-page-first-\(library.paginationScope)-\(library.pagination.page)"
+    let scrollTopId = "library-scroll-top-\(page)"
     let canPaginate = library.pagination.totalCount > library.pagination.pageSize
     let paginationExpansionLabel = !selectedAlbumId.isEmpty && selectedCollectionIsAlbum
       ? (model.payload?.language == "en"
@@ -621,13 +624,15 @@ struct EchoNativePagesScreen: View {
         : "展开全部 \(library.pagination.totalCount) 项并分页浏览")
     let chronologicalView = library.view == "recent"
       || (library.source == "streaming" && library.streaming.libraryMode == "history")
-    let indexTargets = !chronologicalView
-      && (selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title")
+    let indexTargets = (activeTrackSort != "duration" || !library.collections.isEmpty
+      || (library.streaming.libraryMode == "playlists" && library.streaming.selectedPlaylistId.isEmpty)) && !chronologicalView
+      && (selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title" || albumTrackSort == "artist")
       ? model.libraryIndexTargets
       : []
     return ScrollViewReader { proxy in
       ScrollView(showsIndicators: false) {
         LazyVStack(alignment: .leading, spacing: 14) {
+        Color.clear.frame(height: 0).id(scrollTopId)
         if !searchOnly {
           EchoNativeSegmentedControl(
             options: library.sourceOptions,
@@ -950,9 +955,11 @@ struct EchoNativePagesScreen: View {
               .font(.system(size: 18, weight: .bold, design: .rounded))
               .lineLimit(1)
             Spacer(minLength: 8)
-            if !selectedAlbumId.isEmpty && selectedCollectionIsAlbum {
+            if selectedCollectionIsAlbum {
               albumPlayMenu
               albumSortMenu
+            } else {
+              librarySortMenu
             }
             EchoNativeDisplayModeButton(mode: trackDisplayMode, language: model.payload?.language ?? "zh") {
               trackDisplayMode = trackDisplayMode == "grid" ? "list" : "grid"
@@ -1000,12 +1007,17 @@ struct EchoNativePagesScreen: View {
                 .foregroundColor(echoAccent.opacity(0.78))
                 .padding(.top, index == 0 ? 2 : 10)
             }
-            if !selectedAlbumId.isEmpty, let discNo = track.discNo,
-              index == 0 || sortedTracks[index - 1].discNo != discNo {
+            if selectedCollectionIsAlbum {
+              let discNo = (track.discNo ?? 1) > 0 ? (track.discNo ?? 1) : 1
+              let previousDiscNo: Int? = index > 0
+                ? ((sortedTracks[index - 1].discNo ?? 1) > 0 ? (sortedTracks[index - 1].discNo ?? 1) : 1)
+                : nil
+              if index == 0 || previousDiscNo != discNo {
               Text("DISC \(discNo)")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(echoInk.opacity(0.58))
                 .padding(.top, index == 0 ? 2 : 12)
+              }
             }
             libraryTrackRow(track, labels: library.labels)
               .id(trackIndexKeys.firstIndex(of: trackIndexKeys[index]) == index
@@ -1065,15 +1077,23 @@ struct EchoNativePagesScreen: View {
         }
         guard pendingLibraryPageScroll else { return }
         pendingLibraryPageScroll = false
-        DispatchQueue.main.async { scrollToLibraryAnchor(pageFirstRowId, proxy: proxy) }
+        DispatchQueue.main.async { proxy.scrollTo(scrollTopId, anchor: .top) }
       }
       .onChange(of: "\(library.paginationScope)::\(firstRowId ?? "")") { _ in
         guard pendingAlbumScroll else { return }
         pendingAlbumScroll = false
         guard firstRowId != nil else { return }
-        DispatchQueue.main.async { scrollToLibraryAnchor(pageFirstRowId, proxy: proxy) }
+        DispatchQueue.main.async { proxy.scrollTo(scrollTopId, anchor: .top) }
+      }
+      .onChange(of: library.paginationScope) { _ in
+        DispatchQueue.main.async { proxy.scrollTo(scrollTopId, anchor: .top) }
       }
       .onChange(of: "\(library.source)::\(library.view)") { _ in clearAlbumSelection() }
+      .onAppear {
+        if !selectedCollectionIsAlbum {
+          onAction(["action": "librarySort", "selection": libraryTrackSort])
+        }
+      }
     }
   }
 
@@ -1249,6 +1269,7 @@ struct EchoNativePagesScreen: View {
         onAction([
           "action": "collectionPlay",
           "id": selectedAlbumId,
+          "selection": albumTrackSort,
           "source": source,
         ])
       } label: {
@@ -1324,35 +1345,29 @@ struct EchoNativePagesScreen: View {
     .accessibilityLabel(model.payload?.language == "en" ? "Sort album tracks" : "专辑歌曲排序")
   }
 
-  private func sortedAlbumTracks(_ tracks: [EchoNativeLibraryTrack]) -> [EchoNativeLibraryTrack] {
-    guard selectedCollectionIsAlbum else { return tracks }
-    switch albumTrackSort {
-    case "track":
-      return tracks.sorted {
-        let discOrder = ($0.discNo ?? 1) - ($1.discNo ?? 1)
-        if discOrder != 0 { return discOrder < 0 }
-        let trackOrder = ($0.trackNo ?? Int.max) - ($1.trackNo ?? Int.max)
-        return trackOrder == 0
-          ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
-          : trackOrder < 0
+  private var librarySortMenu: some View {
+    Menu {
+      Picker(
+        model.payload?.language == "en" ? "Sort tracks" : "歌曲排序",
+        selection: Binding(
+          get: { libraryTrackSort },
+          set: { value in
+            libraryTrackSort = value
+            onAction(["action": "librarySort", "selection": value])
+          }
+        )
+      ) {
+        Label(model.payload?.language == "en" ? "Title" : "歌名", systemImage: "textformat").tag("title")
+        Label(model.payload?.language == "en" ? "Artist" : "艺术家", systemImage: "person").tag("artist")
+        Label(model.payload?.language == "en" ? "Duration" : "时长", systemImage: "clock").tag("duration")
       }
-    case "title":
-      return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-    case "artist":
-      return tracks.sorted {
-        let order = $0.artist.localizedStandardCompare($1.artist)
-        return order == .orderedAscending
-          || (order == .orderedSame && $0.title.localizedStandardCompare($1.title) == .orderedAscending)
-      }
-    case "duration":
-      return tracks.sorted {
-        $0.durationMs == $1.durationMs
-          ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
-          : $0.durationMs < $1.durationMs
-      }
-    default:
-      return tracks
+    } label: {
+      Image(systemName: "arrow.up.arrow.down")
+        .font(.system(size: 13, weight: .bold))
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
     }
+    .accessibilityLabel(model.payload?.language == "en" ? "Sort tracks" : "歌曲排序")
   }
 
   private func clearAlbumSelection() {
@@ -1417,10 +1432,13 @@ struct EchoNativePagesScreen: View {
     _ track: EchoNativeLibraryTrack,
     labels: EchoNativeLibraryLabels
   ) -> some View {
-    EchoNativeMediaGridCard(
+    let discSubtitle = selectedCollectionIsAlbum
+      ? "DISC \((track.discNo ?? 1) > 0 ? (track.discNo ?? 1) : 1) · \(track.artist)"
+      : track.artist
+    return EchoNativeMediaGridCard(
       artworkUrl: track.artworkUrl,
       title: track.title,
-      subtitle: track.artist,
+      subtitle: discSubtitle,
       onArtworkError: { onAction(["action": "artworkError", "url": track.artworkUrl]) },
       onSelect: { onAction(["action": "trackPlay", "id": track.id, "source": track.source]) }
     ) {
@@ -2460,10 +2478,29 @@ private struct EchoNativePlaylistDetailSheet: View {
   let playlistId: String
   let onAction: ([String: Any]) -> Void
   @Environment(\.dismiss) private var dismiss
+  @AppStorage("echo.library.playlistTrackSort") private var playlistTrackSort = "default"
 
   private var playlist: EchoNativePlaylist? {
     model.payload?.library?.selectedPlaylist
       ?? model.payload?.library?.playlists.first(where: { $0.id == playlistId })
+  }
+
+  private var sortedTracks: [EchoNativeLibraryTrack] {
+    guard let tracks = playlist?.tracks else { return [] }
+    switch playlistTrackSort {
+    case "title": return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    case "artist": return tracks.sorted {
+      let order = $0.artist.localizedStandardCompare($1.artist)
+      return order == .orderedAscending
+        || (order == .orderedSame && $0.title.localizedStandardCompare($1.title) == .orderedAscending)
+    }
+    case "duration": return tracks.sorted {
+      $0.durationMs == $1.durationMs
+        ? $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        : $0.durationMs < $1.durationMs
+    }
+    default: return tracks
+    }
   }
 
   var body: some View {
@@ -2477,14 +2514,13 @@ private struct EchoNativePlaylistDetailSheet: View {
             .foregroundColor(echoInk.opacity(0.5))
         }
         Spacer()
-        if let playlist, let firstTrack = playlist.tracks.first {
+        if let playlist, !sortedTracks.isEmpty {
           Button {
             dismiss()
             onAction([
-              "action": "trackPlay",
-              "id": firstTrack.id,
+              "action": "playlistPlay",
               "playlistId": playlist.id,
-              "source": firstTrack.source,
+              "sort": playlistTrackSort,
             ])
           } label: {
             Image(systemName: "play.fill")
@@ -2493,7 +2529,26 @@ private struct EchoNativePlaylistDetailSheet: View {
               .echoGlass(tint: echoAccent.opacity(0.09), in: Circle())
           }
           .buttonStyle(.plain)
-          .accessibilityLabel(model.payload?.language == "en" ? "Play playlist" : "播放歌单")
+          .accessibilityLabel(model.payload?.language == "en" ? "Play all" : "播放全部")
+        }
+        if !sortedTracks.isEmpty {
+          Menu {
+            Picker(
+              model.payload?.language == "en" ? "Sort tracks" : "歌曲排序",
+              selection: $playlistTrackSort
+            ) {
+              Label(model.payload?.language == "en" ? "Playlist order" : "歌单顺序", systemImage: "list.number").tag("default")
+              Label(model.payload?.language == "en" ? "Title" : "歌名", systemImage: "textformat").tag("title")
+              Label(model.payload?.language == "en" ? "Artist" : "艺术家", systemImage: "person").tag("artist")
+              Label(model.payload?.language == "en" ? "Duration" : "时长", systemImage: "clock").tag("duration")
+            }
+          } label: {
+            Image(systemName: "arrow.up.arrow.down")
+              .font(.system(size: 13, weight: .bold))
+              .frame(width: 44, height: 44)
+              .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+          }
+          .accessibilityLabel(model.payload?.language == "en" ? "Sort playlist" : "歌单排序")
         }
         Button {
           onAction(["action": "playlistClose"])
@@ -2507,10 +2562,10 @@ private struct EchoNativePlaylistDetailSheet: View {
         .buttonStyle(.plain)
       }
 
-      if let playlist, !playlist.tracks.isEmpty {
+      if let playlist, !sortedTracks.isEmpty {
         ScrollView(showsIndicators: false) {
           LazyVStack(spacing: 0) {
-            ForEach(Array(playlist.tracks.enumerated()), id: \.element.stableId) { _, track in
+            ForEach(Array(sortedTracks.enumerated()), id: \.element.stableId) { _, track in
               HStack(spacing: 11) {
                 Button {
                   dismiss()
@@ -2518,6 +2573,7 @@ private struct EchoNativePlaylistDetailSheet: View {
                     "action": "trackPlay",
                     "id": track.id,
                     "playlistId": playlist.id,
+                    "sort": playlistTrackSort,
                     "source": track.source,
                   ])
                 } label: {

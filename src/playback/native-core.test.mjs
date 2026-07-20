@@ -66,6 +66,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(store, /streamingSnapshots\[key\] \?\? track\(forKey: key\)/u);
   assert.match(store, /if mode != \.streaming \{ addRecent\(track\) \}/u);
   assert.match(store.slice(metadataRefreshStart, artworkLookupStart), /guard track\.source != \.streaming else \{ return \}/u);
+  assert.match(store, /track\.source == \.streaming \{ lyrics = \(try\? await neteaseClient\?\.lyrics/u);
+  assert.match(store, /neteaseClient\.trackDetail\(trackId: track\.id\)/u);
   assert.match(store.slice(artworkLookupStart, store.indexOf('private func resetLibraryArtworkLookup')), /guard track\.source != \.streaming else \{ return false \}/u);
   assert.match(store, /streamingSearchStatus = errorMessage\(error\)/u);
   assert.match(store, /value\.hasPrefix\("MUSIC_U="\)/u);
@@ -76,6 +78,9 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(payload, /if source == "echo", libraryView == "albums"/u);
   assert.match(payload, /let id = "echo:album-id:\\\(album\.id\)"/u);
   assert.match(payload, /option\("history", localized\("History", "历史"\)\)/u);
+  assert.match(payload, /case "artist": return sortedByText\(\\\.artist, tie: \\\.title\)/u);
+  assert.match(payload, /case "duration": return tracks\.sorted/u);
+  assert.match(payload, /\(65\.\.\.90\)\.contains/u);
   assert.match(collectionsForCurrentView, /let key = normalized\(title\)/u);
   assert.match(collectionsForCurrentView, /formUnion\(trackArtistComparisonValues\(track\.artist\)\)/u);
   assert.doesNotMatch(collectionsForCurrentView, /albumArtist/u);
@@ -92,6 +97,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(payload, /toggle\("playerOutputInMenu"/u);
   assert.match(coreTypes, /var showPlayerOutputInMenu = false/u);
   assert.match(player, /Label\(model\.language == "en" \? "Signal path" : "信号路径"/u);
+  assert.match(player, /EchoNativeSignalPathSheet\(model: model, onAction: onAction\)[\s\S]*?\.echoMediumSheet\(\)/u);
   assert.match(player, /struct EchoNativeSignalPathSheet/u);
   assert.match(store, /private func updateSignalPath\(for track: EchoNativeCoreTrack\)/u);
   assert.match(player, /"Signal theater" : "信号剧场"/u);
@@ -139,7 +145,10 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(pages, /pendingLibraryPageScroll = true/u);
   assert.match(pages, /libraryMode == "playlists" && library\.streaming\.selectedPlaylistId\.isEmpty/u);
   assert.match(pages, /DispatchQueue\.main\.async \{ scrollToLibraryIndex\(target, proxy: proxy\) \}/u);
-  assert.equal((pages.match(/scrollToLibraryAnchor\(pageFirstRowId, proxy: proxy\)/gu) ?? []).length, 2);
+  assert.equal((pages.match(/proxy\.scrollTo\(scrollTopId, anchor: \.top\)/gu) ?? []).length, 3);
+  assert.match(pages, /private var librarySortMenu: some View/u);
+  assert.ok(pages.includes('Text("DISC \\(discNo)")'));
+  assert.match(pages, /"action": "playlistPlay"/u);
   assert.equal((pages.match(/\.firstIndex\(of:/gu) ?? []).length, 6);
   assert.match(pages, /\.offset\(x: 11\)/u);
   assert.match(pages, /libraryTrackMenu\(track, labels: labels\)/u);
@@ -148,6 +157,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(remoteClients, /secureMediaUrl\(value\.avatarUrl\)/u);
   assert.match(remoteClients, /host == "music\.126\.net" \|\| host\.hasSuffix\("\.music\.126\.net"\)/u);
   assert.match(remoteClients, /path: "\/api\/song\/enhance\/player\/url"/u);
+  assert.match(remoteClients, /func trackDetail\(trackId: String\)/u);
+  assert.match(remoteClients, /path: direct \? "\/api\/song\/lyric" : "\/lyric"/u);
   assert.match(remoteClients, /func albumTracks\(albumId: String\)[\s\S]*library\/albums\/\\\(encodedPathComponent\(albumId\)\)\/tracks/u);
   assert.match(store, /echoClient\.albumTracks\(albumId: albumId\)/u);
   assert.match(store, /loadedAlbumTracks[\s\S]*refreshedTracks \+ loadedAlbumTracks\.filter/u);

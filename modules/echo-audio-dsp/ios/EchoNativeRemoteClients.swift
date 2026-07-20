@@ -325,6 +325,37 @@ final class EchoNativeNeteaseClient: @unchecked Sendable {
     return tracks
   }
 
+  func trackDetail(trackId: String) async throws -> EchoNativeCoreTrack {
+    struct Response: Decodable { let songs: [Song]? }
+    let response: Response
+    if direct {
+      guard let id = Int64(trackId) else { throw EchoNativeNetworkError.invalidResponse }
+      let data = try JSONSerialization.data(withJSONObject: [["id": id]])
+      response = try await request(
+        path: "/api/v3/song/detail",
+        values: ["c": String(data: data, encoding: .utf8) ?? "[]"]
+      )
+    } else {
+      response = try await request(path: "/song/detail", values: ["ids": trackId])
+    }
+    guard let track = response.songs?.first?.track else { throw EchoNativeNetworkError.invalidResponse }
+    return track
+  }
+
+  func lyrics(trackId: String) async throws -> String {
+    struct Response: Decodable {
+      struct Lyrics: Decodable { let lyric: String? }
+      let lrc: Lyrics?
+    }
+    let response: Response = try await request(
+      path: direct ? "/api/song/lyric" : "/lyric",
+      values: direct
+        ? ["id": trackId, "lv": "-1", "kv": "-1", "tv": "-1"]
+        : ["id": trackId]
+    )
+    return response.lrc?.lyric ?? ""
+  }
+
   func playbackUrl(trackId: String) async throws -> URL {
     struct Response: Decodable { struct Value: Decodable { let url: String? }; let data: [Value]? }
     let response: Response

@@ -153,10 +153,13 @@ extension EchoNativeAppStore {
         return collectionTrackKeys[id]?.lazy.compactMap(track(forKey:)).first
       }
     scheduleLibraryArtworkLookup(artworkLookupTracks)
+    let activeSort = activeLibrarySort()
     let indexTitles = showingStreamingPlaylists
       ? allStreamingPlaylists.map(\.name)
-      : collections.isEmpty ? fullTracks.map(\.title) : collections.map { $0["title"] as? String ?? "" }
-    let paginationScope = "\(source):\(libraryView):\(libraryFilter):\(selectedCollectionId):\(streamingLibraryMode):\(selectedStreamingPlaylistId)"
+      : collections.isEmpty
+        ? fullTracks.map { activeSort == "artist" ? $0.artist : $0.title }
+        : collections.map { $0["title"] as? String ?? "" }
+    let paginationScope = "\(source):\(libraryView):\(libraryFilter):\(selectedCollectionId):\(streamingLibraryMode):\(selectedStreamingPlaylistId):\(activeSort):\(libraryQuery)"
     let indexTitlesPayload: Any
     if paginationScope != libraryIndexPayloadScope || indexTitles != libraryIndexPayloadTitles {
       libraryIndexPayloadScope = paginationScope
@@ -244,19 +247,64 @@ extension EchoNativeAppStore {
   }
 
   private func sortLibraryTracks(_ tracks: [EchoNativeCoreTrack]) -> [EchoNativeCoreTrack] {
-    guard !selectedCollectionId.isEmpty else {
-      return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    func sortedByText(
+      _ primary: KeyPath<EchoNativeCoreTrack, String>,
+      tie secondary: KeyPath<EchoNativeCoreTrack, String>
+    ) -> [EchoNativeCoreTrack] {
+      var keys: [String: (String, String)] = [:]
+      for track in tracks {
+        keys[trackKey(track)] = (
+          libraryTextSortKey(track[keyPath: primary]),
+          libraryTextSortKey(track[keyPath: secondary])
+        )
+      }
+      return tracks.sorted {
+        let left = keys[trackKey($0)] ?? ("", "")
+        let right = keys[trackKey($1)] ?? ("", "")
+        let order = left.0.localizedStandardCompare(right.0)
+        return order == .orderedAscending
+          || (order == .orderedSame && left.1.localizedStandardCompare(right.1) == .orderedAscending)
+      }
     }
-    if selectedCollectionId.contains("-artist:") {
-      return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-    }
-    switch librarySort {
+    switch activeLibrarySort() {
     case "track": return albumOrdered(tracks)
-    case "title": return tracks.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-    case "artist": return tracks.sorted { $0.artist.localizedStandardCompare($1.artist) == .orderedAscending }
-    case "duration": return tracks.sorted { $0.durationMs < $1.durationMs }
+    case "title": return sortedByText(\.title, tie: \.artist)
+    case "artist": return sortedByText(\.artist, tie: \.title)
+    case "duration": return tracks.sorted {
+      $0.durationMs == $1.durationMs
+        ? compareLibraryText($0.title, $1.title)
+        : $0.durationMs < $1.durationMs
+    }
     default: return albumOrdered(tracks)
     }
+  }
+
+  private func activeLibrarySort() -> String {
+    !selectedCollectionId.isEmpty && !selectedCollectionId.contains("-artist:")
+      ? albumTrackSort
+      : librarySort
+  }
+
+  private func compareLibraryText(_ left: String, _ right: String, tie leftTie: String = "", _ rightTie: String = "") -> Bool {
+    let leftKey = libraryTextSortKey(left)
+    let rightKey = libraryTextSortKey(right)
+    let order = leftKey.localizedStandardCompare(rightKey)
+    if order != .orderedSame { return order == .orderedAscending }
+    return leftTie.localizedStandardCompare(rightTie) == .orderedAscending
+  }
+
+  private func libraryTextSortKey(_ value: String) -> String {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let cached = libraryTextSortKeyCache.object(forKey: normalized as NSString) { return cached as String }
+    let key = NSMutableString(string: normalized)
+    CFStringTransform(key, nil, kCFStringTransformToLatin, false)
+    CFStringTransform(key, nil, kCFStringTransformStripCombiningMarks, false)
+    let raw = key as String
+    let first = raw.uppercased().unicodeScalars.first
+    let isLetter = first.map { (65...90).contains(Int($0.value)) } ?? false
+    let result = (isLetter ? "0" : "1") + raw
+    libraryTextSortKeyCache.setObject(result as NSString, forKey: normalized as NSString)
+    return result
   }
 
   private func derivedLibraryTracks(_ tracks: [EchoNativeCoreTrack], source: String) -> [EchoNativeCoreTrack] {
@@ -284,6 +332,7 @@ extension EchoNativeAppStore {
       view: libraryView,
       filter: libraryFilter,
       query: libraryQuery,
+      sort: activeLibrarySort(),
       language: persistent.settings.language
     )
   }
@@ -317,7 +366,7 @@ extension EchoNativeAppStore {
           "subtitle": localized("\(album.trackCount) tracks", "\(album.trackCount) 首"),
           "title": album.title,
         ]
-      }.sorted { ($0["title"] as? String ?? "").localizedStandardCompare($1["title"] as? String ?? "") == .orderedAscending }
+      }.sorted { compareLibraryText($0["title"] as? String ?? "", $1["title"] as? String ?? "") }
       collectionTrackKeys = nextKeys
       libraryCollectionsCacheKey = cacheKey
       libraryCollectionsCache = values
@@ -424,7 +473,7 @@ extension EchoNativeAppStore {
         "subtitle": localized("\(values.count) tracks", "\(values.count) 首"),
         "title": title,
       ]
-    }.sorted { ($0["title"] as? String ?? "").localizedStandardCompare($1["title"] as? String ?? "") == .orderedAscending }
+    }.sorted { compareLibraryText($0["title"] as? String ?? "", $1["title"] as? String ?? "") }
     collectionTrackKeys = nextKeys
     libraryCollectionsCacheKey = cacheKey
     libraryCollectionsCache = values
@@ -549,9 +598,11 @@ extension EchoNativeAppStore {
 
   private func sortedStreamingPlaylists() -> [EchoNativeNeteaseClient.Playlist] {
     neteasePlaylists.sorted {
+      let nameOrder = libraryTextSortKey($0.name).localizedStandardCompare(libraryTextSortKey($1.name))
+      if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
       let leftPinned = streamingPinnedPlaylistIds.contains($0.id)
       let rightPinned = streamingPinnedPlaylistIds.contains($1.id)
-      return leftPinned == rightPinned ? $0.name.localizedStandardCompare($1.name) == .orderedAscending : leftPinned
+      return leftPinned == rightPinned ? $0.id < $1.id : leftPinned
     }
   }
 

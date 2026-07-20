@@ -599,7 +599,7 @@ struct EchoNativePlayerScreen: View {
     }
     .sheet(isPresented: $showSignalPath) {
       EchoNativeSignalPathSheet(model: model, onAction: onAction)
-        .echoLargeSheet()
+        .echoMediumSheet()
         .echoBlurredSheet()
     }
     .onAppear {
