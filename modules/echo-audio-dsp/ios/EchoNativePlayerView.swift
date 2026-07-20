@@ -938,7 +938,7 @@ struct EchoNativePlayerScreen: View {
 
   private func secondaryControls(lyricsMode: Bool, compact: Bool) -> some View {
     echoGlassGroup(spacing: 8) {
-      HStack(spacing: compact ? 4 : 10) {
+      HStack(spacing: compact ? 12 : 20) {
         iconButton(
           symbol: playbackModeSymbol,
           label: model.language == "en" ? "Playback mode" : "播放模式",
