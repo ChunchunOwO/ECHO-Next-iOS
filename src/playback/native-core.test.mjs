@@ -27,6 +27,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   const artistNamesStart = payload.indexOf('private func artistNames');
   const albumArtworkStart = store.indexOf('private func albumArtwork');
   const normalizedMetadataStart = store.indexOf('private func normalizedMetadataValue');
+  const metadataRefreshStart = store.indexOf('private func refreshExternalMetadata');
+  const artworkLookupStart = store.indexOf('func scheduleLibraryArtworkLookup');
 
   assert.ok(themedTabStart >= 0 && titleStart > themedTabStart);
   assert.ok(lyricsScrollerStart >= 0 && lyricAccessibilityStart > lyricsScrollerStart);
@@ -60,6 +62,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(store, /persistent\.streamingQueueTracks = queue\.filter \{ \$0\.source == \.streaming \}/u);
   assert.match(store, /streamingSnapshots\[key\] \?\? track\(forKey: key\)/u);
   assert.match(store, /if mode != \.streaming \{ addRecent\(track\) \}/u);
+  assert.match(store.slice(metadataRefreshStart, artworkLookupStart), /guard track\.source != \.streaming else \{ return \}/u);
+  assert.match(store.slice(artworkLookupStart, store.indexOf('private func resetLibraryArtworkLookup')), /guard track\.source != \.streaming else \{ return false \}/u);
   assert.match(store, /streamingSearchStatus = errorMessage\(error\)/u);
   assert.match(store, /value\.hasPrefix\("MUSIC_U="\)/u);
   assert.match(payload, /let showingCollections = selectedTracks == nil/u);
@@ -91,6 +95,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(lyricsScroller, /if timeMs >= 0 \{/u);
   assert.doesNotMatch(lyricsScroller, /timeMs >= 0 && !active/u);
   assert.match(pages, /pendingLibraryPageScroll = true/u);
+  assert.match(pages, /libraryMode == "playlists" && library\.streaming\.selectedPlaylistId\.isEmpty/u);
   assert.match(pages, /DispatchQueue\.main\.async \{ scrollToLibraryIndex\(target, proxy: proxy\) \}/u);
   assert.equal((pages.match(/scrollToLibraryAnchor\(pageFirstRowId, proxy: proxy\)/gu) ?? []).length, 2);
   assert.equal((pages.match(/\.firstIndex\(of:/gu) ?? []).length, 6);

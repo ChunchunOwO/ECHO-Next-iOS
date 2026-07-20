@@ -1915,6 +1915,7 @@ final class EchoNativeAppStore {
 
   private func refreshExternalMetadata(manual: Bool) {
     guard let track = currentTrack else { return }
+    guard track.source != .streaming else { return }
     let key = trackKey(track)
     let settings = persistent.settings
     let hasExistingMetadata = track.artworkUrl?.isEmpty == false || track.hasLyrics
@@ -1971,6 +1972,7 @@ final class EchoNativeAppStore {
 
     let pending = tracks.map(resolvedTrack).filter { track in
       let key = trackKey(track)
+      guard track.source != .streaming else { return false }
       guard track.artworkUrl?.isEmpty != false, !libraryArtworkLookupKeys.contains(key) else { return false }
       return !settings.externalMetadataSkipExisting || !track.hasLyrics
     }

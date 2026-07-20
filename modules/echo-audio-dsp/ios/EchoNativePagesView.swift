@@ -596,7 +596,7 @@ struct EchoNativePagesScreen: View {
         playlist.name.lowercased().contains(normalizedQuery)
     }
     let streamingContentEmpty = library.streaming.loggedIn && (
-      library.streaming.libraryMode == "playlists"
+      library.streaming.libraryMode == "playlists" && library.streaming.selectedPlaylistId.isEmpty
         ? displayedStreamingPlaylists.isEmpty
         : library.tracks.isEmpty
     )
