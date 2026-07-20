@@ -158,7 +158,7 @@ extension EchoNativeAppStore {
       ? allStreamingPlaylists.map(\.name)
       : collections.isEmpty
         ? fullTracks.map { activeSort == "artist" ? $0.artist : $0.title }
-        : collections.map { $0["title"] as? String ?? "" }
+        : collections.map { $0["indexTitle"] as? String ?? $0["title"] as? String ?? "" }
     let paginationScope = "\(source):\(libraryView):\(libraryFilter):\(selectedCollectionId):\(streamingLibraryMode):\(selectedStreamingPlaylistId):\(activeSort):\(libraryQuery)"
     let indexTitlesPayload: Any
     if paginationScope != libraryIndexPayloadScope || indexTitles != libraryIndexPayloadTitles {
@@ -351,22 +351,29 @@ extension EchoNativeAppStore {
         : libraryFilter == "local"
           ? Set(sourceTracks.filter { normalized($0.sourceLabel).contains("local") }.map { normalized($0.album) })
           : nil
+      let tracksByAlbumTitle = Dictionary(grouping: sourceTracks) { normalized($0.album) }
       let previousKeys = collectionTrackKeys
       var nextKeys: [String: [String]] = [:]
-      let values: [[String: Any]] = echoAlbums.filter { album in
+      let values = sortLibraryCollections(echoAlbums.filter { album in
         (query.isEmpty || [album.title, album.sourceLabel].contains { normalized($0).contains(query) })
           && (allowedTitles?.contains(normalized(album.title)) ?? true)
       }.map { album in
         let id = "echo:album-id:\(album.id)"
+        let albumTracks = tracksByAlbumTitle[normalized(album.title)] ?? []
+        let sortArtist = albumTracks.map(\.artist).filter { !$0.isEmpty }
+          .sorted { compareLibraryText($0, $1) }.first ?? ""
         nextKeys[id] = previousKeys[id] ?? []
         return [
           "artworkUrl": album.artworkUrl ?? "",
           "id": id,
+          "indexTitle": librarySort == "artist" && !sortArtist.isEmpty ? sortArtist : album.title,
           "query": album.title,
+          "sortArtist": sortArtist,
+          "sortDuration": album.durationMs > 0 ? album.durationMs : albumTracks.reduce(0) { $0 + $1.durationMs },
           "subtitle": localized("\(album.trackCount) tracks", "\(album.trackCount) 首"),
           "title": album.title,
         ]
-      }.sorted { compareLibraryText($0["title"] as? String ?? "", $1["title"] as? String ?? "") }
+      })
       collectionTrackKeys = nextKeys
       libraryCollectionsCacheKey = cacheKey
       libraryCollectionsCache = values
@@ -454,11 +461,14 @@ extension EchoNativeAppStore {
       }
     }
     var nextKeys: [String: [String]] = [:]
-    let values: [[String: Any]] = groups.map { key, values in
+    let values = sortLibraryCollections(groups.map { key, values in
       let first = values[0]
       let title = groupTitles[key] ?? (libraryView == "artists"
         ? localized("Unknown Artist", "未知艺术家")
         : localized("Uncategorized", "未归类专辑"))
+      let sortArtist = libraryView == "artists"
+        ? title
+        : values.map(\.artist).filter { !$0.isEmpty }.sorted { compareLibraryText($0, $1) }.first ?? ""
       let sourcePrefix = values.allSatisfy { $0.source == first.source } ? first.source.rawValue : source
       let matchingAlbums = (groupTitleKeys[key] ?? [normalized(title)]).flatMap { albumsByTitle[$0] ?? [] }
       let album = matchingAlbums.first { $0.artworkUrl?.isEmpty == false } ?? matchingAlbums.first
@@ -469,16 +479,43 @@ extension EchoNativeAppStore {
       return [
         "artworkUrl": album?.artworkUrl ?? values.first(where: { $0.artworkUrl?.isEmpty == false })?.artworkUrl ?? "",
         "id": id,
+        "indexTitle": librarySort == "artist" && !sortArtist.isEmpty ? sortArtist : title,
         "query": title,
+        "sortArtist": sortArtist,
+        "sortDuration": values.reduce(0) { $0 + $1.durationMs },
         "subtitle": localized("\(values.count) tracks", "\(values.count) 首"),
         "title": title,
       ]
-    }.sorted { compareLibraryText($0["title"] as? String ?? "", $1["title"] as? String ?? "") }
+    })
     collectionTrackKeys = nextKeys
     libraryCollectionsCacheKey = cacheKey
     libraryCollectionsCache = values
     libraryCollectionsCacheTrackKeys = nextKeys
     return values
+  }
+
+  private func sortLibraryCollections(_ collections: [[String: Any]]) -> [[String: Any]] {
+    collections.sorted { left, right in
+      let leftTitle = left["title"] as? String ?? ""
+      let rightTitle = right["title"] as? String ?? ""
+      switch librarySort {
+      case "artist":
+        return compareLibraryText(
+          left["sortArtist"] as? String ?? leftTitle,
+          right["sortArtist"] as? String ?? rightTitle,
+          tie: leftTitle,
+          rightTitle
+        )
+      case "duration":
+        let leftDuration = left["sortDuration"] as? Double ?? 0
+        let rightDuration = right["sortDuration"] as? Double ?? 0
+        return leftDuration == rightDuration
+          ? compareLibraryText(leftTitle, rightTitle)
+          : leftDuration < rightDuration
+      default:
+        return compareLibraryText(leftTitle, rightTitle)
+      }
+    }
   }
 
   private func artistNames(_ value: String, fallback: String) -> [String] {
@@ -584,6 +621,7 @@ extension EchoNativeAppStore {
       "name": playlist.name,
       "pinned": playlist.pinned,
       "subtitle": localized("\(playlist.tracks.count) tracks", "\(playlist.tracks.count) 首"),
+      "trackCount": playlist.tracks.count,
       "tracks": includeTracks ? playlist.tracks.map(libraryTrackPayload) : [],
     ]
   }

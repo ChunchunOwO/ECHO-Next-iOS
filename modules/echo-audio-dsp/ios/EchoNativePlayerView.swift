@@ -1998,6 +1998,14 @@ private struct EchoNativeSignalLiveMeter: View {
   }
 }
 
+private struct EchoNativeSignalIconAnchorKey: PreferenceKey {
+  static var defaultValue: [Anchor<CGPoint>] = []
+
+  static func reduce(value: inout [Anchor<CGPoint>], nextValue: () -> [Anchor<CGPoint>]) {
+    value.append(contentsOf: nextValue())
+  }
+}
+
 private struct EchoNativeSignalPathSheet: View {
   @ObservedObject var model: EchoNativePlayerModel
   let onAction: ([String: Any]) -> Void
@@ -2097,15 +2105,15 @@ private struct EchoNativeSignalPathSheet: View {
   private var decodeValue: String {
     if !hasTrack { return english ? "Waiting" : "等待中" }
     if !usesLocalProcessing { return english ? "Remote decoder" : "远程解码器" }
-    if model.signalFileLoaded { return "AVAudioFile → PCM · \(resamplingLabel(decoderResampling))" }
+    if model.signalFileLoaded { return "AVAudioFile → PCM" }
     return english ? "Preparing decoder" : "正在准备解码器"
   }
 
   private var decodeDetail: String {
     if !usesLocalProcessing {
       return english
-        ? "Decoder details are owned by the remote endpoint. · Resampling unverified"
-        : "解码器详情由远程端提供。 · 重采样无法验证"
+        ? "Decoder details are owned by the remote endpoint. · Resampling: ?"
+        : "解码器详情由远程端提供。 · 重采样：?"
     }
     let sourceRate = model.signalSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
     let engineRate = model.signalEngineSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2223,7 +2231,7 @@ private struct EchoNativeSignalPathSheet: View {
     switch active {
     case true: return english ? "Resampling: active" : "重采样：启用"
     case false: return english ? "Resampling: bypassed" : "重采样：旁路"
-    case nil: return english ? "Resampling: unverified" : "重采样：无法验证"
+    case nil: return english ? "Resampling: ?" : "重采样：?"
     }
   }
 
@@ -2330,14 +2338,39 @@ private struct EchoNativeSignalPathSheet: View {
   private var signalChain: some View {
     VStack(alignment: .leading, spacing: 12) {
       sectionTitle(english ? "Full chain" : "完整链路", icon: "point.3.connected.trianglepath.dotted")
-      VStack(spacing: 0) {
+      VStack(spacing: 10) {
         signalNode(index: "01", icon: "externaldrive.fill", title: english ? "Source" : "音源", value: model.signalSourceLabel.isEmpty ? (english ? "Unknown source" : "未知音源") : model.signalSourceLabel, detail: sourceDetail, provenance: sourceProvenance, nodeTone: hasTrack ? Color.green : echoInk.opacity(0.4))
-        signalConnector(step: 0)
         signalNode(index: "02", icon: "cpu", title: english ? "Decode" : "解码", value: decodeValue, detail: decodeDetail, provenance: usesLocalProcessing ? model.signalTelemetrySource : (model.signalTelemetrySource == "reported" ? "reported" : "unverified"), nodeTone: model.signalFileLoaded || !usesLocalProcessing ? Color.green : echoGold)
-        signalConnector(step: 1)
         signalNode(index: "03", icon: processingModules.isEmpty ? "checkmark.shield.fill" : "slider.horizontal.3", title: english ? "Process" : "处理", value: processingDetail, detail: usesLocalProcessing ? (english ? "Local DSP chain" : "本机 DSP 链") : (english ? "External processing" : "外部处理"), provenance: usesLocalProcessing ? model.signalTelemetrySource : "unverified", nodeTone: processingModules.isEmpty ? Color.green : echoGold)
-        signalConnector(step: 2)
         signalNode(index: "04", icon: "hifispeaker.fill", title: english ? "Output" : "输出", value: outputTitle, detail: outputDetail, provenance: model.signalTelemetrySource, nodeTone: pathOnline ? Color.green : echoAccent)
+      }
+      .backgroundPreferenceValue(EchoNativeSignalIconAnchorKey.self) { anchors in
+        GeometryReader { proxy in
+          if anchors.count >= 4 {
+            let points = anchors.prefix(4).map { proxy[$0] }
+            let start = points[0]
+            let end = points[3]
+            Path { path in
+              path.move(to: start)
+              for point in points.dropFirst() { path.addLine(to: point) }
+            }
+            .stroke(tone.opacity(0.24), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { context in
+              let progress = context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 2.4) / 2.4
+              let position = CGFloat(progress)
+              Circle()
+                .fill(tone)
+                .frame(width: 7, height: 7)
+                .shadow(color: tone.opacity(0.45), radius: 4)
+                .opacity(reduceMotion ? 0 : sin(progress * .pi))
+                .position(
+                  x: start.x + (end.x - start.x) * position,
+                  y: start.y + (end.y - start.y) * position
+                )
+            }
+          }
+        }
       }
     }
   }
@@ -2510,6 +2543,7 @@ private struct EchoNativeSignalPathSheet: View {
           .foregroundColor(nodeTone)
       }
       .frame(width: 38, height: 38)
+      .anchorPreference(key: EchoNativeSignalIconAnchorKey.self, value: .center) { [$0] }
       VStack(alignment: .leading, spacing: 4) {
         HStack(spacing: 7) {
           Text(index)
@@ -2534,35 +2568,6 @@ private struct EchoNativeSignalPathSheet: View {
     .padding(14)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-  }
-
-  private func signalConnector(step: Int) -> some View {
-    HStack {
-      ZStack {
-        Capsule()
-          .fill(tone.opacity(0.24))
-          .frame(width: 2, height: 28)
-        Image(systemName: "chevron.down")
-          .font(.system(size: 7, weight: .bold))
-          .foregroundColor(tone.opacity(0.62))
-          .offset(y: 10)
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { context in
-          let cycle = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.4)
-          let progress = (cycle - Double(step) * 0.52) / 0.52
-          let active = progress >= 0 && progress <= 1
-          Circle()
-            .fill(tone)
-            .frame(width: 7, height: 7)
-            .shadow(color: tone.opacity(0.45), radius: 4)
-            .opacity(active && !reduceMotion ? sin(progress * .pi) : 0)
-            .offset(y: CGFloat(min(1, max(0, progress)) * 20 - 10))
-        }
-      }
-      .frame(width: 38, height: 28)
-      Spacer(minLength: 0)
-    }
-    .padding(.leading, 14)
-    .accessibilityHidden(true)
   }
 
   private func disclosureLabel(_ title: String, detail: String, icon: String) -> some View {
@@ -2590,7 +2595,7 @@ private struct EchoNativeSignalPathSheet: View {
     switch kind {
     case "observed": return english ? "Observed" : "已观测"
     case "reported": return english ? "Remote reported" : "远程上报"
-    default: return english ? "Unverified" : "无法验证"
+    default: return "?"
     }
   }
 

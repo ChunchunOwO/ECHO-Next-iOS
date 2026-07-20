@@ -1789,6 +1789,7 @@ final class EchoNativeAppStore {
 
   private func openStreamingPlaylist(_ payload: [String: Any]) {
     guard let id = payload["id"] as? String, let neteaseClient else { return }
+    let playWhenLoaded = payload["play"] as? Bool ?? false
     searchTask?.cancel()
     libraryQuery = ""
     neteaseTracks = []
@@ -1813,6 +1814,12 @@ final class EchoNativeAppStore {
         neteaseTracks = tracks
         libraryPage = 0
         streamingStatus = ""
+        if playWhenLoaded, let first = tracks.first {
+          activeQueuePlaylistId = ""
+          queue = tracks
+          play(first, forcedMode: .streaming)
+          playerModel.activePage = "control"
+        }
       }
       catch {
         if self.neteaseClient === neteaseClient, selectedStreamingPlaylistId == id {

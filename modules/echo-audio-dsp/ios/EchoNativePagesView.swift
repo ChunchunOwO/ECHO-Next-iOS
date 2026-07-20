@@ -69,6 +69,7 @@ private struct EchoNativeLibraryStreaming: Decodable {
 private struct EchoNativeLibraryCollection: Decodable, Identifiable {
   let artworkUrl: String
   let id: String
+  let indexTitle: String
   let query: String
   let subtitle: String
   let title: String
@@ -140,6 +141,7 @@ private struct EchoNativePlaylist: Decodable, Identifiable {
   let name: String
   let pinned: Bool
   let subtitle: String
+  let trackCount: Int
   let tracks: [EchoNativeLibraryTrack]
 }
 
@@ -604,7 +606,7 @@ struct EchoNativePagesScreen: View {
     let sortedTracks = library.tracks
     let activeTrackSort = selectedCollectionIsAlbum ? albumTrackSort : libraryTrackSort
     let streamingPlaylistIndexKeys = displayedStreamingPlaylists.map { libraryIndexKey($0.name) }
-    let collectionIndexKeys = library.collections.map { libraryIndexKey($0.title) }
+    let collectionIndexKeys = library.collections.map { libraryIndexKey($0.indexTitle) }
     let trackIndexKeys = sortedTracks.map { libraryIndexKey(activeTrackSort == "artist" ? $0.artist : $0.title) }
     // ponytail: Pages are capped at 20 items; firstIndex keeps anchor IDs unique without more state.
     let firstRowId = (
@@ -624,7 +626,7 @@ struct EchoNativePagesScreen: View {
         : "展开全部 \(library.pagination.totalCount) 项并分页浏览")
     let chronologicalView = library.view == "recent"
       || (library.source == "streaming" && library.streaming.libraryMode == "history")
-    let indexTargets = (activeTrackSort != "duration" || !library.collections.isEmpty
+    let indexTargets = (activeTrackSort != "duration"
       || (library.streaming.libraryMode == "playlists" && library.streaming.selectedPlaylistId.isEmpty)) && !chronologicalView
       && (selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title" || albumTrackSort == "artist")
       ? model.libraryIndexTargets
@@ -847,6 +849,7 @@ struct EchoNativePagesScreen: View {
             Text(library.labels.collections)
               .font(.system(size: 18, weight: .bold, design: .rounded))
             Spacer()
+            librarySortMenu
             EchoNativeDisplayModeButton(mode: collectionDisplayMode, language: model.payload?.language ?? "zh") {
               collectionDisplayMode = collectionDisplayMode == "grid" ? "list" : "grid"
             }
@@ -1346,9 +1349,12 @@ struct EchoNativePagesScreen: View {
   }
 
   private var librarySortMenu: some View {
-    Menu {
+    let sortingCollections = model.payload?.library?.collections.isEmpty == false
+    return Menu {
       Picker(
-        model.payload?.language == "en" ? "Sort tracks" : "歌曲排序",
+        model.payload?.language == "en"
+          ? (sortingCollections ? "Sort collections" : "Sort tracks")
+          : (sortingCollections ? "分类排序" : "歌曲排序"),
         selection: Binding(
           get: { libraryTrackSort },
           set: { value in
@@ -1357,7 +1363,10 @@ struct EchoNativePagesScreen: View {
           }
         )
       ) {
-        Label(model.payload?.language == "en" ? "Title" : "歌名", systemImage: "textformat").tag("title")
+        Label(
+          model.payload?.language == "en" ? (sortingCollections ? "Name" : "Title") : (sortingCollections ? "名称" : "歌名"),
+          systemImage: "textformat"
+        ).tag("title")
         Label(model.payload?.language == "en" ? "Artist" : "艺术家", systemImage: "person").tag("artist")
         Label(model.payload?.language == "en" ? "Duration" : "时长", systemImage: "clock").tag("duration")
       }
@@ -1367,7 +1376,9 @@ struct EchoNativePagesScreen: View {
         .frame(width: 44, height: 44)
         .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
     }
-    .accessibilityLabel(model.payload?.language == "en" ? "Sort tracks" : "歌曲排序")
+    .accessibilityLabel(model.payload?.language == "en"
+      ? (sortingCollections ? "Sort collections" : "Sort tracks")
+      : (sortingCollections ? "分类排序" : "歌曲排序"))
   }
 
   private func clearAlbumSelection() {
@@ -1451,28 +1462,44 @@ struct EchoNativePagesScreen: View {
     labels: EchoNativeLibraryLabels
   ) -> some View {
     VStack(alignment: .leading, spacing: 7) {
-      Button {
-        playlistSelection = EchoNativePlaylistSelection(id: playlist.id)
-        onAction(["action": "playlistOpen", "playlistId": playlist.id])
-      } label: {
-        ZStack(alignment: .topTrailing) {
+      ZStack(alignment: .topTrailing) {
+        Button {
+          playlistSelection = EchoNativePlaylistSelection(id: playlist.id)
+          onAction(["action": "playlistOpen", "playlistId": playlist.id])
+        } label: {
           EchoNativeArtwork(urlString: playlist.artworkUrl, onError: {})
             .frame(width: 126, height: 126)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-          if playlist.pinned || playlist.favorite {
-            HStack(spacing: 4) {
-              if playlist.pinned { Image(systemName: "pin.fill") }
-              if playlist.favorite { Image(systemName: "heart.fill") }
-            }
-            .font(.system(size: 9, weight: .bold))
-            .foregroundColor(.white)
-            .padding(7)
-            .background(Color.black.opacity(0.24), in: Capsule())
-            .padding(7)
-          }
         }
+        .buttonStyle(.plain)
+        if playlist.pinned || playlist.favorite {
+          HStack(spacing: 4) {
+            if playlist.pinned { Image(systemName: "pin.fill") }
+            if playlist.favorite { Image(systemName: "heart.fill") }
+          }
+          .font(.system(size: 9, weight: .bold))
+          .foregroundColor(.white)
+          .padding(7)
+          .background(Color.black.opacity(0.24), in: Capsule())
+          .padding(7)
+        }
+        Button {
+          onAction(["action": "playlistPlay", "playlistId": playlist.id])
+        } label: {
+          Image(systemName: "play.fill")
+            .font(.system(size: 13, weight: .bold))
+            .foregroundColor(.white)
+            .frame(width: 40, height: 40)
+            .echoGlass(tint: Color.black.opacity(0.25), clear: false, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(playlist.trackCount == 0)
+        .opacity(playlist.trackCount == 0 ? 0.45 : 1)
+        .padding(7)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .accessibilityLabel(model.payload?.language == "en" ? "Play all" : "播放全部")
       }
-      .buttonStyle(.plain)
+      .frame(width: 126, height: 126)
 
       HStack(spacing: 4) {
         Button {
@@ -1564,30 +1591,43 @@ struct EchoNativePagesScreen: View {
     _ playlist: EchoNativeStreamingPlaylist,
     labels: EchoNativeLibraryLabels
   ) -> some View {
-    Menu {
+    HStack(spacing: 2) {
       Button {
-        onAction(["action": "streamingPlaylistPin", "id": playlist.id])
+        onAction(["action": "streamingPlaylistOpen", "id": playlist.id, "play": true])
       } label: {
-        Label(playlist.pinned ? labels.unpinPlaylist : labels.pinPlaylist, systemImage: "pin")
-      }
-      Button {
-        onAction(["action": "streamingPlaylistFavorite", "id": playlist.id])
-      } label: {
-        Label(playlist.favorite ? labels.unFavoritePlaylist : labels.favoritePlaylist, systemImage: "heart")
-      }
-    } label: {
-      ZStack {
-        Image(systemName: "ellipsis")
+        Image(systemName: "play.fill")
           .font(.system(size: 14, weight: .bold))
-        if playlist.pinned || playlist.favorite {
-          Circle()
-            .fill(echoAccent)
-            .frame(width: 6, height: 6)
-            .offset(x: 10, y: -10)
-        }
+          .frame(width: 44, height: 44)
+          .echoGlass(tint: echoAccent.opacity(0.09), in: Circle())
       }
-      .frame(width: 44, height: 44)
-      .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+      .buttonStyle(.plain)
+      .disabled(playlist.trackCount == 0)
+      .accessibilityLabel(model.payload?.language == "en" ? "Play all" : "播放全部")
+      Menu {
+        Button {
+          onAction(["action": "streamingPlaylistPin", "id": playlist.id])
+        } label: {
+          Label(playlist.pinned ? labels.unpinPlaylist : labels.pinPlaylist, systemImage: "pin")
+        }
+        Button {
+          onAction(["action": "streamingPlaylistFavorite", "id": playlist.id])
+        } label: {
+          Label(playlist.favorite ? labels.unFavoritePlaylist : labels.favoritePlaylist, systemImage: "heart")
+        }
+      } label: {
+        ZStack {
+          Image(systemName: "ellipsis")
+            .font(.system(size: 14, weight: .bold))
+          if playlist.pinned || playlist.favorite {
+            Circle()
+              .fill(echoAccent)
+              .frame(width: 6, height: 6)
+              .offset(x: 10, y: -10)
+          }
+        }
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
+      }
     }
   }
 
