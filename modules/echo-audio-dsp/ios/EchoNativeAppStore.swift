@@ -414,6 +414,7 @@ final class EchoNativeAppStore {
     playerModel.language = settings.language
     playerModel.playbackMode = settings.playbackMode
     playerModel.showArtworkGlow = settings.showArtworkGlow
+    playerModel.showPlayerOutputInMenu = settings.showPlayerOutputInMenu
     playerModel.equalizer.gains = normalizedGains(settings.eqGains)
     playerModel.equalizer.language = settings.language
     playerModel.equalizer.preset = settings.eqPreset
@@ -1819,6 +1820,7 @@ final class EchoNativeAppStore {
     case "confirmDelete": persistent.settings.confirmBeforeDeletingLocalTracks = enabled
     case "artworkGlow": persistent.settings.showArtworkGlow = enabled; playerModel.showArtworkGlow = enabled
     case "artworkBackground": persistent.settings.artworkBackgroundEnabled = enabled; playerModel.artworkBackgroundEnabled = enabled
+    case "playerOutputInMenu": persistent.settings.showPlayerOutputInMenu = enabled; playerModel.showPlayerOutputInMenu = enabled
     case "externalMetadataSearch":
       persistent.settings.externalMetadataEnabled = enabled
       resetLibraryArtworkLookup()

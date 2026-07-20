@@ -88,6 +88,9 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(playerLayout, /let coverMaximum: CGFloat = compact \? 200 : 310/u);
   assert.match(playerLayout, /outputControl/u);
   assert.match(player, /private var moreControls: some View \{\s+Menu \{/u);
+  assert.match(player, /showPlayerOutputInMenu/u);
+  assert.match(payload, /toggle\("playerOutputInMenu"/u);
+  assert.match(coreTypes, /var showPlayerOutputInMenu = false/u);
   assert.match(player, /Label\(model\.language == "en" \? "Signal path" : "信号路径"/u);
   assert.match(player, /struct EchoNativeSignalPathSheet/u);
   assert.match(store, /private func updateSignalPath\(for track: EchoNativeCoreTrack\)/u);

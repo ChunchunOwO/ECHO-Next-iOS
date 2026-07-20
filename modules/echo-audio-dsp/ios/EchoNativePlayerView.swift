@@ -269,6 +269,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var queueCount = 0
   @Published var queuePayload: EchoNativeQueuePayload?
   @Published var showArtworkGlow = true
+  @Published var showPlayerOutputInMenu = false
   @Published var signalBitDepth = ""
   @Published var signalBitrate = ""
   @Published var signalCodec = ""
@@ -594,8 +595,10 @@ struct EchoNativePlayerScreen: View {
         .padding(.top, compact ? 4 : 8)
       volumeControl
         .padding(.top, compact ? 3 : 6)
-      outputControl
-        .padding(.top, compact ? 4 : 8)
+      if !model.showPlayerOutputInMenu {
+        outputControl
+          .padding(.top, compact ? 4 : 8)
+      }
     }
     .padding(.horizontal, 16)
     .padding(.vertical, compact ? 6 : 12)
@@ -1015,6 +1018,34 @@ struct EchoNativePlayerScreen: View {
         )
       }
       .disabled(model.metadataLoading)
+
+      if model.showPlayerOutputInMenu {
+        Divider()
+        Picker(selection: Binding(
+          get: { outputSource },
+          set: { onAction(["action": "outputSource", "mode": $0]) }
+        )) {
+          Text(model.language == "en" ? "Local" : "本地").tag("local")
+          Text(model.language == "en" ? "Media" : "流媒体").tag("streaming")
+          Text("ECHO").tag("echo")
+          Text(model.language == "en" ? "Remote" : "远程").tag("remote")
+        } label: {
+          Label(model.language == "en" ? "Music source" : "音乐源", systemImage: "music.note.list")
+        }
+        if outputSource == "echo" || outputSource == "remote" {
+          Picker(selection: Binding(
+            get: { model.outputMode },
+            set: { onAction(["action": "output", "mode": $0]) }
+          )) {
+            Text(model.language == "en" ? "Control" : "控制")
+              .tag(outputSource == "echo" ? "pc" : "remoteControl")
+            Text(model.language == "en" ? "Stream" : "串流")
+              .tag(outputSource == "echo" ? "phone" : "remoteStream")
+          } label: {
+            Label(model.language == "en" ? "Output mode" : "输出模式", systemImage: "waveform")
+          }
+        }
+      }
     } label: {
       Image(systemName: "ellipsis")
         .font(.system(size: 17, weight: .bold))

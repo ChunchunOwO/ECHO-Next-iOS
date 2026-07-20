@@ -11,6 +11,7 @@ extension EchoNativeAppStore {
     playerModel.language = persistent.settings.language
     playerModel.playbackMode = persistent.settings.playbackMode
     playerModel.showArtworkGlow = persistent.settings.showArtworkGlow
+    playerModel.showPlayerOutputInMenu = persistent.settings.showPlayerOutputInMenu
     let page = playerModel.activePage
     let payload: [String: Any] = [
       "connection": page == "connect" ? connectionPayload() : NSNull(),
@@ -606,6 +607,7 @@ extension EchoNativeAppStore {
         toggle("autoLyrics", localized("Open local lyrics automatically", "自动打开本地歌词"), localized("Opens lyrics when a local track has an imported LRC file.", "本地歌曲存在已导入的 LRC 文件时自动打开歌词。"), settings.autoOpenLyricsForLocalTracks),
         toggle("artworkGlow", localized("Artwork glow", "封面光效"), localized("Shows a restrained glow around artwork.", "在封面周围显示克制的光效。"), settings.showArtworkGlow),
         toggle("artworkBackground", localized("Artwork background", "封面动态背景"), localized("Uses current artwork behind playback and lyrics.", "在播放页与歌词页使用当前封面背景。"), settings.artworkBackgroundEnabled),
+        toggle("playerOutputInMenu", localized("Output controls in more menu", "输出选择放入三点菜单"), localized("Move music source and control/stream selectors into the player more menu.", "把音乐源与控制/串流选择收进播放页三点菜单。"), settings.showPlayerOutputInMenu),
       ]),
       section("externalData", localized("External data", "外源数据"), localized("Artwork and lyrics lookup", "封面与歌词查询"), "globe", [
         toggle("externalMetadataSearch", localized("Search metadata online", "从网络搜索元数据"), localized("Uses LRCLIB for lyrics and NetEase for artwork when needed.", "需要时使用 LRCLIB 获取歌词、网易云补充封面。"), settings.externalMetadataEnabled),

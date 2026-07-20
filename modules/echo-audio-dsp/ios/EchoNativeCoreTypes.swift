@@ -229,6 +229,7 @@ struct EchoNativeCoreSettings: Codable, Sendable {
   var playbackMode = EchoNativePlaybackMode.normal
   var confirmBeforeDeletingLocalTracks = true
   var showArtworkGlow = true
+  var showPlayerOutputInMenu = false
   var showPowerampRemote = false
 
   private enum LegacyCodingKeys: String, CodingKey {
@@ -276,6 +277,7 @@ struct EchoNativeCoreSettings: Codable, Sendable {
       ?? (legacyRepeatOne ? .repeatOne : .normal)
     confirmBeforeDeletingLocalTracks = try values.decodeIfPresent(Bool.self, forKey: .confirmBeforeDeletingLocalTracks) ?? true
     showArtworkGlow = try values.decodeIfPresent(Bool.self, forKey: .showArtworkGlow) ?? true
+    showPlayerOutputInMenu = try values.decodeIfPresent(Bool.self, forKey: .showPlayerOutputInMenu) ?? false
     showPowerampRemote = try values.decodeIfPresent(Bool.self, forKey: .showPowerampRemote) ?? false
   }
 }
