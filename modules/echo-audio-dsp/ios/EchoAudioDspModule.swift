@@ -210,10 +210,24 @@ final class NowPlayingController {
 }
 
 struct DspPlaybackStatus {
+  let channelCount: Int
   let currentTime: Double
+  let deviceChannelCount: Int
+  let deviceName: String
+  let devicePortType: String
+  let deviceSampleRate: Double
+  let deviceUID: String
   let didJustFinish: Bool
   let duration: Double
+  let engineRunning: Bool
+  let fileLoaded: Bool
+  let ioBufferDurationMs: Double
+  let outputLatencyMs: Double
+  let outputVolume: Double
+  let peakDb: Double
   let playing: Bool
+  let rmsDb: Double
+  let sampleRate: Double
   let volume: Double
 }
 
@@ -222,14 +236,19 @@ final class DspPlaybackEngine {
   private let player = AVAudioPlayerNode()
   private let eq = AVAudioUnitEQ(numberOfBands: 10)
   private let dynamics = DspPlaybackEngine.makeDynamicsProcessor()
+  private let meterLock = NSLock()
   private var audioFile: AVAudioFile?
-  private var sampleRate: Double = 44_100
+  private var channelCount: Int = 0
+  private var sampleRate: Double = 0
   private var durationSeconds: Double = 0
   private var scheduledStartFrame: AVAudioFramePosition = 0
   private var offsetSeconds: Double = 0
   private var playing = false
   private var finished = false
   private var configured = false
+  private var meterInstalled = false
+  private var meterPeakDb = -120.0
+  private var meterRmsDb = -120.0
   private var scheduleGeneration: UInt64 = 0
 
   init() {
@@ -243,9 +262,12 @@ final class DspPlaybackEngine {
     player.stop()
     player.reset()
     audioFile = nil
+    resetMeter()
+    channelCount = 0
     playing = false
     finished = false
     durationSeconds = 0
+    sampleRate = 0
     guard let url = URL(string: uri), url.isFileURL else {
       throw DspError.invalidUri
     }
@@ -254,6 +276,7 @@ final class DspPlaybackEngine {
     let file = try AVAudioFile(forReading: url)
     audioFile = file
     sampleRate = file.processingFormat.sampleRate
+    channelCount = Int(file.processingFormat.channelCount)
     durationSeconds = sampleRate > 0 ? Double(file.length) / sampleRate : 0
     offsetSeconds = max(0, min(positionMs / 1000, durationSeconds))
     scheduledStartFrame = AVAudioFramePosition(offsetSeconds * sampleRate)
@@ -299,6 +322,11 @@ final class DspPlaybackEngine {
     player.stop()
     player.reset()
     if engine.isRunning { engine.stop() }
+    audioFile = nil
+    resetMeter()
+    channelCount = 0
+    sampleRate = 0
+    durationSeconds = 0
     playing = false
     finished = false
     offsetSeconds = 0
@@ -338,11 +366,48 @@ final class DspPlaybackEngine {
 
   func playbackStatus() -> DspPlaybackStatus {
     let actuallyPlaying = playing && engine.isRunning && player.isPlaying
+    let levels = meterLevels()
+    #if os(iOS) || os(tvOS)
+    let session = AVAudioSession.sharedInstance()
+    let output = session.currentRoute.outputs.first
+    let deviceSampleRate = session.sampleRate
+    let deviceChannelCount = session.outputNumberOfChannels
+    let deviceName = output?.portName ?? ""
+    let devicePortType = output?.portType.rawValue ?? ""
+    let deviceUID = output?.uid ?? ""
+    let ioBufferDurationMs = session.ioBufferDuration * 1_000
+    let outputLatencyMs = session.outputLatency * 1_000
+    let outputVolume = Double(session.outputVolume)
+    #else
+    let deviceFormat = engine.outputNode.outputFormat(forBus: 0)
+    let deviceSampleRate = deviceFormat.sampleRate
+    let deviceChannelCount = Int(deviceFormat.channelCount)
+    let deviceName = "System output"
+    let devicePortType = "system"
+    let deviceUID = "system"
+    let ioBufferDurationMs = 0.0
+    let outputLatencyMs = 0.0
+    let outputVolume = Double(player.volume)
+    #endif
     return DspPlaybackStatus(
+      channelCount: channelCount,
       currentTime: currentTime(),
+      deviceChannelCount: deviceChannelCount,
+      deviceName: deviceName,
+      devicePortType: devicePortType,
+      deviceSampleRate: deviceSampleRate,
+      deviceUID: deviceUID,
       didJustFinish: finished,
       duration: durationSeconds,
+      engineRunning: engine.isRunning,
+      fileLoaded: audioFile != nil,
+      ioBufferDurationMs: ioBufferDurationMs,
+      outputLatencyMs: outputLatencyMs,
+      outputVolume: outputVolume,
+      peakDb: actuallyPlaying ? levels.peak : -120,
       playing: actuallyPlaying,
+      rmsDb: actuallyPlaying ? levels.rms : -120,
+      sampleRate: sampleRate,
       volume: Double(player.volume)
     )
   }
@@ -377,6 +442,52 @@ final class DspPlaybackEngine {
     } else {
       engine.connect(eq, to: engine.mainMixerNode, format: format)
     }
+    if !meterInstalled {
+      engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1_024, format: nil) { [weak self] buffer, _ in
+        self?.updateMeter(buffer)
+      }
+      meterInstalled = true
+    }
+  }
+
+  private func updateMeter(_ buffer: AVAudioPCMBuffer) {
+    guard let channels = buffer.floatChannelData else { return }
+    let frames = Int(buffer.frameLength)
+    let channelTotal = Int(buffer.format.channelCount)
+    guard frames > 0, channelTotal > 0 else { return }
+    let bufferTotal = buffer.format.isInterleaved ? 1 : channelTotal
+    let samplesPerBuffer = buffer.format.isInterleaved ? frames * channelTotal : frames
+
+    var peak: Float = 0
+    var squareSum = 0.0
+    var sampleTotal = 0
+    for channel in 0..<bufferTotal {
+      for sampleIndex in stride(from: 0, to: samplesPerBuffer, by: 4) {
+        let sample = channels[channel][sampleIndex]
+        peak = max(peak, abs(sample))
+        squareSum += Double(sample * sample)
+        sampleTotal += 1
+      }
+    }
+    let peakDb = 20 * log10(max(Double(peak), 0.000_001))
+    let rmsDb = 20 * log10(max(sqrt(squareSum / Double(max(1, sampleTotal))), 0.000_001))
+    meterLock.lock()
+    meterPeakDb = max(peakDb, meterPeakDb - 1.5)
+    meterRmsDb = meterRmsDb <= -119 ? rmsDb : meterRmsDb * 0.7 + rmsDb * 0.3
+    meterLock.unlock()
+  }
+
+  private func meterLevels() -> (peak: Double, rms: Double) {
+    meterLock.lock()
+    defer { meterLock.unlock() }
+    return (meterPeakDb, meterRmsDb)
+  }
+
+  private func resetMeter() {
+    meterLock.lock()
+    meterPeakDb = -120
+    meterRmsDb = -120
+    meterLock.unlock()
   }
 
   private func scheduleCurrentFile(shouldMarkFinished: Bool) {

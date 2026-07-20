@@ -73,6 +73,11 @@ final class EchoNativeAppStore {
   weak var presenter: UIViewController?
 
   private let audioEngine = DspPlaybackEngine()
+  private var dacProfiles = EchoNativeDacObservation.load()
+  private var lastDacObservationKey = ""
+  private var signalPathVisible = false
+  private var signalRouteEvents = EchoNativeSignalRouteEvent.load()
+  private var lastSignalRouteKey = ""
   private lazy var nowPlayingController = NowPlayingController { [weak self] command, position in
     Task { @MainActor in self?.handleRemoteCommand(command, position: position) }
   }
@@ -239,6 +244,17 @@ final class EchoNativeAppStore {
     case "trackFavoriteCurrent":
       if let currentTrack { toggleFavorite(currentTrack) }
     case "externalMetadataRefresh": refreshExternalMetadata(manual: true)
+    case "signalPathVisible":
+      signalPathVisible = payload["visible"] as? Bool ?? false
+      if usesLocalEngineOutput {
+        refreshEngineSignalMetrics(audioEngine.playbackStatus(), includeLevels: signalPathVisible)
+      }
+      if !signalPathVisible {
+        playerModel.signalMeter.clipping = false
+        playerModel.signalMeter.lufsMomentary = nil
+        playerModel.signalMeter.peakDb = -120
+        playerModel.signalMeter.rmsDb = -120
+      }
     case "externalFieldSourcesSelect": applyExternalMetadataSelection(payload)
     case "externalSourcePickerDismiss": clearExternalMetadataPicker()
     case "externalSourcePickerIgnore": ignoreExternalMetadataPicker()
@@ -668,11 +684,13 @@ final class EchoNativeAppStore {
     case .local, .phone, .remoteStream, .streaming:
       if audioLoading {
         setIfChanged(playerModel, \.isPlaying, false)
+        setIfChanged(playerModel, \.signalEngineRunning, false)
       } else {
         let status = audioEngine.playbackStatus()
         playerModel.positionMs = status.currentTime * 1000
         setIfChanged(playerModel, \.durationMs, status.duration * 1000)
         setIfChanged(playerModel, \.isPlaying, status.playing)
+        refreshEngineSignalMetrics(status, includeLevels: signalPathVisible)
         if status.didJustFinish, let currentTrack {
           let key = trackKey(currentTrack)
           if handledFinishedTrackKey != key {
@@ -799,7 +817,10 @@ final class EchoNativeAppStore {
         gains: playerModel.equalizer.gains,
         loudnessEnabled: persistent.settings.loudnessEnabled
       )
-      playerModel.isPlaying = audioEngine.playbackStatus().playing
+      let status = audioEngine.playbackStatus()
+      playerModel.isPlaying = status.playing
+      refreshEngineSignalMetrics(status, includeLevels: signalPathVisible)
+      updateSignalPath(for: track)
       publishNowPlaying()
     } catch {
       playerModel.isPlaying = false
@@ -2310,17 +2331,18 @@ final class EchoNativeAppStore {
 
 
   private func updateSignalPath(for track: EchoNativeCoreTrack) {
-    playerModel.eqEnabled = playerModel.equalizer.gains.contains { abs($0) > 0.01 }
-    playerModel.loudnessEnabled = persistent.settings.loudnessEnabled
-    playerModel.signalCodec = track.codec?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
-    playerModel.signalSampleRate = track.sampleRate.flatMap(sampleRateTag) ?? ""
-    playerModel.signalBitDepth = track.bitDepth.map { "\($0)Bit" } ?? ""
+    setIfChanged(playerModel, \.eqEnabled, playerModel.equalizer.gains.contains { abs($0) > 0.01 })
+    setIfChanged(playerModel, \.loudnessEnabled, persistent.settings.loudnessEnabled)
+    setIfChanged(playerModel, \.signalCodec, track.codec?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? "")
+    setIfChanged(playerModel, \.signalSampleRate, track.sampleRate.flatMap(sampleRateTag) ?? "")
+    setIfChanged(playerModel, \.signalBitDepth, track.bitDepth.map { "\($0)Bit" } ?? "")
     if let bitrate = track.bitrate, bitrate > 0 {
-      playerModel.signalBitrate = "\(bitrate >= 1000 ? bitrate / 1000 : bitrate)kbps"
+      setIfChanged(playerModel, \.signalBitrate, "\(bitrate >= 1000 ? bitrate / 1000 : bitrate)kbps")
     } else {
-      playerModel.signalBitrate = ""
+      setIfChanged(playerModel, \.signalBitrate, "")
     }
-    playerModel.signalSourceLabel = track.sourceLabel.isEmpty
+    setIfChanged(playerModel, \.signalChannelCount, "")
+    let sourceLabel = track.sourceLabel.isEmpty
       ? (track.source == .local
         ? localized("Local", "本地")
         : track.source == .echo
@@ -2329,36 +2351,238 @@ final class EchoNativeAppStore {
             ? "Poweramp"
             : localized("NetEase", "网易云"))
       : track.sourceLabel
+    setIfChanged(playerModel, \.signalSourceLabel, sourceLabel)
     switch outputMode {
     case .pc:
-      playerModel.signalDeviceName = echoStatus?.device.name ?? ""
-      playerModel.signalRemoteOutput = echoStatus?.playback.outputMode ?? ""
+      setIfChanged(playerModel, \.signalDeviceName, echoStatus?.device.name ?? "")
+      setIfChanged(playerModel, \.signalRemoteOutput, echoStatus?.playback.outputMode ?? "")
     case .phone:
-      playerModel.signalDeviceName = echoStatus?.device.name ?? ""
-      playerModel.signalRemoteOutput = localized("Streaming", "串流")
+      setIfChanged(playerModel, \.signalDeviceName, echoStatus?.device.name ?? "")
+      setIfChanged(playerModel, \.signalRemoteOutput, localized("Streaming", "串流"))
     case .remoteControl:
-      playerModel.signalDeviceName = powerampStatus?.device.name ?? ""
-      playerModel.signalRemoteOutput = powerampStatus?.playback.outputMode ?? "Poweramp"
+      setIfChanged(playerModel, \.signalDeviceName, powerampStatus?.device.name ?? "")
+      setIfChanged(playerModel, \.signalRemoteOutput, powerampStatus?.playback.outputMode ?? "Poweramp")
     case .remoteStream:
-      playerModel.signalDeviceName = powerampStatus?.device.name ?? ""
-      playerModel.signalRemoteOutput = localized("Poweramp Stream", "Poweramp 串流")
+      setIfChanged(playerModel, \.signalDeviceName, powerampStatus?.device.name ?? "")
+      setIfChanged(playerModel, \.signalRemoteOutput, localized("Poweramp Stream", "Poweramp 串流"))
     case .streaming:
-      playerModel.signalDeviceName = neteaseProfile?.name ?? localized("NetEase", "网易云")
-      playerModel.signalRemoteOutput = localized("NetEase", "网易云")
+      setIfChanged(playerModel, \.signalDeviceName, neteaseProfile?.name ?? localized("NetEase", "网易云"))
+      setIfChanged(playerModel, \.signalRemoteOutput, localized("NetEase", "网易云"))
     case .local:
-      playerModel.signalDeviceName = localized("This iPhone", "本机 iPhone")
-      playerModel.signalRemoteOutput = "AVAudioEngine"
+      setIfChanged(playerModel, \.signalDeviceName, localized("This iPhone", "本机 iPhone"))
+      setIfChanged(playerModel, \.signalRemoteOutput, "AVAudioEngine")
     }
+    if usesLocalEngineOutput {
+      refreshEngineSignalMetrics(audioEngine.playbackStatus())
+    } else {
+      let telemetry = outputMode == .pc ? echoStatus?.audio : powerampStatus?.audio
+      refreshRemoteSignalMetrics(telemetry)
+    }
+    recordSignalRouteObservation(for: track)
+    setIfChanged(playerModel, \.signalRouteEvents, signalRouteEvents)
   }
 
   private func clearSignalPath() {
     playerModel.signalBitDepth = ""
     playerModel.signalBitrate = ""
+    playerModel.signalChannelCount = ""
     playerModel.signalCodec = ""
+    playerModel.signalDacProfile = nil
+    playerModel.signalDeviceChannelCount = ""
+    playerModel.signalDeviceIOBufferMs = 0
+    playerModel.signalDeviceLatencyMs = 0
     playerModel.signalDeviceName = ""
+    playerModel.signalDevicePortType = ""
+    playerModel.signalDeviceSampleRate = ""
+    playerModel.signalDeviceUID = ""
+    playerModel.signalEngineRunning = false
+    playerModel.signalEngineSampleRate = ""
+    playerModel.signalExclusive = nil
+    playerModel.signalFileLoaded = false
+    playerModel.signalMeter.clipping = false
+    playerModel.signalMeter.lufsMomentary = nil
+    playerModel.signalMeter.peakDb = -120
+    playerModel.signalMeter.rmsDb = -120
+    playerModel.signalOutputBitDepth = ""
+    playerModel.signalOutputVolume = 0
     playerModel.signalRemoteOutput = ""
     playerModel.signalSampleRate = ""
     playerModel.signalSourceLabel = ""
+    playerModel.signalTelemetrySource = "unverified"
+    playerModel.signalRouteEvents = signalRouteEvents
+  }
+
+  private var usesLocalEngineOutput: Bool {
+    switch outputMode {
+    case .local, .phone, .remoteStream, .streaming: return true
+    default: return false
+    }
+  }
+
+  private func refreshEngineSignalMetrics(_ status: DspPlaybackStatus, includeLevels: Bool = false) {
+    setIfChanged(playerModel, \.signalTelemetrySource, status.fileLoaded ? "observed" : "unverified")
+    setIfChanged(playerModel, \.signalEngineRunning, status.engineRunning)
+    setIfChanged(playerModel, \.signalFileLoaded, status.fileLoaded)
+    setIfChanged(playerModel, \.signalExclusive, nil)
+    let engineRate = status.fileLoaded && status.sampleRate > 0 ? sampleRateTag(status.sampleRate) ?? "" : ""
+    setIfChanged(playerModel, \.signalEngineSampleRate, engineRate)
+    let deviceRate = status.fileLoaded && status.deviceSampleRate > 0 ? sampleRateTag(status.deviceSampleRate) ?? "" : ""
+    setIfChanged(playerModel, \.signalDeviceSampleRate, deviceRate)
+    setIfChanged(playerModel, \.signalDeviceChannelCount, status.fileLoaded && status.deviceChannelCount > 0 ? "\(status.deviceChannelCount)ch" : "")
+    setIfChanged(playerModel, \.signalDeviceName, status.fileLoaded && !status.deviceName.isEmpty ? status.deviceName : playerModel.signalDeviceName)
+    setIfChanged(playerModel, \.signalDevicePortType, status.fileLoaded ? status.devicePortType : "")
+    setIfChanged(playerModel, \.signalDeviceUID, status.fileLoaded ? status.deviceUID : "")
+    setIfChanged(playerModel, \.signalDeviceIOBufferMs, status.fileLoaded ? status.ioBufferDurationMs : 0)
+    setIfChanged(playerModel, \.signalDeviceLatencyMs, status.fileLoaded ? status.outputLatencyMs : 0)
+    setIfChanged(playerModel, \.signalOutputBitDepth, "")
+    setIfChanged(playerModel, \.signalOutputVolume, status.fileLoaded ? status.outputVolume : 0)
+    if includeLevels {
+      setIfChanged(playerModel.signalMeter, \.peakDb, status.peakDb)
+      setIfChanged(playerModel.signalMeter, \.rmsDb, status.rmsDb)
+      setIfChanged(playerModel.signalMeter, \.clipping, status.peakDb >= -0.1)
+      setIfChanged(playerModel.signalMeter, \.lufsMomentary, nil)
+    }
+    if status.channelCount > 0 {
+      setIfChanged(playerModel, \.signalChannelCount, "\(status.channelCount)ch")
+    } else {
+      setIfChanged(playerModel, \.signalChannelCount, "")
+    }
+    recordDacObservation(status)
+  }
+
+  private func refreshRemoteSignalMetrics(_ telemetry: EchoNativePlaybackStatus.AudioTelemetry?) {
+    setIfChanged(playerModel, \.signalDacProfile, nil)
+    setIfChanged(playerModel, \.signalDeviceChannelCount, telemetry?.channels.map { "\($0)ch" } ?? "")
+    setIfChanged(playerModel, \.signalDeviceIOBufferMs, 0)
+    setIfChanged(playerModel, \.signalDeviceLatencyMs, telemetry?.outputLatencyMs ?? 0)
+    if let name = telemetry?.outputDeviceName, !name.isEmpty { setIfChanged(playerModel, \.signalDeviceName, name) }
+    setIfChanged(playerModel, \.signalDevicePortType, telemetry?.outputDeviceType ?? "")
+    setIfChanged(playerModel, \.signalDeviceSampleRate, telemetry?.sampleRate.flatMap(sampleRateTag) ?? "")
+    setIfChanged(playerModel, \.signalDeviceUID, telemetry?.outputDeviceId ?? "")
+    setIfChanged(playerModel, \.signalEngineRunning, false)
+    setIfChanged(playerModel, \.signalEngineSampleRate, "")
+    setIfChanged(playerModel, \.signalExclusive, telemetry?.exclusive)
+    setIfChanged(playerModel, \.signalFileLoaded, false)
+    setIfChanged(playerModel, \.signalOutputBitDepth, telemetry?.bitDepth.map { "\($0)Bit" } ?? "")
+    setIfChanged(playerModel, \.signalOutputVolume, 0)
+    setIfChanged(playerModel, \.signalTelemetrySource, telemetry == nil ? "unverified" : "reported")
+    if signalPathVisible {
+      setIfChanged(playerModel.signalMeter, \.clipping, telemetry?.clipping ?? false)
+      setIfChanged(playerModel.signalMeter, \.lufsMomentary, telemetry?.lufsMomentary)
+      setIfChanged(playerModel.signalMeter, \.peakDb, telemetry?.peakDb ?? -120)
+      setIfChanged(playerModel.signalMeter, \.rmsDb, telemetry?.rmsDb ?? -120)
+    }
+  }
+
+  private func recordDacObservation(_ status: DspPlaybackStatus) {
+    guard status.fileLoaded else { return }
+    let id = status.deviceUID.isEmpty ? "\(status.devicePortType)|\(status.deviceName)" : status.deviceUID
+    guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    let sampleRate = status.deviceSampleRate.rounded()
+    let observationKey = "\(id)|\(Int(sampleRate))|\(status.deviceChannelCount)"
+    if let profile = dacProfiles[id] { setIfChanged(playerModel, \.signalDacProfile, profile) }
+    guard observationKey != lastDacObservationKey else { return }
+    lastDacObservationKey = observationKey
+
+    let now = Date()
+    var profile = dacProfiles[id] ?? EchoNativeDacObservation(
+      id: id,
+      channelCounts: [],
+      firstSeenAt: now,
+      lastSeenAt: now,
+      name: status.deviceName.isEmpty ? localized("System output", "系统输出") : status.deviceName,
+      observationCount: 0,
+      portType: status.devicePortType,
+      sampleRates: []
+    )
+    if sampleRate > 0, !profile.sampleRates.contains(sampleRate) { profile.sampleRates.append(sampleRate) }
+    if status.deviceChannelCount > 0, !profile.channelCounts.contains(status.deviceChannelCount) {
+      profile.channelCounts.append(status.deviceChannelCount)
+    }
+    profile.sampleRates.sort()
+    profile.channelCounts.sort()
+    profile.lastSeenAt = now
+    profile.name = status.deviceName.isEmpty ? profile.name : status.deviceName
+    profile.portType = status.devicePortType.isEmpty ? profile.portType : status.devicePortType
+    profile.observationCount += 1
+    dacProfiles[id] = profile
+    setIfChanged(playerModel, \.signalDacProfile, profile)
+    EchoNativeDacObservation.save(dacProfiles)
+  }
+
+  private func recordSignalRouteObservation(for track: EchoNativeCoreTrack) {
+    let engineStatus = audioEngine.playbackStatus()
+    guard !usesLocalEngineOutput || engineStatus.fileLoaded else { return }
+    let routeLabel = signalRouteLabel()
+    let deviceName = playerModel.signalDeviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let sourceRate = track.sampleRate.map { Int($0.rounded()) }
+    let deviceRateValue = usesLocalEngineOutput ? engineStatus.deviceSampleRate : 0
+    let outputRate = deviceRateValue > 0 ? Int(deviceRateValue.rounded()) : sourceRate
+    let routeKey = [
+      outputMode.rawValue,
+      deviceName.lowercased(),
+      playerModel.signalRemoteOutput.lowercased(),
+      sourceRate.map(String.init) ?? "",
+      outputRate.map(String.init) ?? "",
+      trackKey(track),
+    ].joined(separator: "|")
+    guard routeKey != lastSignalRouteKey else { return }
+
+    let previous = lastSignalRouteKey
+    lastSignalRouteKey = routeKey
+    let rateMismatch = sourceRate != nil && outputRate != nil && sourceRate != outputRate
+    let tone: String
+    let title: String
+    let detail: String
+    if previous.isEmpty {
+      tone = "good"
+      title = localized("Route engaged", "路径接入")
+      detail = routeLabel
+    } else if rateMismatch {
+      tone = "process"
+      title = localized("Rate conversion", "采样率转换")
+      let sourceText = sourceRate.map { "\($0) Hz" } ?? localized("unknown", "未知")
+      let outputText = outputRate.map { "\($0) Hz" } ?? localized("unknown", "未知")
+      detail = "\(sourceText) → \(outputText) · \(routeLabel)"
+    } else {
+      tone = playerModel.eqEnabled || playerModel.loudnessEnabled ? "process" : "good"
+      title = localized("Route changed", "路径变更")
+      detail = routeLabel
+    }
+
+    let event = EchoNativeSignalRouteEvent(
+      id: UUID().uuidString,
+      tone: tone,
+      title: title,
+      detail: detail,
+      trackTitle: track.title,
+      at: Date()
+    )
+    signalRouteEvents.insert(event, at: 0)
+    if signalRouteEvents.count > 20 {
+      signalRouteEvents = Array(signalRouteEvents.prefix(20))
+    }
+    EchoNativeSignalRouteEvent.save(signalRouteEvents)
+  }
+
+  private func signalRouteLabel() -> String {
+    let mode: String
+    switch outputMode {
+    case .local: mode = localized("Local", "本机")
+    case .pc: mode = localized("ECHO control", "ECHO 控制")
+    case .phone: mode = localized("ECHO stream", "ECHO 串流")
+    case .remoteControl: mode = localized("Poweramp control", "Poweramp 控制")
+    case .remoteStream: mode = localized("Poweramp stream", "Poweramp 串流")
+    case .streaming: mode = localized("NetEase stream", "网易云串流")
+    }
+    var parts = [mode]
+    let remote = playerModel.signalRemoteOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+    let device = playerModel.signalDeviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !remote.isEmpty { parts.append(remote) }
+    if !device.isEmpty { parts.append(device) }
+    if playerModel.eqEnabled { parts.append("EQ") }
+    if playerModel.loudnessEnabled { parts.append(localized("Loudness", "响度")) }
+    return parts.joined(separator: " / ")
   }
 
   func tags(

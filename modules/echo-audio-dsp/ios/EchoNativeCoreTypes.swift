@@ -314,6 +314,21 @@ struct EchoNativePersistentState: Codable, Sendable {
 }
 
 struct EchoNativePlaybackStatus: Decodable, Sendable {
+  struct AudioTelemetry: Decodable, Sendable {
+    let bitDepth: Int?
+    let channels: Int?
+    let clipping: Bool?
+    let exclusive: Bool?
+    let lufsMomentary: Double?
+    let outputDeviceId: String?
+    let outputDeviceName: String?
+    let outputDeviceType: String?
+    let outputLatencyMs: Double?
+    let peakDb: Double?
+    let rmsDb: Double?
+    let sampleRate: Double?
+  }
+
   struct Device: Decodable, Sendable {
     let id: String
     let name: String
@@ -335,6 +350,7 @@ struct EchoNativePlaybackStatus: Decodable, Sendable {
     let volume: Double
   }
 
+  let audio: AudioTelemetry?
   let device: Device
   let playback: Playback
 }

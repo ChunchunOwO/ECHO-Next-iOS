@@ -145,6 +145,21 @@ extension View {
   }
 
   @ViewBuilder
+  func echoLargeSheet() -> some View {
+    if #available(iOS 16.4, *) {
+      presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(echoWarmBackground)
+        .presentationCornerRadius(28)
+    } else if #available(iOS 16.0, *) {
+      presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    } else {
+      self
+    }
+  }
+
+  @ViewBuilder
   func echoBlurredSheet() -> some View {
     if #available(iOS 16.4, *) {
       presentationBackground(.regularMaterial)
@@ -182,6 +197,13 @@ final class EchoNativeEqualizerModel: ObservableObject {
 
 final class EchoNativePlaybackClockModel: ObservableObject {
   @Published var positionMs = 0.0
+}
+
+final class EchoNativeSignalMeterModel: ObservableObject {
+  @Published var clipping = false
+  @Published var lufsMomentary: Double?
+  @Published var peakDb = -120.0
+  @Published var rmsDb = -120.0
 }
 
 struct EchoNativeQueueItem: Decodable, Identifiable {
@@ -240,6 +262,7 @@ struct EchoNativeExternalSourcePickerPayload: Decodable, Identifiable {
 final class EchoNativePlayerModel: ObservableObject {
   let clock = EchoNativePlaybackClockModel()
   let equalizer = EchoNativeEqualizerModel()
+  let signalMeter = EchoNativeSignalMeterModel()
   @Published var activePage = "control"
   @Published var activeLyricIndex = 0
   @Published var album = ""
@@ -272,11 +295,27 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var showPlayerOutputInMenu = false
   @Published var signalBitDepth = ""
   @Published var signalBitrate = ""
+  @Published var signalChannelCount = ""
   @Published var signalCodec = ""
+  @Published var signalDacProfile: EchoNativeDacObservation?
+  @Published var signalDeviceChannelCount = ""
+  @Published var signalDeviceIOBufferMs = 0.0
+  @Published var signalDeviceLatencyMs = 0.0
   @Published var signalDeviceName = ""
+  @Published var signalDevicePortType = ""
+  @Published var signalDeviceSampleRate = ""
+  @Published var signalDeviceUID = ""
+  @Published var signalEngineRunning = false
+  @Published var signalEngineSampleRate = ""
+  @Published var signalExclusive: Bool?
+  @Published var signalFileLoaded = false
+  @Published var signalOutputBitDepth = ""
+  @Published var signalOutputVolume = 0.0
   @Published var signalRemoteOutput = ""
+  @Published var signalRouteEvents = EchoNativeSignalRouteEvent.load()
   @Published var signalSampleRate = ""
   @Published var signalSourceLabel = ""
+  @Published var signalTelemetrySource = "unverified"
   @Published var tags: [String] = []
   @Published var title = ""
   @Published var volume = 1.0
@@ -559,8 +598,8 @@ struct EchoNativePlayerScreen: View {
         .echoBlurredSheet()
     }
     .sheet(isPresented: $showSignalPath) {
-      EchoNativeSignalPathSheet(model: model)
-        .echoMediumSheet()
+      EchoNativeSignalPathSheet(model: model, onAction: onAction)
+        .echoLargeSheet()
         .echoBlurredSheet()
     }
     .onAppear {
@@ -1844,9 +1883,117 @@ private final class EchoNativeLocalArtworkLoader: ObservableObject {
 }
 
 
+struct EchoNativeDacObservation: Codable, Identifiable, Equatable {
+  private static let storageKey = "echo.native.dac-observations.v1"
+
+  let id: String
+  var channelCounts: [Int]
+  var firstSeenAt: Date
+  var lastSeenAt: Date
+  var name: String
+  var observationCount: Int
+  var portType: String
+  var sampleRates: [Double]
+
+  static func load() -> [String: EchoNativeDacObservation] {
+    guard let data = UserDefaults.standard.data(forKey: storageKey),
+      let values = try? JSONDecoder().decode([EchoNativeDacObservation].self, from: data)
+    else { return [:] }
+    return values.reduce(into: [:]) { profiles, value in profiles[value.id] = value }
+  }
+
+  static func save(_ profiles: [String: EchoNativeDacObservation]) {
+    let values = profiles.values.sorted { $0.lastSeenAt > $1.lastSeenAt }.prefix(24)
+    guard let data = try? JSONEncoder().encode(Array(values)) else { return }
+    UserDefaults.standard.set(data, forKey: storageKey)
+  }
+}
+
+struct EchoNativeSignalRouteEvent: Codable, Identifiable, Equatable {
+  private static let storageKey = "echo.native.signal-route-events.v1"
+
+  let id: String
+  let tone: String
+  let title: String
+  let detail: String
+  let trackTitle: String
+  let at: Date
+
+  static func load() -> [EchoNativeSignalRouteEvent] {
+    guard let data = UserDefaults.standard.data(forKey: storageKey) else { return [] }
+    return (try? JSONDecoder().decode([EchoNativeSignalRouteEvent].self, from: data)).map { Array($0.prefix(20)) } ?? []
+  }
+
+  static func save(_ events: [EchoNativeSignalRouteEvent]) {
+    guard let data = try? JSONEncoder().encode(Array(events.prefix(20))) else { return }
+    UserDefaults.standard.set(data, forKey: storageKey)
+  }
+}
+
+private struct EchoNativeSignalLiveMeter: View {
+  @ObservedObject var model: EchoNativeSignalMeterModel
+  let external: Bool
+  let english: Bool
+  let tone: Color
+
+  private var hasLevel: Bool { model.peakDb > -120 }
+
+  private var fill: Double {
+    hasLevel ? max(0, min(1, (model.peakDb + 60) / 60)) : 0
+  }
+
+  private var peakLabel: String {
+    hasLevel ? String(format: "%.1f dBFS", model.peakDb) : (external ? (english ? "External" : "外部") : "-- dBFS")
+  }
+
+  private var detail: String {
+    guard hasLevel else {
+      return external
+        ? (english ? "The remote endpoint has not reported live levels." : "远程端尚未上报实时电平。")
+        : (english ? "RMS -- dBFS · meter active during playback" : "RMS -- dBFS · 播放时启用电平表")
+    }
+    var parts = [String(format: "RMS %.1f dBFS", model.rmsDb)]
+    if let lufs = model.lufsMomentary { parts.append(String(format: "LUFS-M %.1f", lufs)) }
+    return parts.joined(separator: " · ")
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(english ? "LIVE OUTPUT PEAK" : "实时输出峰值")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundColor(echoInk.opacity(0.48))
+          Text(detail)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.5))
+        }
+        Spacer(minLength: 8)
+        Text(peakLabel)
+          .font(.system(size: 14, weight: .bold, design: .monospaced))
+          .foregroundColor(model.clipping || model.peakDb > -3 ? echoAccent : tone)
+      }
+      ProgressView(value: fill)
+        .tint(model.clipping || model.peakDb > -3 ? echoAccent : echoGold)
+      if hasLevel && (model.clipping || model.peakDb > -3) {
+        Label(
+          english ? "Low headroom: reduce positive gain if clipping is audible." : "输出余量偏低；如出现削波，请降低正向增益。",
+          systemImage: "exclamationmark.triangle.fill"
+        )
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundColor(echoAccent)
+      }
+    }
+  }
+}
+
 private struct EchoNativeSignalPathSheet: View {
   @ObservedObject var model: EchoNativePlayerModel
+  let onAction: ([String: Any]) -> Void
   @Environment(\.dismiss) private var dismiss
+  @State private var dacAtlasExpanded = false
+  @State private var doctorExpanded = false
+  @State private var flightRecorderExpanded = false
 
   private var english: Bool { model.language == "en" }
 
@@ -1861,22 +2008,37 @@ private struct EchoNativeSignalPathSheet: View {
     }
   }
 
+  private var remoteMode: Bool {
+    ["pc", "phone", "remoteControl", "remoteStream"].contains(model.outputMode)
+  }
+
+  private var pathOnline: Bool {
+    !remoteMode || model.connectionOnline
+  }
+
+  private var sourceProvenance: String {
+    model.outputMode == "local" ? "observed" : "reported"
+  }
+
   private var sourceSpec: String {
-    let parts = [model.signalCodec, model.signalSampleRate, model.signalBitDepth, model.signalBitrate]
+    let parts = [model.signalCodec, model.signalSampleRate, model.signalBitDepth, model.signalBitrate, model.signalChannelCount]
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { !$0.isEmpty }
     return parts.isEmpty ? (english ? "Format unknown" : "格式未知") : parts.joined(separator: " · ")
   }
 
+  private var processingModules: [String] {
+    guard usesLocalProcessing else { return [] }
+    var modules: [String] = []
+    if model.eqEnabled { modules.append(english ? "10-band EQ" : "十段 EQ") }
+    if model.loudnessEnabled { modules.append(english ? "Loudness" : "响度归一化") }
+    return modules
+  }
+
   private var summaryLabel: String {
     if !hasTrack { return english ? "Waiting for playback" : "等待播放" }
-    if (model.outputMode == "pc" || model.outputMode == "phone") && !model.connectionOnline {
-      return english ? "Path error" : "链路异常"
-    }
-    if (model.outputMode == "remoteControl" || model.outputMode == "remoteStream") && !model.connectionOnline {
-      return english ? "Path error" : "链路异常"
-    }
-    if usesLocalProcessing && (model.eqEnabled || model.loudnessEnabled) {
+    if !pathOnline { return english ? "Path unavailable" : "链路不可用" }
+    if !processingModules.isEmpty {
       return english ? "Enhanced" : "已增强"
     }
     if usesLocalProcessing {
@@ -1889,22 +2051,17 @@ private struct EchoNativeSignalPathSheet: View {
     if !hasTrack {
       return english ? "Start a track to inspect source, processing, and output." : "开始播放后，可查看音源、处理和输出。"
     }
-    if (model.outputMode == "pc" || model.outputMode == "phone" || model.outputMode == "remoteControl" || model.outputMode == "remoteStream") && !model.connectionOnline {
+    if !pathOnline {
       return model.connectionLabel
     }
-    if usesLocalProcessing && model.eqEnabled && model.loudnessEnabled {
-      return english ? "EQ and loudness are active on this device." : "本机 EQ 与响度归一化已介入。"
+    if !processingModules.isEmpty {
+      return english
+        ? "Active processing: \(processingModules.joined(separator: " + "))."
+        : "当前处理：\(processingModules.joined(separator: " + "))。"
     }
-    if usesLocalProcessing && model.eqEnabled {
-      return english ? "EQ is active on this device." : "本机 EQ 已介入。"
-    }
-    if usesLocalProcessing && model.loudnessEnabled {
-      return english ? "Loudness normalization is active on this device." : "本机响度归一化已介入。"
-    }
-    if usesLocalProcessing {
-      return english ? "No local DSP modules are active." : "本机未开启额外 DSP。"
-    }
-    return english ? "Processing stays on the remote device." : "处理发生在远程设备端。"
+    return usesLocalProcessing
+      ? (english ? "Direct native playback with no additional DSP." : "原生直通播放，未启用额外 DSP。")
+      : (english ? "Decode and processing stay on the remote device." : "解码与处理由远程设备负责。")
   }
 
   private var sourceDetail: String {
@@ -1920,12 +2077,35 @@ private struct EchoNativeSignalPathSheet: View {
     if !usesLocalProcessing {
       return english ? "Remote device owns DSP" : "DSP 由远程设备负责"
     }
-    var modules: [String] = []
-    if model.eqEnabled { modules.append(english ? "10-band EQ" : "十段 EQ") }
-    if model.loudnessEnabled { modules.append(english ? "Loudness" : "响度归一化") }
-    return modules.isEmpty
+    return processingModules.isEmpty
       ? (english ? "Direct / bypass" : "直通 / 旁路")
-      : modules.joined(separator: " + ")
+      : processingModules.joined(separator: " + ")
+  }
+
+  private var decodeValue: String {
+    if !hasTrack { return english ? "Waiting" : "等待中" }
+    if !usesLocalProcessing { return english ? "Remote decoder" : "远程解码器" }
+    if model.signalFileLoaded { return "AVAudioFile → PCM" }
+    return english ? "Preparing decoder" : "正在准备解码器"
+  }
+
+  private var decodeDetail: String {
+    if !usesLocalProcessing {
+      return english ? "Decoder details are owned by the remote endpoint." : "解码器详情由远程端提供。"
+    }
+    let sourceRate = model.signalSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    let engineRate = model.signalEngineSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    var parts: [String] = []
+    if !sourceRate.isEmpty && !engineRate.isEmpty {
+      parts.append(sourceRate == engineRate ? sourceRate : "\(sourceRate) → \(engineRate)")
+    } else if !engineRate.isEmpty {
+      parts.append(engineRate)
+    }
+    if !model.signalChannelCount.isEmpty { parts.append(model.signalChannelCount) }
+    parts.append(model.signalEngineRunning
+      ? (english ? "Engine running" : "引擎运行中")
+      : (english ? "Engine idle" : "引擎空闲"))
+    return parts.joined(separator: " · ")
   }
 
   private var outputTitle: String {
@@ -1956,7 +2136,14 @@ private struct EchoNativeSignalPathSheet: View {
     }
     if !device.isEmpty { parts.append(device) }
     if !remote.isEmpty { parts.append(remote) }
-    if model.outputMode == "pc" || model.outputMode == "phone" || model.outputMode == "remoteControl" || model.outputMode == "remoteStream" {
+    let deviceFormat = [model.signalDeviceSampleRate, model.signalOutputBitDepth, model.signalDeviceChannelCount]
+      .filter { !$0.isEmpty }
+      .joined(separator: " · ")
+    if !deviceFormat.isEmpty { parts.append(deviceFormat) }
+    if model.signalDeviceLatencyMs > 0 {
+      parts.append(String(format: english ? "%.1f ms latency" : "%.1f ms 延迟", model.signalDeviceLatencyMs))
+    }
+    if remoteMode {
       parts.append(model.connectionLabel)
     }
     return parts.isEmpty ? (english ? "Route unknown" : "路径未知") : parts.joined(separator: " · ")
@@ -1964,97 +2151,451 @@ private struct EchoNativeSignalPathSheet: View {
 
   private var tone: Color {
     if !hasTrack { return echoInk.opacity(0.45) }
-    if (model.outputMode == "pc" || model.outputMode == "phone" || model.outputMode == "remoteControl" || model.outputMode == "remoteStream") && !model.connectionOnline {
+    if !pathOnline {
       return echoAccent
     }
-    if usesLocalProcessing && (model.eqEnabled || model.loudnessEnabled) {
+    if !processingModules.isEmpty {
       return echoGold
     }
-    return echoInk.opacity(0.72)
+    return Color.green.opacity(0.85)
+  }
+
+  private var pathReadiness: Double {
+    if !hasTrack { return 0 }
+    if !pathOnline { return 0.15 }
+    if !usesLocalProcessing { return 1 }
+    if model.signalEngineRunning { return 1 }
+    if model.signalFileLoaded { return 0.72 }
+    return 0.35
+  }
+
+  private var readinessLabel: String {
+    if !hasTrack { return english ? "No signal" : "无信号" }
+    if !pathOnline { return english ? "Disconnected" : "连接中断" }
+    if !usesLocalProcessing { return english ? "Remote active" : "远程链路活动" }
+    if model.signalEngineRunning { return english ? "Live" : "实时运行" }
+    if model.signalFileLoaded { return english ? "Ready" : "已就绪" }
+    return english ? "Preparing" : "准备中"
+  }
+
+  private var clockValue: String {
+    let source = model.signalSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    let engine = model.signalEngineSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    let device = model.signalDeviceSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    var rates: [String] = []
+    for rate in [source, engine, device] where !rate.isEmpty && rates.last != rate {
+      rates.append(rate)
+    }
+    return rates.isEmpty ? (english ? "Unknown" : "未知") : rates.joined(separator: " → ")
   }
 
   var body: some View {
-    VStack(spacing: 16) {
-      HStack(alignment: .top, spacing: 12) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text(english ? "Signal path" : "信号路径")
-            .font(.system(size: 24, weight: .bold, design: .rounded))
-          Text(summaryDetail)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundColor(echoInk.opacity(0.55))
-            .fixedSize(horizontal: false, vertical: true)
+    ZStack {
+      echoWarmBackground.ignoresSafeArea()
+      ScrollView {
+        VStack(alignment: .leading, spacing: 22) {
+          header
+          summary
+          theater
+          signalChain
+          doctor
+          dacAtlas
+          flightRecorder
         }
-        Spacer(minLength: 8)
-        Button {
-          dismiss()
-        } label: {
-          Image(systemName: "xmark")
-            .font(.system(size: 13, weight: .bold))
-            .frame(width: 44, height: 44)
-            .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(english ? "Close signal path" : "关闭信号路径")
+        .padding(.horizontal, 18)
+        .padding(.top, 12)
+        .padding(.bottom, 32)
+        .frame(maxWidth: 680)
+        .frame(maxWidth: .infinity)
       }
-
-      VStack(alignment: .leading, spacing: 8) {
-        Text(summaryLabel)
-          .font(.system(size: 18, weight: .bold, design: .rounded))
-          .foregroundColor(tone)
-        Text(sourceSpec)
-          .font(.system(size: 12, weight: .semibold))
-          .foregroundColor(echoInk.opacity(0.62))
-          .lineLimit(2)
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(14)
-      .echoGlass(tint: Color.white.opacity(0.08), clear: false, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-      VStack(spacing: 10) {
-        signalNode(
-          index: "01",
-          title: english ? "Source" : "音源",
-          detail: sourceDetail
-        )
-        signalNode(
-          index: "02",
-          title: english ? "Processing" : "处理",
-          detail: processingDetail
-        )
-        signalNode(
-          index: "03",
-          title: outputTitle,
-          detail: outputDetail
-        )
-      }
-
-      Spacer(minLength: 0)
     }
-    .padding(18)
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    .background(echoWarmBackground.ignoresSafeArea())
+    .onAppear { onAction(["action": "signalPathVisible", "visible": true]) }
+    .onDisappear { onAction(["action": "signalPathVisible", "visible": false]) }
   }
 
-  private func signalNode(index: String, title: String, detail: String) -> some View {
+  private var header: some View {
     HStack(alignment: .top, spacing: 12) {
-      Text(index)
-        .font(.system(size: 12, weight: .bold, design: .rounded))
-        .foregroundColor(echoAccent)
-        .frame(width: 28, height: 28)
-        .echoGlass(tint: Color.white.opacity(0.1), in: Circle())
-      VStack(alignment: .leading, spacing: 4) {
-        Text(title)
+      VStack(alignment: .leading, spacing: 5) {
+        Text(english ? "Signal path" : "信号路径")
+          .font(.system(size: 25, weight: .bold, design: .rounded))
+        Text(english ? "\(summaryLabel) · 4 stages" : "\(summaryLabel) · 4 层")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundColor(tone)
+      }
+      Spacer(minLength: 8)
+      Button { dismiss() } label: {
+        Image(systemName: "xmark")
           .font(.system(size: 13, weight: .bold))
-        Text(detail)
+          .frame(width: 44, height: 44)
+          .echoGlass(tint: Color.white.opacity(0.14), in: Circle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(english ? "Close signal path" : "关闭信号路径")
+    }
+  }
+
+  private var summary: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(sourceSpec)
+        .font(.system(size: 15, weight: .bold, design: .rounded))
+        .foregroundColor(tone)
+      Text(summaryDetail)
+        .font(.system(size: 12, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.62))
+        .fixedSize(horizontal: false, vertical: true)
+      Divider()
+      HStack(spacing: 12) {
+        provenanceMark("observed")
+        provenanceMark("reported")
+        provenanceMark("unverified")
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(15)
+    .echoGlass(tint: tone.opacity(0.08), clear: false, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  private var theater: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      sectionTitle(english ? "Signal theater" : "信号剧场", icon: "waveform.path.ecg")
+      HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(english ? "PATH READINESS" : "链路就绪度")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundColor(echoInk.opacity(0.48))
+          Text(readinessLabel)
+            .font(.system(size: 20, weight: .bold, design: .rounded))
+        }
+        Spacer()
+        Text("\(Int(pathReadiness * 100))%")
+          .font(.system(size: 14, weight: .bold, design: .monospaced))
+          .foregroundColor(tone)
+      }
+      ProgressView(value: pathReadiness)
+        .tint(tone)
+      Divider()
+      EchoNativeSignalLiveMeter(
+        model: model.signalMeter,
+        external: !usesLocalProcessing,
+        english: english,
+        tone: tone
+      )
+      LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+        metric(english ? "Source" : "音源", value: model.signalSourceLabel.isEmpty ? (english ? "Unknown" : "未知") : model.signalSourceLabel, detail: sourceSpec)
+        metric(english ? "Processing" : "处理", value: processingDetail, detail: usesLocalProcessing ? "AVAudioEngine" : (english ? "Remote endpoint" : "远程端"))
+        metric(english ? "Output" : "输出", value: outputTitle, detail: model.signalDeviceName.isEmpty ? (english ? "Unknown device" : "未知设备") : model.signalDeviceName)
+        metric(english ? "Clock" : "时钟", value: clockValue, detail: usesLocalProcessing ? (english ? "Source → engine → device" : "音源 → 引擎 → 设备") : (english ? "Reported source rate" : "已报告音源采样率"))
+      }
+    }
+  }
+
+  private var signalChain: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      sectionTitle(english ? "Full chain" : "完整链路", icon: "point.3.connected.trianglepath.dotted")
+      signalNode(index: "01", icon: "externaldrive.fill", title: english ? "Source" : "音源", value: model.signalSourceLabel.isEmpty ? (english ? "Unknown source" : "未知音源") : model.signalSourceLabel, detail: sourceDetail, provenance: sourceProvenance, nodeTone: hasTrack ? Color.green : echoInk.opacity(0.4))
+      signalNode(index: "02", icon: "cpu", title: english ? "Decode" : "解码", value: decodeValue, detail: decodeDetail, provenance: usesLocalProcessing ? model.signalTelemetrySource : (model.signalTelemetrySource == "reported" ? "reported" : "unverified"), nodeTone: model.signalFileLoaded || !usesLocalProcessing ? Color.green : echoGold)
+      signalNode(index: "03", icon: processingModules.isEmpty ? "checkmark.shield.fill" : "slider.horizontal.3", title: english ? "Process" : "处理", value: processingDetail, detail: usesLocalProcessing ? (english ? "Local DSP chain" : "本机 DSP 链") : (english ? "External processing" : "外部处理"), provenance: usesLocalProcessing ? model.signalTelemetrySource : "unverified", nodeTone: processingModules.isEmpty ? Color.green : echoGold)
+      signalNode(index: "04", icon: "hifispeaker.fill", title: english ? "Output" : "输出", value: outputTitle, detail: outputDetail, provenance: model.signalTelemetrySource, nodeTone: pathOnline ? Color.green : echoAccent)
+    }
+  }
+
+  private var doctor: some View {
+    DisclosureGroup(isExpanded: $doctorExpanded) {
+      VStack(spacing: 10) {
+        doctorInsights
+      }
+      .padding(.top, 12)
+    } label: {
+      disclosureLabel(
+        english ? "Signal doctor" : "信号医生",
+        detail: english ? "Inspect path quality and blockers" : "检查链路质量与限制",
+        icon: "stethoscope"
+      )
+    }
+    .tint(echoAccent)
+    .padding(15)
+    .echoGlass(tint: Color.white.opacity(0.06), clear: false, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  private var dacAtlas: some View {
+    DisclosureGroup(isExpanded: $dacAtlasExpanded) {
+      VStack(alignment: .leading, spacing: 12) {
+        if usesLocalProcessing, let profile = model.signalDacProfile {
+          LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+            metric(english ? "Current route" : "当前路由", value: profile.name, detail: model.signalDevicePortType.isEmpty ? profile.portType : model.signalDevicePortType)
+            metric(english ? "Current format" : "当前格式", value: [model.signalDeviceSampleRate, model.signalDeviceChannelCount].filter { !$0.isEmpty }.joined(separator: " · "), detail: provenanceText("observed"))
+            metric(english ? "Observed rates" : "观测采样率", value: profile.sampleRates.map(formatObservedRate).joined(separator: " · "), detail: english ? "Seen on this route" : "此路由历史观测")
+            metric(english ? "Observed channels" : "观测声道", value: profile.channelCounts.map { "\($0)ch" }.joined(separator: " · "), detail: english ? "Seen on this route" : "此路由历史观测")
+            metric(english ? "Latency / buffer" : "延迟 / 缓冲", value: String(format: "%.1f / %.1f ms", model.signalDeviceLatencyMs, model.signalDeviceIOBufferMs), detail: english ? "Output / I/O buffer" : "输出 / I/O 缓冲")
+            metric(english ? "System volume" : "系统音量", value: "\(Int((model.signalOutputVolume * 100).rounded()))%", detail: english ? "AVAudioSession output" : "AVAudioSession 输出")
+          }
+          VStack(alignment: .leading, spacing: 4) {
+            Text(english ? "ROUTE UID" : "路由 UID")
+              .font(.system(size: 9, weight: .bold))
+              .foregroundColor(echoInk.opacity(0.45))
+            Text(model.signalDeviceUID.isEmpty ? profile.id : model.signalDeviceUID)
+              .font(.system(size: 10, weight: .medium, design: .monospaced))
+              .foregroundColor(echoInk.opacity(0.58))
+              .textSelection(.enabled)
+            Text(english ? "\(profile.observationCount) format observations · last seen" : "已记录 \(profile.observationCount) 次格式观测 · 最近出现")
+              .font(.system(size: 10, weight: .medium))
+              .foregroundColor(echoInk.opacity(0.48))
+            Text(profile.lastSeenAt, style: .relative)
+              .font(.system(size: 10, weight: .semibold))
+              .foregroundColor(echoInk.opacity(0.58))
+          }
+          Text(english ? "This atlas records formats actually observed on the route. It does not claim the DAC's advertised maximum capability." : "图谱只记录此路由实际出现过的格式，不代表 DAC 宣称的最高能力。")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.5))
+        } else if model.signalTelemetrySource == "reported" {
+          LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+            metric(english ? "Remote device" : "远程设备", value: model.signalDeviceName, detail: model.signalDevicePortType.isEmpty ? model.signalRemoteOutput : model.signalDevicePortType)
+            metric(english ? "Reported format" : "上报格式", value: [model.signalDeviceSampleRate, model.signalOutputBitDepth, model.signalDeviceChannelCount].filter { !$0.isEmpty }.joined(separator: " · "), detail: provenanceText("reported"))
+            metric(english ? "Output mode" : "输出模式", value: model.signalExclusive.map { $0 ? "Exclusive" : "Shared" } ?? model.signalRemoteOutput, detail: english ? "Endpoint report" : "远程端上报")
+            metric(english ? "Latency" : "延迟", value: model.signalDeviceLatencyMs > 0 ? String(format: "%.1f ms", model.signalDeviceLatencyMs) : (english ? "Not reported" : "未上报"), detail: provenanceText("reported"))
+          }
+          Text(english ? "Remote values are accepted from the paired endpoint and are not independently measured by this iPhone." : "远程数据来自配对端上报，本机无法独立测量验证。")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.5))
+        } else {
+          Label(
+            english ? "No verifiable DAC telemetry is available for this route." : "当前链路没有可验证的 DAC 遥测。",
+            systemImage: "questionmark.circle"
+          )
           .font(.system(size: 12, weight: .medium))
-          .foregroundColor(echoInk.opacity(0.62))
+          .foregroundColor(echoInk.opacity(0.55))
+        }
+      }
+      .padding(.top, 12)
+    } label: {
+      disclosureLabel(
+        english ? "DAC capability atlas" : "DAC 能力图谱",
+        detail: model.signalDeviceName.isEmpty ? (english ? "Observed route capabilities" : "已观测路由能力") : model.signalDeviceName,
+        icon: "waveform.path.ecg"
+      )
+    }
+    .tint(echoAccent)
+    .padding(15)
+    .echoGlass(tint: Color.white.opacity(0.06), clear: false, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  @ViewBuilder
+  private var doctorInsights: some View {
+    if !hasTrack {
+      insight(english ? "WAITING" : "等待", title: english ? "No active signal" : "当前没有活动信号", detail: english ? "Start playback to inspect decode, DSP, and output state." : "开始播放后可检查解码、DSP 与输出状态。", advice: english ? "No action required." : "无需操作。", insightTone: echoInk.opacity(0.48))
+    } else {
+      if !pathOnline {
+        insight(english ? "CONNECTION" : "连接", title: english ? "Remote path is unavailable" : "远程链路不可用", detail: model.connectionLabel, advice: english ? "Check the paired device and network, then reconnect." : "检查配对设备和网络后重新连接。", insightTone: echoAccent)
+      }
+      if usesLocalProcessing && !model.signalFileLoaded {
+        insight(english ? "DECODER" : "解码", title: english ? "Audio file is not loaded" : "音频文件尚未加载", detail: english ? "The local engine has not established a PCM stream." : "本机引擎尚未建立 PCM 音频流。", advice: english ? "Wait for caching to finish or retry playback." : "等待缓存完成，或重试播放。", insightTone: echoGold)
+      }
+      if !model.signalSampleRate.isEmpty && !model.signalEngineSampleRate.isEmpty && model.signalSampleRate != model.signalEngineSampleRate {
+        insight(english ? "CLOCK" : "时钟", title: english ? "Sample-rate conversion is active" : "采样率转换已启用", detail: "\(model.signalSampleRate) → \(model.signalEngineSampleRate)", advice: english ? "This is expected when the decoded stream and engine rate differ." : "解码流与引擎采样率不同时，这是正常行为。", insightTone: echoGold)
+      }
+      insight(
+        english ? "PROCESSING" : "处理",
+        title: processingModules.isEmpty ? (english ? "Direct processing path" : "处理链为直通") : (english ? "DSP modules are active" : "DSP 模块已介入"),
+        detail: processingDetail,
+        advice: usesLocalProcessing ? (english ? "EQ and loudness changes are applied before the main mixer." : "EQ 与响度处理位于主混音器之前。") : (english ? "Detailed remote DSP telemetry is not exposed by this endpoint." : "当前远程端未提供详细 DSP 遥测。"),
+        insightTone: processingModules.isEmpty ? Color.green : echoGold
+      )
+      insight(english ? "INTEGRITY" : "完整性", title: english ? "Bit-perfect status is not asserted" : "未声明 Bit-perfect 状态", detail: english ? "iOS shared output and remote endpoints do not expose enough telemetry to prove a bit-perfect route." : "iOS 共享输出与远程端没有提供足够遥测，无法证明链路为 Bit-perfect。", advice: english ? "Treat the displayed format as observed metadata, not a bit-perfect guarantee." : "当前格式仅代表观测到的元数据，不代表 Bit-perfect 保证。", insightTone: echoInk.opacity(0.58))
+    }
+  }
+
+  private var flightRecorder: some View {
+    DisclosureGroup(isExpanded: $flightRecorderExpanded) {
+      VStack(spacing: 0) {
+        if model.signalRouteEvents.isEmpty {
+          Text(english ? "Route events will appear after a playback path is established." : "播放链路建立后会在这里记录路径事件。")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.55))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 12)
+        } else {
+          ForEach(Array(model.signalRouteEvents.prefix(8)).indices, id: \.self) { index in
+            routeEvent(model.signalRouteEvents[index])
+            if index < min(model.signalRouteEvents.count, 8) - 1 { Divider() }
+          }
+        }
+      }
+      .padding(.top, 4)
+    } label: {
+      disclosureLabel(
+        english ? "Route flight recorder" : "路径飞行记录器",
+        detail: english ? "\(model.signalRouteEvents.count) recent events" : "最近 \(model.signalRouteEvents.count) 条事件",
+        icon: "clock.arrow.circlepath"
+      )
+    }
+    .tint(echoAccent)
+    .padding(15)
+    .echoGlass(tint: Color.white.opacity(0.06), clear: false, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  private func sectionTitle(_ title: String, icon: String) -> some View {
+    Label(title, systemImage: icon)
+      .font(.system(size: 15, weight: .bold, design: .rounded))
+      .foregroundColor(echoInk.opacity(0.78))
+  }
+
+  private func metric(_ title: String, value: String, detail: String) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
+      Text(title.uppercased())
+        .font(.system(size: 9, weight: .bold))
+        .foregroundColor(echoInk.opacity(0.45))
+      Text(value)
+        .font(.system(size: 13, weight: .bold, design: .rounded))
+        .lineLimit(2)
+        .minimumScaleFactor(0.75)
+      Text(detail)
+        .font(.system(size: 10, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.52))
+        .lineLimit(2)
+    }
+    .frame(maxWidth: .infinity, minHeight: 76, alignment: .topLeading)
+    .padding(11)
+    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  private func signalNode(index: String, icon: String, title: String, value: String, detail: String, provenance: String, nodeTone: Color) -> some View {
+    HStack(alignment: .top, spacing: 12) {
+      ZStack {
+        Circle().fill(nodeTone.opacity(0.14))
+        Image(systemName: icon)
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundColor(nodeTone)
+      }
+      .frame(width: 38, height: 38)
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 7) {
+          Text(index)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundColor(nodeTone)
+          Text(title)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(echoInk.opacity(0.55))
+          Spacer(minLength: 4)
+          provenanceMark(provenance)
+        }
+        Text(value)
+          .font(.system(size: 14, weight: .bold, design: .rounded))
+          .fixedSize(horizontal: false, vertical: true)
+        Text(detail)
+          .font(.system(size: 11, weight: .medium))
+          .foregroundColor(echoInk.opacity(0.58))
           .fixedSize(horizontal: false, vertical: true)
       }
       Spacer(minLength: 0)
     }
     .padding(14)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .echoGlass(tint: Color.white.opacity(0.07), clear: false, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  private func disclosureLabel(_ title: String, detail: String, icon: String) -> some View {
+    Label {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title).font(.system(size: 14, weight: .bold, design: .rounded))
+        Text(detail)
+          .font(.system(size: 10, weight: .medium))
+          .foregroundColor(echoInk.opacity(0.5))
+      }
+    } icon: {
+      Image(systemName: icon).foregroundColor(echoAccent)
+    }
+  }
+
+  private func provenanceMark(_ kind: String) -> some View {
+    Label(provenanceText(kind), systemImage: provenanceIcon(kind))
+      .font(.system(size: 9, weight: .bold))
+      .foregroundColor(provenanceColor(kind))
+      .lineLimit(1)
+      .minimumScaleFactor(0.72)
+  }
+
+  private func provenanceText(_ kind: String) -> String {
+    switch kind {
+    case "observed": return english ? "Observed" : "已观测"
+    case "reported": return english ? "Remote reported" : "远程上报"
+    default: return english ? "Unverified" : "无法验证"
+    }
+  }
+
+  private func provenanceIcon(_ kind: String) -> String {
+    switch kind {
+    case "observed": return "eye.fill"
+    case "reported": return "antenna.radiowaves.left.and.right"
+    default: return "questionmark.circle"
+    }
+  }
+
+  private func provenanceColor(_ kind: String) -> Color {
+    switch kind {
+    case "observed": return Color.green
+    case "reported": return echoGold
+    default: return echoInk.opacity(0.45)
+    }
+  }
+
+  private func formatObservedRate(_ rate: Double) -> String {
+    let khz = rate >= 1_000 ? rate / 1_000 : rate
+    return String(format: khz.rounded() == khz ? "%.0f kHz" : "%.1f kHz", khz)
+  }
+
+  private func insight(_ eyebrow: String, title: String, detail: String, advice: String, insightTone: Color) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
+      Text(eyebrow)
+        .font(.system(size: 9, weight: .bold))
+        .foregroundColor(insightTone)
+      Text(title).font(.system(size: 13, weight: .bold, design: .rounded))
+      Text(detail)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.62))
+      Text(advice)
+        .font(.system(size: 10, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.48))
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.leading, 10)
+    .overlay(alignment: .leading) {
+      Rectangle().fill(insightTone).frame(width: 3)
+    }
+  }
+
+  private func routeEvent(_ event: EchoNativeSignalRouteEvent) -> some View {
+    HStack(alignment: .top, spacing: 10) {
+      Circle()
+        .fill(routeTone(event.tone))
+        .frame(width: 8, height: 8)
+        .padding(.top, 6)
+      VStack(alignment: .leading, spacing: 3) {
+        HStack {
+          Text(event.title).font(.system(size: 12, weight: .bold))
+          Spacer()
+          Text(event.at, style: .relative)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundColor(echoInk.opacity(0.42))
+        }
+        Text(event.detail)
+          .font(.system(size: 10, weight: .medium))
+          .foregroundColor(echoInk.opacity(0.58))
+        Text(event.trackTitle)
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundColor(echoInk.opacity(0.42))
+          .lineLimit(1)
+      }
+    }
+    .padding(.vertical, 10)
+  }
+
+  private func routeTone(_ tone: String) -> Color {
+    switch tone {
+    case "danger": return echoAccent
+    case "process", "warning": return echoGold
+    case "good": return Color.green
+    default: return echoInk.opacity(0.4)
+    }
   }
 }
 
