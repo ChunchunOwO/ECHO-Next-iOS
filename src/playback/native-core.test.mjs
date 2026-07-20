@@ -23,11 +23,19 @@ test('the app boots the native core and keeps playback mutations ordered', async
   const titleStart = player.indexOf('private func title');
   const lyricsScrollerStart = player.indexOf('private func lyricsScroller');
   const lyricAccessibilityStart = player.indexOf('private func lyricAccessibilityLabel');
+  const collectionsStart = payload.indexOf('private func collectionsForCurrentView');
+  const artistNamesStart = payload.indexOf('private func artistNames');
+  const albumArtworkStart = store.indexOf('private func albumArtwork');
+  const normalizedMetadataStart = store.indexOf('private func normalizedMetadataValue');
 
   assert.ok(themedTabStart >= 0 && titleStart > themedTabStart);
   assert.ok(lyricsScrollerStart >= 0 && lyricAccessibilityStart > lyricsScrollerStart);
+  assert.ok(collectionsStart >= 0 && artistNamesStart > collectionsStart);
+  assert.ok(albumArtworkStart >= 0 && normalizedMetadataStart > albumArtworkStart);
   const themedTab = player.slice(themedTabStart, titleStart);
   const lyricsScroller = player.slice(lyricsScrollerStart, lyricAccessibilityStart);
+  const collectionsForCurrentView = payload.slice(collectionsStart, artistNamesStart);
+  const albumArtwork = store.slice(albumArtworkStart, normalizedMetadataStart);
 
   assert.match(nativeEntry, /<EchoNativeAppView/u);
   assert.doesNotMatch(nativeEntry, /migrationPayload === null/u);
@@ -54,11 +62,16 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(store, /if mode != \.streaming \{ addRecent\(track\) \}/u);
   assert.match(store, /streamingSearchStatus = errorMessage\(error\)/u);
   assert.match(store, /value\.hasPrefix\("MUSIC_U="\)/u);
-  assert.match(payload, /let collections = selectedTracks == nil && source != "all" && source != "streaming"/u);
+  assert.match(payload, /let showingCollections = selectedTracks == nil/u);
+  assert.match(payload, /if libraryCollectionsCacheKey == cacheKey \{[\s\S]*return libraryCollectionsCache/u);
+  assert.match(payload, /if cacheable, libraryTracksCacheKey == cacheKey \{ return libraryTracksCache \}/u);
+  assert.match(payload, /collectionTrackKeys\[id\]\?\.lazy\.compactMap\(track\(forKey:\)\)\.first/u);
   assert.match(payload, /option\("history", localized\("History", "历史"\)\)/u);
-  assert.match(payload, /for seed in exactOrder where visited\.insert\(seed\)\.inserted/u);
-  assert.match(payload, /if componentHasArtists, currentArtists\.isEmpty/u);
-  assert.match(payload, /func assign\(_ requiredIndex: Int, seen: inout Set<Int>\) -> Bool/u);
+  assert.match(collectionsForCurrentView, /let key = normalized\(title\)/u);
+  assert.match(collectionsForCurrentView, /formUnion\(trackArtistComparisonValues\(track\.artist\)\)/u);
+  assert.doesNotMatch(collectionsForCurrentView, /albumArtist/u);
+  assert.match(payload, /return Double\(matches\) \/ Double\(longestCount\)/u);
+  assert.doesNotMatch(albumArtwork, /albumArtist/u);
   assert.match(coreTypes, /recentTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.recentTracks\) \?\? \[\]/u);
   assert.match(coreTypes, /streamingQueueTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.streamingQueueTracks\) \?\? \[\]/u);
   assert.match(metadata, /guard !text\.isEmpty else \{ continue \}/u);
@@ -83,6 +96,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.equal((pages.match(/\.firstIndex\(of:/gu) ?? []).length, 6);
   assert.match(pages, /\.offset\(x: 11\)/u);
   assert.match(pages, /libraryTrackMenu\(track, labels: labels\)/u);
+  assert.doesNotMatch(pages, /contentAnimationKey/u);
   assert.doesNotMatch(pages, /\.searchable\(text: libraryQueryBinding/u);
   assert.match(remoteClients, /secureMediaUrl\(value\.avatarUrl\)/u);
   assert.match(remoteClients, /host == "music\.126\.net" \|\| host\.hasSuffix\("\.music\.126\.net"\)/u);

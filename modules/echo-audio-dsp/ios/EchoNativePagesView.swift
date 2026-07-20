@@ -625,7 +625,6 @@ struct EchoNativePagesScreen: View {
       && (selectedAlbumId.isEmpty || !selectedCollectionIsAlbum || albumTrackSort == "title")
       ? model.libraryIndexTargets
       : []
-    let contentAnimationKey = "\(library.paginationScope)::\(library.pagination.page)"
     return ScrollViewReader { proxy in
       ScrollView(showsIndicators: false) {
         LazyVStack(alignment: .leading, spacing: 14) {
@@ -1049,12 +1048,9 @@ struct EchoNativePagesScreen: View {
       .padding(.horizontal, 20)
       .padding(.top, 12)
       .padding(.bottom, 24)
-      .id(contentAnimationKey)
-      .transition(.opacity)
       }
       .refreshable { onAction(["action": "libraryRefresh"]) }
       .echoScrollClipDisabled()
-      .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: contentAnimationKey)
       .onChange(of: library.pagination.page) { _ in
         if let target = pendingLibraryIndexTarget, target.page == library.pagination.page {
           pendingLibraryIndexTarget = nil

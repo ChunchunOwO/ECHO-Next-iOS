@@ -111,15 +111,23 @@ extension EchoNativeAppStore {
     let source = searchOnly ? "all" : normalizedLibrarySource()
     let sourceTracks = tracksForLibrarySource(source)
     let selectedTracks = selectedCollectionId.isEmpty ? nil : collectionTrackKeys[selectedCollectionId]?.compactMap(track(forKey:))
-    let baseTracks = selectedTracks ?? filteredTracks(sourceTracks, source: source)
-    let collections = selectedTracks == nil && source != "all" && source != "streaming"
-      ? collectionsForCurrentView(baseTracks, source: source)
-      : []
-    let sortedTracks = libraryView == "recent" || (source == "streaming" && streamingLibraryMode == "history")
-      ? baseTracks
-      : sortLibraryTracks(baseTracks)
+    let showingCollections = selectedTracks == nil
+      && source != "all"
+      && source != "streaming"
+      && (libraryView == "albums" || libraryView == "artists")
+    let collections = showingCollections ? collectionsForCurrentView(sourceTracks, source: source) : []
+    if selectedTracks == nil && !showingCollections { collectionTrackKeys = [:] }
     let shouldShowTracks = selectedTracks != nil || libraryView == "songs" || libraryView == "favorites" || libraryView == "recent" || libraryView == "formats" || source == "all" || source == "streaming"
-    let fullTracks = shouldShowTracks ? sortedTracks : []
+    let fullTracks: [EchoNativeCoreTrack]
+    if let selectedTracks {
+      fullTracks = libraryView == "recent" || (source == "streaming" && streamingLibraryMode == "history")
+        ? selectedTracks
+        : sortLibraryTracks(selectedTracks)
+    } else if shouldShowTracks {
+      fullTracks = derivedLibraryTracks(sourceTracks, source: source)
+    } else {
+      fullTracks = []
+    }
     let allStreamingPlaylists = sortedStreamingPlaylists()
     let showingStreamingPlaylists = source == "streaming"
       && streamingLibraryMode == "playlists"
@@ -141,7 +149,7 @@ extension EchoNativeAppStore {
       ? pagedTracks
       : pagedCollections.compactMap { collection in
         guard let id = collection["id"] as? String else { return nil }
-        return collectionTrackKeys[id]?.compactMap(track(forKey:)).first
+        return collectionTrackKeys[id]?.lazy.compactMap(track(forKey:)).first
       }
     scheduleLibraryArtworkLookup(artworkLookupTracks)
     let indexTitles = showingStreamingPlaylists
@@ -250,80 +258,120 @@ extension EchoNativeAppStore {
     }
   }
 
-  private func collectionsForCurrentView(_ tracks: [EchoNativeCoreTrack], source: String) -> [[String: Any]] {
+  private func derivedLibraryTracks(_ tracks: [EchoNativeCoreTrack], source: String) -> [EchoNativeCoreTrack] {
+    let cacheable = selectedCollectionId.isEmpty
+      && (source == "local" || source == "echo" || source == "remote")
+      && libraryView != "favorites"
+      && libraryView != "recent"
+    let cacheKey = libraryCacheKey(source: source)
+    if cacheable, libraryTracksCacheKey == cacheKey { return libraryTracksCache }
+    let filtered = filteredTracks(tracks, source: source)
+    let values = libraryView == "recent" || (source == "streaming" && streamingLibraryMode == "history")
+      ? filtered
+      : sortLibraryTracks(filtered)
+    if cacheable {
+      libraryTracksCacheKey = cacheKey
+      libraryTracksCache = values
+    }
+    return values
+  }
+
+  private func libraryCacheKey(source: String) -> EchoNativeLibraryCollectionsCacheKey {
+    EchoNativeLibraryCollectionsCacheKey(
+      revision: libraryCollectionsRevision,
+      source: source,
+      view: libraryView,
+      filter: libraryFilter,
+      query: libraryQuery,
+      language: persistent.settings.language
+    )
+  }
+
+  private func collectionsForCurrentView(_ sourceTracks: [EchoNativeCoreTrack], source: String) -> [[String: Any]] {
     guard libraryView == "albums" || libraryView == "artists" else { collectionTrackKeys = [:]; return [] }
+    let cacheKey = libraryCacheKey(source: source)
+    if libraryCollectionsCacheKey == cacheKey {
+      collectionTrackKeys = libraryCollectionsCacheTrackKeys
+      return libraryCollectionsCache
+    }
+    let tracks = filteredTracks(sourceTracks, source: source)
     let albums = source == "echo" ? echoAlbums : source == "remote" ? powerampAlbums : []
-    var albumsByKey: [String: EchoNativeCoreAlbum] = [:]
     var albumsByTitle: [String: [EchoNativeCoreAlbum]] = [:]
     for album in albums {
-      albumsByKey["\(normalized(album.title))\u{0}\(albumArtistComparisonKey(album.albumArtist))"] = album
       albumsByTitle[normalized(album.title), default: []].append(album)
     }
     var groups: [String: [EchoNativeCoreTrack]] = [:]
     var groupTitles: [String: String] = [:]
-    var groupAlbumArtists: [String: String] = [:]
-    var groupOrder: [String] = []
+    var groupArtists: [String: Set<String>] = [:]
     for track in tracks {
       let fallback = localized("Unknown Artist", "未知艺术家")
       let titles = libraryView == "artists"
         ? artistNames(track.artist, fallback: fallback)
         : [track.album.isEmpty ? localized("Uncategorized", "未归类专辑") : track.album]
       for title in titles {
-        let disambiguator = libraryView == "albums" ? albumArtistComparisonKey(track.albumArtist) : ""
-        let key = "\(normalized(title))\u{0}\(disambiguator)"
-        let isNewGroup = groups[key] == nil
+        let key = normalized(title)
         groups[key, default: []].append(track)
-        if isNewGroup { groupOrder.append(key) }
-        if groupTitles[key] == nil { groupTitles[key] = title }
-        if groupAlbumArtists[key]?.isEmpty != false, !track.albumArtist.isEmpty {
-          groupAlbumArtists[key] = track.albumArtist
+        if let currentTitle = groupTitles[key] {
+          let order = title.localizedStandardCompare(currentTitle)
+          if order == .orderedAscending || (order == .orderedSame && title < currentTitle) {
+            groupTitles[key] = title
+          }
+        } else {
+          groupTitles[key] = title
+        }
+        if libraryView == "albums" {
+          groupArtists[key, default: []].formUnion(trackArtistComparisonValues(track.artist))
         }
       }
     }
+    var groupTitleKeys = groups.keys.reduce(into: [String: [String]]()) { $0[$1] = [$1] }
     if libraryView == "albums" {
       let exactGroups = groups
       let exactTitles = groupTitles
-      let exactAlbumArtists = groupAlbumArtists
-      let exactOrder = groupOrder.sorted { left, right in
-        let leftHasArtists = !albumArtistComparisonValues(exactAlbumArtists[left] ?? "").isEmpty
-        let rightHasArtists = !albumArtistComparisonValues(exactAlbumArtists[right] ?? "").isEmpty
-        return leftHasArtists == rightHasArtists ? left < right : leftHasArtists
+      let exactArtists = groupArtists.mapValues { $0.sorted() }
+      let exactOrder = exactGroups.keys.sorted()
+      var parent = Array(exactOrder.indices)
+      func root(_ index: Int) -> Int {
+        var value = index
+        while parent[value] != value { value = parent[value] }
+        var current = index
+        while parent[current] != current {
+          let next = parent[current]
+          parent[current] = value
+          current = next
+        }
+        return value
       }
-      var visited = Set<String>()
+      if exactOrder.count > 1 {
+        // ponytail: This pairwise scan runs only on cache misses; bucket titles if first-load profiling shows it matters.
+        for leftIndex in 0..<(exactOrder.count - 1) {
+          let leftKey = exactOrder[leftIndex]
+          for rightIndex in (leftIndex + 1)..<exactOrder.count {
+            let rightKey = exactOrder[rightIndex]
+            guard albumsMatch(
+              title: exactTitles[leftKey] ?? leftKey,
+              artists: exactArtists[leftKey] ?? [],
+              otherTitle: exactTitles[rightKey] ?? rightKey,
+              otherArtists: exactArtists[rightKey] ?? []
+            ) else { continue }
+            let leftRoot = root(leftIndex)
+            let rightRoot = root(rightIndex)
+            if leftRoot != rightRoot { parent[max(leftRoot, rightRoot)] = min(leftRoot, rightRoot) }
+          }
+        }
+      }
+      var components: [Int: [String]] = [:]
+      for index in exactOrder.indices {
+        components[root(index), default: []].append(exactOrder[index])
+      }
       groups = [:]
       groupTitles = [:]
-      groupAlbumArtists = [:]
-      // Connected variants make A, B, and A+B independent of their track order.
-      for seed in exactOrder where visited.insert(seed).inserted {
-        var component = [seed]
-        var cursor = 0
-        while cursor < component.count {
-          let current = component[cursor]
-          let currentArtists = albumArtistComparisonValues(exactAlbumArtists[current] ?? "")
-          let componentHasArtists = component.contains {
-            !albumArtistComparisonValues(exactAlbumArtists[$0] ?? "").isEmpty
-          }
-          if componentHasArtists, currentArtists.isEmpty {
-            cursor += 1
-            continue
-          }
-          for candidate in exactOrder where !visited.contains(candidate) {
-            guard let currentTitle = exactTitles[current], let candidateTitle = exactTitles[candidate] else { continue }
-            if albumsMatch(
-              title: currentTitle,
-              artist: exactAlbumArtists[current] ?? "",
-              otherTitle: candidateTitle,
-              otherArtist: exactAlbumArtists[candidate] ?? ""
-            ) {
-              visited.insert(candidate)
-              component.append(candidate)
-            }
-          }
-          cursor += 1
-        }
+      groupTitleKeys = [:]
+      for component in components.values.map({ $0.sorted() }).sorted(by: { $0[0] < $1[0] }) {
+        let seed = component[0]
         groups[seed] = component.flatMap { exactGroups[$0] ?? [] }
         groupTitles[seed] = exactTitles[seed]
-        groupAlbumArtists[seed] = component.compactMap { exactAlbumArtists[$0] }.first { !$0.isEmpty } ?? ""
+        groupTitleKeys[seed] = component
       }
     }
     var nextKeys: [String: [String]] = [:]
@@ -333,13 +381,11 @@ extension EchoNativeAppStore {
         ? localized("Unknown Artist", "未知艺术家")
         : localized("Uncategorized", "未归类专辑"))
       let sourcePrefix = values.allSatisfy { $0.source == first.source } ? first.source.rawValue : source
-      let albumArtist = groupAlbumArtists[key] ?? first.albumArtist
-      let exactAlbum = albumsByKey["\(normalized(title))\u{0}\(albumArtistComparisonKey(albumArtist))"]
-      let titleAlbums = albumsByTitle[normalized(title)] ?? []
-      let album = exactAlbum ?? (titleAlbums.count == 1 ? titleAlbums[0] : nil)
+      let matchingAlbums = (groupTitleKeys[key] ?? [normalized(title)]).flatMap { albumsByTitle[$0] ?? [] }
+      let album = matchingAlbums.first { $0.artworkUrl?.isEmpty == false } ?? matchingAlbums.first
       let id = libraryView == "artists"
         ? "\(sourcePrefix)-artist:\(normalized(title))"
-        : "\(sourcePrefix):album:\(normalized(title)):\(albumArtistComparisonKey(albumArtist))"
+        : "\(sourcePrefix):album:\(key)"
       nextKeys[id] = values.map { trackKey($0) }
       return [
         "artworkUrl": album?.artworkUrl ?? values.first(where: { $0.artworkUrl?.isEmpty == false })?.artworkUrl ?? "",
@@ -350,6 +396,9 @@ extension EchoNativeAppStore {
       ]
     }.sorted { ($0["title"] as? String ?? "").localizedStandardCompare($1["title"] as? String ?? "") == .orderedAscending }
     collectionTrackKeys = nextKeys
+    libraryCollectionsCacheKey = cacheKey
+    libraryCollectionsCache = values
+    libraryCollectionsCacheTrackKeys = nextKeys
     return values
   }
 
@@ -620,15 +669,18 @@ extension EchoNativeAppStore {
 
   private func albumsMatch(
     title: String,
-    artist: String,
+    artists: [String],
     otherTitle: String,
-    otherArtist: String
+    otherArtists: [String]
   ) -> Bool {
     guard textSimilarity(title, otherTitle) >= 0.9 else { return false }
-    let leftArtists = albumArtistComparisonValues(artist)
-    let rightArtists = albumArtistComparisonValues(otherArtist)
-    // A missing album artist cannot safely split compilation tracks by their song artist.
-    guard !leftArtists.isEmpty, !rightArtists.isEmpty else { return true }
+    return artistSetSimilarity(artists, otherArtists) >= 0.9
+  }
+
+  private func artistSetSimilarity(_ leftArtists: [String], _ rightArtists: [String]) -> Double {
+    guard !leftArtists.isEmpty, !rightArtists.isEmpty else { return 0 }
+    let longestCount = max(leftArtists.count, rightArtists.count)
+    guard Double(min(leftArtists.count, rightArtists.count)) / Double(longestCount) >= 0.9 else { return 0 }
     let requiredArtists = leftArtists.count <= rightArtists.count ? leftArtists : rightArtists
     let availableArtists = leftArtists.count <= rightArtists.count ? rightArtists : leftArtists
     var requiredByAvailable = Array<Int?>(repeating: nil, count: availableArtists.count)
@@ -642,14 +694,15 @@ extension EchoNativeAppStore {
       }
       return false
     }
+    var matches = 0
     for requiredIndex in requiredArtists.indices {
       var seen = Set<Int>()
-      guard assign(requiredIndex, seen: &seen) else { return false }
+      if assign(requiredIndex, seen: &seen) { matches += 1 }
     }
-    return true
+    return Double(matches) / Double(longestCount)
   }
 
-  private func albumArtistComparisonValues(_ value: String) -> [String] {
+  private func trackArtistComparisonValues(_ value: String) -> [String] {
     let names = value
       .replacingOccurrences(
         of: #"\s*(?:,|;|，|；|、|/|／|&|＆|\+|\||｜)\s*|\s+(?:feat\.?|ft\.?|featuring|x|×)\s+"#,
@@ -661,10 +714,6 @@ extension EchoNativeAppStore {
       .map(albumComparisonValue)
       .filter { !$0.isEmpty }))
       .sorted()
-  }
-
-  private func albumArtistComparisonKey(_ value: String) -> String {
-    albumArtistComparisonValues(value).joined(separator: "\u{1f}")
   }
 
   private func textSimilarity(_ leftValue: String, _ rightValue: String) -> Double {

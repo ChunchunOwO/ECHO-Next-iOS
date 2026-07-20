@@ -1,17 +1,26 @@
 import Foundation
 import UIKit
 
+struct EchoNativeLibraryCollectionsCacheKey: Equatable {
+  let revision: Int
+  let source: String
+  let view: String
+  let filter: String
+  let query: String
+  let language: String
+}
+
 @MainActor
 final class EchoNativeAppStore {
   let pagesModel = EchoNativePagesModel()
   let playerModel = EchoNativePlayerModel()
 
   var persistent = EchoNativePersistence.load()
-  var echoTracks: [EchoNativeCoreTrack] = []
-  var echoAlbums: [EchoNativeCoreAlbum] = []
-  var localTracks: [EchoNativeCoreTrack] = []
-  var powerampTracks: [EchoNativeCoreTrack] = []
-  var powerampAlbums: [EchoNativeCoreAlbum] = []
+  var echoTracks: [EchoNativeCoreTrack] = [] { didSet { libraryCollectionsRevision &+= 1 } }
+  var echoAlbums: [EchoNativeCoreAlbum] = [] { didSet { libraryCollectionsRevision &+= 1 } }
+  var localTracks: [EchoNativeCoreTrack] = [] { didSet { libraryCollectionsRevision &+= 1 } }
+  var powerampTracks: [EchoNativeCoreTrack] = [] { didSet { libraryCollectionsRevision &+= 1 } }
+  var powerampAlbums: [EchoNativeCoreAlbum] = [] { didSet { libraryCollectionsRevision &+= 1 } }
   var neteaseTracks: [EchoNativeCoreTrack] = []
   var neteaseSearchTracks: [EchoNativeCoreTrack] = []
   var neteasePlaylists: [EchoNativeNeteaseClient.Playlist] = []
@@ -52,6 +61,12 @@ final class EchoNativeAppStore {
     set { persistent.streamingPinnedPlaylistIds = newValue }
   }
   var collectionTrackKeys: [String: [String]] = [:]
+  var libraryCollectionsRevision = 0
+  var libraryCollectionsCacheKey: EchoNativeLibraryCollectionsCacheKey?
+  var libraryCollectionsCache: [[String: Any]] = []
+  var libraryCollectionsCacheTrackKeys: [String: [String]] = [:]
+  var libraryTracksCacheKey: EchoNativeLibraryCollectionsCacheKey?
+  var libraryTracksCache: [EchoNativeCoreTrack] = []
   var libraryIndexPayloadScope = ""
   var libraryIndexPayloadTitles: [String] = []
   weak var presenter: UIViewController?
@@ -2205,14 +2220,9 @@ final class EchoNativeAppStore {
     guard !track.album.isEmpty else { return nil }
     let albums = track.source == .echo ? echoAlbums : track.source == .remote ? powerampAlbums : []
     let title = normalizedMetadataValue(track.album)
-    let artist = normalizedMetadataValue(track.albumArtist.isEmpty ? track.artist : track.albumArtist)
-    if let exact = albums.first(where: {
-      normalizedMetadataValue($0.title) == title && normalizedMetadataValue($0.albumArtist) == artist
-    })?.artworkUrl {
-      return exact
-    }
-    let titleMatches = albums.filter { normalizedMetadataValue($0.title) == title }
-    return titleMatches.count == 1 ? titleMatches[0].artworkUrl : nil
+    return albums.first {
+      normalizedMetadataValue($0.title) == title && $0.artworkUrl?.isEmpty == false
+    }?.artworkUrl
   }
 
   private func normalizedMetadataValue(_ value: String) -> String {
