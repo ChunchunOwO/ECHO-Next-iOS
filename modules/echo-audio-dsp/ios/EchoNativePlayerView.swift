@@ -697,17 +697,33 @@ struct EchoNativePlayerScreen: View {
           .foregroundColor(echoInk)
           .lineLimit(2)
           .minimumScaleFactor(0.82)
-        Text(artistLabel)
-          .font(.system(size: 11, weight: .medium))
-          .foregroundColor(echoInk.opacity(0.56))
-          .lineLimit(1)
+        HStack(spacing: 5) {
+          Image(systemName: "rectangle.stack.fill")
+            .accessibilityHidden(true)
+          Text(albumLabel)
+            .lineLimit(1)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.56))
+        HStack(spacing: 5) {
+          Image(systemName: "person.fill")
+            .accessibilityHidden(true)
+          Text(artistLabel)
+            .lineLimit(1)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundColor(echoInk.opacity(0.56))
         if !model.tags.isEmpty {
-          Text(model.tags.joined(separator: "  ·  "))
-            .font(.system(size: 9, weight: .bold))
-            .foregroundColor(echoInk.opacity(0.62))
-            .lineLimit(compact ? 2 : 3)
-            .minimumScaleFactor(0.72)
-            .fixedSize(horizontal: false, vertical: true)
+          HStack(alignment: .top, spacing: 5) {
+            Image(systemName: "waveform")
+              .accessibilityHidden(true)
+            Text(model.tags.joined(separator: "  ·  "))
+              .lineLimit(compact ? 2 : 3)
+              .minimumScaleFactor(0.72)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          .font(.system(size: 9, weight: .bold))
+          .foregroundColor(echoInk.opacity(0.62))
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -798,12 +814,16 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var statusHeader: some View {
-    Text(albumLabel)
+    HStack(spacing: 6) {
+      Image(systemName: "rectangle.stack.fill")
+        .accessibilityHidden(true)
+      Text(albumLabel)
+        .lineLimit(1)
+    }
       .font(.system(size: 13, weight: .semibold))
       .foregroundColor(echoInk)
-      .lineLimit(1)
-    .multilineTextAlignment(.center)
-    .frame(maxWidth: .infinity, alignment: .center)
+      .multilineTextAlignment(.center)
+      .frame(maxWidth: .infinity, alignment: .center)
   }
 
   @ViewBuilder
@@ -866,16 +886,24 @@ struct EchoNativePlayerScreen: View {
         .lineLimit(compact ? 1 : 2)
         .minimumScaleFactor(0.8)
         .multilineTextAlignment(.center)
-      Text(artistLabel)
+      HStack(spacing: 5) {
+        Image(systemName: "person.fill")
+          .accessibilityHidden(true)
+        Text(artistLabel)
+          .lineLimit(1)
+      }
         .font(.system(size: 12, weight: .medium))
         .foregroundColor(echoInk.opacity(0.58))
-        .lineLimit(1)
       if !model.tags.isEmpty {
-        Text(model.tags.joined(separator: "  •  "))
+        HStack(spacing: 5) {
+          Image(systemName: "waveform")
+            .accessibilityHidden(true)
+          Text(model.tags.joined(separator: "  •  "))
+            .lineLimit(1)
+            .minimumScaleFactor(0.65)
+        }
           .font(.system(size: 10, weight: .semibold))
           .foregroundColor(echoInk.opacity(0.62))
-          .lineLimit(1)
-          .minimumScaleFactor(0.65)
           .multilineTextAlignment(.center)
           .frame(maxWidth: .infinity, alignment: .center)
       }

@@ -26,6 +26,10 @@ test('the app boots the native core and keeps playback mutations ordered', async
   const lyricsScrollerStart = player.indexOf('private func lyricsScroller');
   const lyricsHeader = player.slice(player.indexOf('private func lyricsHeader'), lyricsScrollerStart);
   const lyricAccessibilityStart = player.indexOf('private func lyricAccessibilityLabel');
+  const artworkStart = player.indexOf('private func artwork');
+  const statusHeader = player.slice(player.indexOf('private var statusHeader'), artworkStart);
+  const progressControlStart = player.indexOf('private var progressControl');
+  const trackDetails = player.slice(player.indexOf('private func trackDetails'), progressControlStart);
   const collectionsStart = payload.indexOf('private func collectionsForCurrentView');
   const artistNamesStart = payload.indexOf('private func artistNames');
   const albumArtworkStart = store.indexOf('private func albumArtwork');
@@ -147,8 +151,15 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(player, /Text\(albumLabel\)/u);
   assert.doesNotMatch(player, /Text\(model\.language == "en" \? "NOW PLAYING" : "正在播放"\)/u);
   assert.match(lyricsHeader, /let artworkSize: CGFloat = compact \? 76 : 96/u);
+  assert.ok(lyricsHeader.indexOf('Text(albumLabel)') < lyricsHeader.indexOf('Text(artistLabel)'));
+  assert.match(lyricsHeader, /Image\(systemName: "rectangle\.stack\.fill"\)/u);
+  assert.match(lyricsHeader, /Image\(systemName: "person\.fill"\)/u);
+  assert.match(lyricsHeader, /Image\(systemName: "waveform"\)/u);
   assert.match(lyricsHeader, /model\.tags\.joined\(separator: "  ·  "\)/u);
   assert.doesNotMatch(lyricsHeader, /Capsule/u);
+  assert.match(statusHeader, /Image\(systemName: "rectangle\.stack\.fill"\)/u);
+  assert.match(trackDetails, /Image\(systemName: "person\.fill"\)/u);
+  assert.match(trackDetails, /Image\(systemName: "waveform"\)/u);
   assert.match(player, /\.blur\(radius: 14, opaque: true\)/u);
   assert.match(player, /No song is playing/u);
   assert.match(player, /hostingController\.overrideUserInterfaceStyle = style/u);
