@@ -96,6 +96,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(payload, /case "duration": return tracks\.sorted/u);
   assert.match(payload, /private func sortLibraryCollections\(_ collections: \[\[String: Any\]\]\)/u);
   assert.match(payload, /guard librarySort != "default" else \{ return collections \}/u);
+  assert.match(payload, /return collections\.sorted \{ left, right in/u);
   assert.match(payload, /case "artist":[\s\S]*"sortArtist"[\s\S]*case "duration":[\s\S]*"sortDuration"/u);
   assert.match(payload, /collections\.map \{ \$0\["indexTitle"\]/u);
   assert.match(payload, /\(65\.\.\.90\)\.contains/u);

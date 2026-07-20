@@ -497,7 +497,7 @@ extension EchoNativeAppStore {
 
   private func sortLibraryCollections(_ collections: [[String: Any]]) -> [[String: Any]] {
     guard librarySort != "default" else { return collections }
-    collections.sorted { left, right in
+    return collections.sorted { left, right in
       let leftTitle = left["title"] as? String ?? ""
       let rightTitle = right["title"] as? String ?? ""
       switch librarySort {
