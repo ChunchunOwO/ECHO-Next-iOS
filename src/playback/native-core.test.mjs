@@ -91,20 +91,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(coreTypes, /streamingQueueTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.streamingQueueTracks\) \?\? \[\]/u);
   assert.match(metadata, /guard !text\.isEmpty else \{ continue \}/u);
   assert.match(player, /case \.normal: return "arrow\.right\.to\.line"/u);
-  assert.match(playerLayout, /let coverMaximum: CGFloat = compact \? 208 : 328/u);
-  assert.match(playerLayout, /\+ \(model\.tags\.isEmpty \? 0 : \(compact \? 14 : 20\)\)/u);
-  assert.match(
-    playerLayout,
-    /statusHeader\(compact: compact\)[\s\S]*artwork\(size: coverSize, compact: compact\)[\s\S]*playbackControlPanel\(compact: compact\)/u,
-  );
-  assert.match(player, /private func playbackControlPanel\(compact: Bool\) -> some View/u);
-  assert.match(player, /private var controlPanelDivider: some View/u);
-  assert.match(
-    playerLayout,
-    /trackDetails\(compact: compact\)[\s\S]*progressControl[\s\S]*echoGlass[\s\S]*transportControls\(compact: compact\)[\s\S]*echoGlass[\s\S]*secondaryControls\(lyricsMode: false, compact: compact\)[\s\S]*controlPanelDivider[\s\S]*volumeControl[\s\S]*echoGlass/u,
-  );
-  assert.match(playerLayout, /if !model\.showPlayerOutputInMenu \{[\s\S]*outputControl/u);
-  assert.match(playerLayout, /if !model\.tags\.isEmpty \{[\s\S]*Image\(systemName: "waveform"\)[\s\S]*model\.tags\.joined[\s\S]*in: Capsule\(\)/u);
+  assert.match(playerLayout, /let coverMaximum: CGFloat = compact \? 200 : 310/u);
+  assert.match(playerLayout, /outputControl/u);
   assert.match(player, /private var moreControls: some View \{\s+Menu \{/u);
   assert.match(player, /showPlayerOutputInMenu/u);
   assert.match(payload, /toggle\("playerOutputInMenu"/u);

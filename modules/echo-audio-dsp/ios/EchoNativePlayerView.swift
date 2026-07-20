@@ -611,108 +611,38 @@ struct EchoNativePlayerScreen: View {
   }
 
   private func playerLayout(geometry: GeometryProxy) -> some View {
-    let compact = geometry.size.height < 720
-    let coverScale: CGFloat = compact ? 0.31 : 0.40
-    let coverMinimum: CGFloat = compact ? 132 : 210
-    let coverMaximum: CGFloat = compact ? 208 : 328
-    let controlHeightAdjustment: CGFloat =
-      (model.showPlayerOutputInMenu ? 0 : (compact ? 28 : 36))
-      + (model.tags.isEmpty ? 0 : (compact ? 14 : 20))
+    let compact = geometry.size.height < 680
+    let coverScale: CGFloat = compact ? 0.34 : 0.40
+    let coverMinimum: CGFloat = compact ? 138 : 210
+    let coverMaximum: CGFloat = compact ? 200 : 310
     let coverSize = min(
-      geometry.size.width - 40,
-      max(coverMinimum, min(coverMaximum, geometry.size.height * coverScale - controlHeightAdjustment))
+      geometry.size.width - 48,
+      max(coverMinimum, min(coverMaximum, geometry.size.height * coverScale))
     )
 
-    return VStack(spacing: compact ? 8 : 12) {
-      statusHeader(compact: compact)
+    return VStack(spacing: 0) {
+      statusHeader
       artwork(size: coverSize, compact: compact)
-      playbackControlPanel(compact: compact)
+        .padding(.top, compact ? 6 : 10)
+      trackDetails(compact: compact)
+        .padding(.top, compact ? 7 : 12)
+      progressControl
+        .padding(.top, compact ? 7 : 12)
+      transportControls(compact: compact)
+        .padding(.top, compact ? 5 : 8)
+      secondaryControls(lyricsMode: false, compact: compact)
+        .padding(.top, compact ? 4 : 8)
+      volumeControl
+        .padding(.top, compact ? 3 : 6)
+      if !model.showPlayerOutputInMenu {
+        outputControl
+          .padding(.top, compact ? 4 : 8)
+      }
     }
     .padding(.horizontal, 16)
-    .padding(.vertical, compact ? 5 : 10)
-    .frame(maxWidth: 480)
+    .padding(.vertical, compact ? 6 : 12)
+    .frame(maxWidth: 460)
     .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
-  }
-
-  private func playbackControlPanel(compact: Bool) -> some View {
-    VStack(spacing: compact ? 7 : 10) {
-      VStack(spacing: compact ? 5 : 8) {
-        trackDetails(compact: compact)
-        progressControl
-          .padding(.horizontal, 2)
-      }
-      .padding(.horizontal, compact ? 12 : 15)
-      .padding(.vertical, compact ? 9 : 12)
-      .echoGlass(
-        tint: Color.white.opacity(0.09),
-        clear: false,
-        interactive: false,
-        in: RoundedRectangle(cornerRadius: compact ? 18 : 22, style: .continuous)
-      )
-
-      if !model.tags.isEmpty {
-        HStack(spacing: 6) {
-          Image(systemName: "waveform")
-            .foregroundColor(echoAccent)
-            .accessibilityHidden(true)
-          Text(model.tags.joined(separator: "  •  "))
-            .lineLimit(1)
-            .minimumScaleFactor(0.65)
-        }
-        .font(.system(size: compact ? 9 : 10, weight: .semibold))
-        .foregroundColor(echoInk.opacity(0.66))
-        .frame(maxWidth: .infinity, minHeight: compact ? 26 : 30)
-        .echoGlass(
-          tint: Color.white.opacity(0.08),
-          clear: false,
-          interactive: false,
-          in: Capsule()
-        )
-        .accessibilityElement(children: .combine)
-      }
-
-      transportControls(compact: compact)
-        .padding(.vertical, compact ? 4 : 7)
-        .frame(maxWidth: .infinity)
-        .echoGlass(
-          tint: Color.white.opacity(0.08),
-          clear: false,
-          interactive: false,
-          in: RoundedRectangle(cornerRadius: compact ? 28 : 34, style: .continuous)
-        )
-
-      VStack(spacing: 0) {
-        secondaryControls(lyricsMode: false, compact: compact)
-          .padding(.vertical, compact ? 2 : 4)
-
-        controlPanelDivider
-
-        volumeControl
-          .padding(.vertical, compact ? 3 : 5)
-
-        if !model.showPlayerOutputInMenu {
-          outputControl
-            .padding(.top, compact ? 3 : 5)
-            .padding(.bottom, compact ? 2 : 4)
-        }
-      }
-      .padding(.horizontal, compact ? 12 : 15)
-      .padding(.vertical, compact ? 2 : 4)
-      .echoGlass(
-        tint: Color.white.opacity(0.09),
-        clear: false,
-        interactive: false,
-        in: RoundedRectangle(cornerRadius: compact ? 18 : 22, style: .continuous)
-      )
-    }
-    .shadow(color: Color.black.opacity(0.08), radius: 14, y: 6)
-  }
-
-  private var controlPanelDivider: some View {
-    Rectangle()
-      .fill(echoInk.opacity(0.08))
-      .frame(height: 1)
-      .accessibilityHidden(true)
   }
 
   private func lyricsLayout(geometry: GeometryProxy) -> some View {
@@ -757,7 +687,6 @@ struct EchoNativePlayerScreen: View {
 
         if showsConnectionStatus {
           connectionStatus(compact: true)
-            .frame(width: artworkSize)
         }
       }
       .frame(width: artworkSize)
@@ -868,61 +797,48 @@ struct EchoNativePlayerScreen: View {
     }
   }
 
-  private func statusHeader(compact: Bool) -> some View {
-    HStack(spacing: compact ? 7 : 9) {
-      Image(systemName: "rectangle.stack.fill")
-        .font(.system(size: compact ? 11 : 12, weight: .semibold))
-        .foregroundColor(echoAccent)
-        .accessibilityHidden(true)
-      Text(albumLabel)
-        .font(.system(size: compact ? 12 : 13, weight: .semibold))
-        .foregroundColor(echoInk)
-        .lineLimit(1)
-        .minimumScaleFactor(0.78)
-      Spacer(minLength: 4)
-      if showsConnectionStatus {
-        connectionStatus(compact: true)
-      }
-    }
-    .padding(.leading, compact ? 11 : 13)
-    .padding(.trailing, compact ? 6 : 7)
-    .frame(maxWidth: .infinity, minHeight: compact ? 34 : 38)
-    .echoGlass(
-      tint: Color.white.opacity(0.08),
-      clear: false,
-      interactive: false,
-      in: RoundedRectangle(cornerRadius: compact ? 13 : 15, style: .continuous)
-    )
-    .accessibilityElement(children: .combine)
+  private var statusHeader: some View {
+    Text(albumLabel)
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundColor(echoInk)
+      .lineLimit(1)
+    .multilineTextAlignment(.center)
+    .frame(maxWidth: .infinity, alignment: .center)
   }
 
   @ViewBuilder
   private func artwork(size: CGFloat, compact: Bool) -> some View {
     let cornerRadius: CGFloat = compact ? 20 : 28
-    ZStack {
-      if model.showArtworkGlow {
-        RoundedRectangle(cornerRadius: 32, style: .continuous)
-          .fill(echoGold.opacity(0.22))
-          .frame(width: size * 0.94, height: size * 0.94)
-          .blur(radius: 30)
+    VStack(spacing: compact ? 4 : 6) {
+      ZStack {
+        if model.showArtworkGlow {
+          RoundedRectangle(cornerRadius: 32, style: .continuous)
+            .fill(echoGold.opacity(0.22))
+            .frame(width: size * 0.94, height: size * 0.94)
+            .blur(radius: 30)
+        }
+        EchoNativeArtwork(urlString: model.artworkUrl) {
+          onAction(["action": "artworkError", "url": model.artworkUrl])
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay {
+          RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(Color.white.opacity(0.58), lineWidth: 1)
+        }
+        if model.metadataLoading {
+          EchoNativeArtworkLoadingBadge(language: model.language, compact: compact)
+            .transition(.opacity)
+        }
       }
-      EchoNativeArtwork(urlString: model.artworkUrl) {
-        onAction(["action": "artworkError", "url": model.artworkUrl])
-      }
-      .frame(width: size, height: size)
-      .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-          .stroke(Color.white.opacity(0.58), lineWidth: 1)
-      }
-      if model.metadataLoading {
-        EchoNativeArtworkLoadingBadge(language: model.language, compact: compact)
-          .transition(.opacity)
+      .frame(height: size)
+      .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.metadataLoading)
+
+      if showsConnectionStatus {
+        connectionStatus(compact: compact)
       }
     }
-    .frame(width: size, height: size)
-    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.metadataLoading)
-    .shadow(color: Color.black.opacity(0.14), radius: compact ? 15 : 22, y: compact ? 7 : 11)
+    .frame(width: size)
   }
 
   private func connectionStatus(compact: Bool) -> some View {
@@ -937,7 +853,7 @@ struct EchoNativePlayerScreen: View {
         .minimumScaleFactor(0.72)
     }
     .padding(.horizontal, compact ? 7 : 9)
-    .frame(minHeight: compact ? 22 : 25)
+    .frame(maxWidth: .infinity, minHeight: compact ? 22 : 25)
     .echoGlass(tint: Color.white.opacity(0.12), interactive: false, in: Capsule())
     .accessibilityLabel(model.connectionLabel)
   }
@@ -954,6 +870,15 @@ struct EchoNativePlayerScreen: View {
         .font(.system(size: 12, weight: .medium))
         .foregroundColor(echoInk.opacity(0.58))
         .lineLimit(1)
+      if !model.tags.isEmpty {
+        Text(model.tags.joined(separator: "  •  "))
+          .font(.system(size: 10, weight: .semibold))
+          .foregroundColor(echoInk.opacity(0.62))
+          .lineLimit(1)
+          .minimumScaleFactor(0.65)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: .infinity, alignment: .center)
+      }
     }
   }
 
