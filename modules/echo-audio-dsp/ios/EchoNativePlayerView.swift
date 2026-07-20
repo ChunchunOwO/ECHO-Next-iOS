@@ -261,7 +261,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var lyricLines: [EchoNativeMetadataService.LyricLine] = []
   @Published var lyricsVisible = false
   @Published var metadataLoading = false
-  @Published var outputMode = "pc"
+  @Published var outputMode = "local"
   @Published var playbackMode = EchoNativePlaybackMode.normal
   @Published var playbackLoading = false
   @Published var queueCount = 0
@@ -556,28 +556,35 @@ struct EchoNativePlayerScreen: View {
   }
 
   private func playerLayout(geometry: GeometryProxy) -> some View {
-    let compact = geometry.size.height < 600
-    let spacing: CGFloat = compact ? 5 : 11
-    let coverScale: CGFloat = compact ? 0.24 : 0.32
-    let coverMinimum: CGFloat = compact ? 104 : 142
-    let coverMaximum: CGFloat = compact ? 138 : 232
+    let compact = geometry.size.height < 680
+    let coverScale: CGFloat = compact ? 0.34 : 0.40
+    let coverMinimum: CGFloat = compact ? 138 : 210
+    let coverMaximum: CGFloat = compact ? 200 : 310
     let coverSize = min(
-      geometry.size.width - 72,
+      geometry.size.width - 48,
       max(coverMinimum, min(coverMaximum, geometry.size.height * coverScale))
     )
 
-    return VStack(spacing: spacing) {
+    return VStack(spacing: 0) {
       statusHeader
       artwork(size: coverSize, compact: compact)
+        .padding(.top, compact ? 6 : 10)
       trackDetails(compact: compact)
+        .padding(.top, compact ? 7 : 12)
       progressControl
+        .padding(.top, compact ? 7 : 12)
       transportControls(compact: compact)
+        .padding(.top, compact ? 5 : 8)
       secondaryControls(lyricsMode: false, compact: compact)
+        .padding(.top, compact ? 4 : 8)
       volumeControl
+        .padding(.top, compact ? 3 : 6)
       outputControl
+        .padding(.top, compact ? 4 : 8)
     }
     .padding(.horizontal, 16)
-    .padding(.vertical, compact ? 8 : 12)
+    .padding(.vertical, compact ? 6 : 12)
+    .frame(maxWidth: 460)
     .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
   }
 
@@ -621,7 +628,9 @@ struct EchoNativePlayerScreen: View {
             .stroke(Color.white.opacity(0.58), lineWidth: 1)
         }
 
-        connectionStatus(compact: true)
+        if showsConnectionStatus {
+          connectionStatus(compact: true)
+        }
       }
       .frame(width: artworkSize)
 
@@ -736,7 +745,7 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var statusHeader: some View {
-    VStack(alignment: .leading, spacing: 2) {
+    VStack(spacing: 2) {
       Text(model.language == "en" ? "NOW PLAYING" : "正在播放")
         .font(.system(size: 10, weight: .bold))
         .foregroundColor(echoInk.opacity(0.48))
@@ -745,7 +754,8 @@ struct EchoNativePlayerScreen: View {
         .foregroundColor(echoInk)
         .lineLimit(1)
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
+    .multilineTextAlignment(.center)
+    .frame(maxWidth: .infinity, alignment: .center)
   }
 
   @ViewBuilder
@@ -776,7 +786,9 @@ struct EchoNativePlayerScreen: View {
       .frame(height: size)
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.metadataLoading)
 
-      connectionStatus(compact: compact)
+      if showsConnectionStatus {
+        connectionStatus(compact: compact)
+      }
     }
     .frame(width: size)
   }
@@ -811,19 +823,13 @@ struct EchoNativePlayerScreen: View {
         .foregroundColor(echoInk.opacity(0.58))
         .lineLimit(1)
       if !model.tags.isEmpty {
-        HStack(spacing: 5) {
-          ForEach(model.tags, id: \.self) { tag in
-            Text(tag)
-              .font(.system(size: 10, weight: .bold))
-              .foregroundColor(echoInk.opacity(0.72))
-              .lineLimit(1)
-              .minimumScaleFactor(0.7)
-              .padding(.horizontal, 6)
-              .frame(minHeight: 23)
-              .overlay(Capsule().stroke(echoInk.opacity(0.15), lineWidth: 1))
-          }
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
+        Text(model.tags.joined(separator: "  •  "))
+          .font(.system(size: 10, weight: .semibold))
+          .foregroundColor(echoInk.opacity(0.62))
+          .lineLimit(1)
+          .minimumScaleFactor(0.65)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: .infinity, alignment: .center)
       }
     }
   }
@@ -913,17 +919,6 @@ struct EchoNativePlayerScreen: View {
               .offset(x: 3, y: -3)
           }
         }
-        Button {
-          showEqualizer = true
-        } label: {
-          Text("EQ")
-            .font(.system(size: 12, weight: .bold))
-            .foregroundColor(echoInk)
-            .frame(width: 44, height: 44)
-            .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(model.language == "en" ? "Equalizer" : "均衡器")
         iconButton(
           symbol: model.isFavorite ? "heart.fill" : "heart",
           label: model.language == "en" ? (model.isFavorite ? "Remove favorite" : "Favorite") : (model.isFavorite ? "取消收藏" : "收藏"),
@@ -931,15 +926,7 @@ struct EchoNativePlayerScreen: View {
         ) {
           onAction(["action": "trackFavoriteCurrent"])
         }
-        iconButton(
-          symbol: "arrow.clockwise",
-          label: model.language == "en" ? "Refresh external metadata" : "重新获取外源数据",
-          active: false
-        ) {
-          onAction(["action": "externalMetadataRefresh"])
-        }
-        .disabled(model.metadataLoading)
-        .opacity(model.metadataLoading ? 0.42 : 1)
+        moreControls
       }
     }
   }
@@ -992,6 +979,32 @@ struct EchoNativePlayerScreen: View {
     }
   }
 
+  private var moreControls: some View {
+    Menu {
+      Button {
+        showEqualizer = true
+      } label: {
+        Label(model.language == "en" ? "Equalizer" : "均衡器", systemImage: "slider.horizontal.3")
+      }
+      Button {
+        onAction(["action": "externalMetadataRefresh"])
+      } label: {
+        Label(
+          model.language == "en" ? "Refresh external metadata" : "重新获取外源数据",
+          systemImage: "arrow.clockwise"
+        )
+      }
+      .disabled(model.metadataLoading)
+    } label: {
+      Image(systemName: "ellipsis")
+        .font(.system(size: 17, weight: .bold))
+        .foregroundColor(echoInk)
+        .frame(width: 44, height: 44)
+        .echoGlass(tint: Color.white.opacity(0.12), in: Circle())
+    }
+    .accessibilityLabel(model.language == "en" ? "More playback controls" : "更多播放控制")
+  }
+
   private var outputControl: some View {
     VStack(spacing: 7) {
       Picker("", selection: Binding(
@@ -1031,6 +1044,10 @@ struct EchoNativePlayerScreen: View {
     case "remoteControl", "remoteStream": return "remote"
     default: return "echo"
     }
+  }
+
+  private var showsConnectionStatus: Bool {
+    outputSource == "echo" || outputSource == "remote"
   }
 
   private func roundButton(symbol: String, label: String, size: CGFloat, action: @escaping () -> Void) -> some View {

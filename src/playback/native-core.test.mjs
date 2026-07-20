@@ -21,6 +21,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   const tick = store.slice(store.indexOf('private func tickPlayback()'), store.indexOf('private func updateEstimatedRemotePosition'));
   const themedTabStart = player.indexOf('private func themedTab');
   const titleStart = player.indexOf('private func title');
+  const playerLayoutStart = player.indexOf('private func playerLayout');
+  const lyricsLayoutStart = player.indexOf('private func lyricsLayout');
   const lyricsScrollerStart = player.indexOf('private func lyricsScroller');
   const lyricAccessibilityStart = player.indexOf('private func lyricAccessibilityLabel');
   const collectionsStart = payload.indexOf('private func collectionsForCurrentView');
@@ -35,6 +37,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.ok(collectionsStart >= 0 && artistNamesStart > collectionsStart);
   assert.ok(albumArtworkStart >= 0 && normalizedMetadataStart > albumArtworkStart);
   const themedTab = player.slice(themedTabStart, titleStart);
+  const playerLayout = player.slice(playerLayoutStart, lyricsLayoutStart);
   const lyricsScroller = player.slice(lyricsScrollerStart, lyricAccessibilityStart);
   const collectionsForCurrentView = payload.slice(collectionsStart, artistNamesStart);
   const albumArtwork = store.slice(albumArtworkStart, normalizedMetadataStart);
@@ -82,6 +85,14 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(coreTypes, /streamingQueueTracks = try values\.decodeIfPresent\(\[EchoNativeCoreTrack\]\.self, forKey: \.streamingQueueTracks\) \?\? \[\]/u);
   assert.match(metadata, /guard !text\.isEmpty else \{ continue \}/u);
   assert.match(player, /case \.normal: return "arrow\.right\.to\.line"/u);
+  assert.match(playerLayout, /let coverMaximum: CGFloat = compact \? 200 : 310/u);
+  assert.match(playerLayout, /outputControl/u);
+  assert.match(player, /private var moreControls: some View \{\s+Menu \{/u);
+  assert.match(player, /private var showsConnectionStatus: Bool \{\s+outputSource == "echo" \|\| outputSource == "remote"/u);
+  assert.match(player, /@Published var outputMode = "local"/u);
+  assert.match(player, /model\.tags\.joined\(separator:/u);
+  assert.match(player, /private var outputControl: some View/u);
+  assert.doesNotMatch(player, /Label\(model\.language == "en" \? "Playback output" : "播放输出", systemImage: "airplayaudio"\)/u);
   assert.match(player, /Text\(albumLabel\)/u);
   assert.match(player, /No song is playing/u);
   assert.match(player, /hostingController\.overrideUserInterfaceStyle = style/u);
