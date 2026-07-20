@@ -292,7 +292,7 @@ final class EchoNativePlayerModel: ObservableObject {
   @Published var queueCount = 0
   @Published var queuePayload: EchoNativeQueuePayload?
   @Published var showArtworkGlow = true
-  @Published var showPlayerOutputInMenu = false
+  @Published var showPlayerOutputInMenu = true
   @Published var signalBitDepth = ""
   @Published var signalBitrate = ""
   @Published var signalChannelCount = ""
@@ -664,7 +664,7 @@ struct EchoNativePlayerScreen: View {
   }
 
   private func lyricsHeader(compact: Bool) -> some View {
-    let artworkSize: CGFloat = compact ? 68 : 84
+    let artworkSize: CGFloat = compact ? 76 : 96
 
     return HStack(alignment: .top, spacing: 12) {
       VStack(spacing: 5) {
@@ -701,17 +701,13 @@ struct EchoNativePlayerScreen: View {
           .font(.system(size: 11, weight: .medium))
           .foregroundColor(echoInk.opacity(0.56))
           .lineLimit(1)
-        HStack(spacing: 5) {
-          ForEach(Array(model.tags.prefix(compact ? 2 : 3)), id: \.self) { tag in
-            Text(tag)
-              .font(.system(size: 9, weight: .bold))
-              .foregroundColor(echoInk.opacity(0.68))
-              .lineLimit(1)
-              .minimumScaleFactor(0.7)
-              .padding(.horizontal, 6)
-              .frame(height: 20)
-              .overlay(Capsule().stroke(echoInk.opacity(0.14), lineWidth: 1))
-          }
+        if !model.tags.isEmpty {
+          Text(model.tags.joined(separator: "  ·  "))
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(echoInk.opacity(0.62))
+            .lineLimit(compact ? 2 : 3)
+            .minimumScaleFactor(0.72)
+            .fixedSize(horizontal: false, vertical: true)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -802,15 +798,10 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var statusHeader: some View {
-    VStack(spacing: 2) {
-      Text(model.language == "en" ? "NOW PLAYING" : "正在播放")
-        .font(.system(size: 10, weight: .bold))
-        .foregroundColor(echoInk.opacity(0.48))
-      Text(albumLabel)
-        .font(.system(size: 13, weight: .semibold))
-        .foregroundColor(echoInk)
-        .lineLimit(1)
-    }
+    Text(albumLabel)
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundColor(echoInk)
+      .lineLimit(1)
     .multilineTextAlignment(.center)
     .frame(maxWidth: .infinity, alignment: .center)
   }
@@ -976,13 +967,6 @@ struct EchoNativePlayerScreen: View {
               .offset(x: 3, y: -3)
           }
         }
-        iconButton(
-          symbol: model.isFavorite ? "heart.fill" : "heart",
-          label: model.language == "en" ? (model.isFavorite ? "Remove favorite" : "Favorite") : (model.isFavorite ? "取消收藏" : "收藏"),
-          active: model.isFavorite
-        ) {
-          onAction(["action": "trackFavoriteCurrent"])
-        }
         moreControls
       }
     }
@@ -1038,6 +1022,15 @@ struct EchoNativePlayerScreen: View {
 
   private var moreControls: some View {
     Menu {
+      Button {
+        onAction(["action": "trackFavoriteCurrent"])
+      } label: {
+        Label(
+          model.language == "en" ? (model.isFavorite ? "Remove favorite" : "Favorite") : (model.isFavorite ? "取消收藏" : "收藏"),
+          systemImage: model.isFavorite ? "heart.fill" : "heart"
+        )
+      }
+      .disabled(!model.controlsEnabled)
       Button {
         showSignalPath = true
       } label: {
@@ -1096,35 +1089,53 @@ struct EchoNativePlayerScreen: View {
   }
 
   private var outputControl: some View {
-    VStack(spacing: 7) {
-      Picker("", selection: Binding(
-        get: { outputSource },
-        set: { onAction(["action": "outputSource", "mode": $0]) }
-      )) {
-        Text(model.language == "en" ? "Local" : "本地").tag("local")
-        Text(model.language == "en" ? "Media" : "流媒体").tag("streaming")
-        Text("ECHO").tag("echo")
-        Text(model.language == "en" ? "Remote" : "远程").tag("remote")
-      }
-      .pickerStyle(.segmented)
-
+    Group {
       if outputSource == "echo" || outputSource == "remote" {
-        Picker("", selection: Binding(
-          get: { model.outputMode },
-          set: { onAction(["action": "output", "mode": $0]) }
-        )) {
-          Text(model.language == "en" ? "Control" : "控制")
-            .tag(outputSource == "echo" ? "pc" : "remoteControl")
-          Text(model.language == "en" ? "Stream" : "串流")
-            .tag(outputSource == "echo" ? "phone" : "remoteStream")
+        GeometryReader { geometry in
+          HStack(spacing: 8) {
+            outputSourcePicker
+              .frame(width: max(0, geometry.size.width * 0.62 - 4))
+            outputModePicker
+          }
         }
-        .pickerStyle(.segmented)
-        .transition(.opacity.combined(with: .move(edge: .top)))
+        .frame(height: 32)
+      } else {
+        outputSourcePicker
+          .frame(height: 32)
       }
     }
+    .controlSize(.small)
     .tint(echoAccent)
     .accessibilityLabel(model.language == "en" ? "Playback output" : "播放输出")
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: outputSource)
+  }
+
+  private var outputSourcePicker: some View {
+    Picker("", selection: Binding(
+      get: { outputSource },
+      set: { onAction(["action": "outputSource", "mode": $0]) }
+    )) {
+      Text(model.language == "en" ? "Local" : "本地").tag("local")
+      Text(model.language == "en" ? "Media" : "流媒").tag("streaming")
+      Text("ECHO").tag("echo")
+      Text(model.language == "en" ? "Remote" : "远程").tag("remote")
+    }
+    .pickerStyle(.segmented)
+    .frame(maxWidth: .infinity)
+  }
+
+  private var outputModePicker: some View {
+    Picker("", selection: Binding(
+      get: { model.outputMode },
+      set: { onAction(["action": "output", "mode": $0]) }
+    )) {
+      Text(model.language == "en" ? "Control" : "控制")
+        .tag(outputSource == "echo" ? "pc" : "remoteControl")
+      Text(model.language == "en" ? "Stream" : "串流")
+        .tag(outputSource == "echo" ? "phone" : "remoteStream")
+    }
+    .pickerStyle(.segmented)
+    .frame(maxWidth: .infinity)
   }
 
   private var outputSource: String {
@@ -1369,7 +1380,7 @@ private struct EchoNativeArtworkBackdrop: View {
     .scaledToFill()
     .scaleEffect(1.06)
     .saturation(1.04)
-    .blur(radius: 18, opaque: true)
+    .blur(radius: 14, opaque: true)
     .clipped()
   }
 }
@@ -1991,6 +2002,7 @@ private struct EchoNativeSignalPathSheet: View {
   @ObservedObject var model: EchoNativePlayerModel
   let onAction: ([String: Any]) -> Void
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var dacAtlasExpanded = false
   @State private var doctorExpanded = false
   @State private var flightRecorderExpanded = false
@@ -2085,13 +2097,15 @@ private struct EchoNativeSignalPathSheet: View {
   private var decodeValue: String {
     if !hasTrack { return english ? "Waiting" : "等待中" }
     if !usesLocalProcessing { return english ? "Remote decoder" : "远程解码器" }
-    if model.signalFileLoaded { return "AVAudioFile → PCM" }
+    if model.signalFileLoaded { return "AVAudioFile → PCM · \(resamplingLabel(decoderResampling))" }
     return english ? "Preparing decoder" : "正在准备解码器"
   }
 
   private var decodeDetail: String {
     if !usesLocalProcessing {
-      return english ? "Decoder details are owned by the remote endpoint." : "解码器详情由远程端提供。"
+      return english
+        ? "Decoder details are owned by the remote endpoint. · Resampling unverified"
+        : "解码器详情由远程端提供。 · 重采样无法验证"
     }
     let sourceRate = model.signalSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
     let engineRate = model.signalEngineSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2105,6 +2119,7 @@ private struct EchoNativeSignalPathSheet: View {
     parts.append(model.signalEngineRunning
       ? (english ? "Engine running" : "引擎运行中")
       : (english ? "Engine idle" : "引擎空闲"))
+    parts.append(resamplingLabel(decoderResampling))
     return parts.joined(separator: " · ")
   }
 
@@ -2187,6 +2202,29 @@ private struct EchoNativeSignalPathSheet: View {
       rates.append(rate)
     }
     return rates.isEmpty ? (english ? "Unknown" : "未知") : rates.joined(separator: " → ")
+  }
+
+  private var decoderResampling: Bool? {
+    let source = model.signalSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    let engine = model.signalEngineSampleRate.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !source.isEmpty, !engine.isEmpty else { return nil }
+    return source != engine
+  }
+
+  private var clockResampling: Bool? {
+    let rates = [model.signalSampleRate, model.signalEngineSampleRate, model.signalDeviceSampleRate]
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    guard rates.count > 1 else { return nil }
+    return Set(rates).count > 1
+  }
+
+  private func resamplingLabel(_ active: Bool?) -> String {
+    switch active {
+    case true: return english ? "Resampling: active" : "重采样：启用"
+    case false: return english ? "Resampling: bypassed" : "重采样：旁路"
+    case nil: return english ? "Resampling: unverified" : "重采样：无法验证"
+    }
   }
 
   var body: some View {
@@ -2284,7 +2322,7 @@ private struct EchoNativeSignalPathSheet: View {
         metric(english ? "Source" : "音源", value: model.signalSourceLabel.isEmpty ? (english ? "Unknown" : "未知") : model.signalSourceLabel, detail: sourceSpec)
         metric(english ? "Processing" : "处理", value: processingDetail, detail: usesLocalProcessing ? "AVAudioEngine" : (english ? "Remote endpoint" : "远程端"))
         metric(english ? "Output" : "输出", value: outputTitle, detail: model.signalDeviceName.isEmpty ? (english ? "Unknown device" : "未知设备") : model.signalDeviceName)
-        metric(english ? "Clock" : "时钟", value: clockValue, detail: usesLocalProcessing ? (english ? "Source → engine → device" : "音源 → 引擎 → 设备") : (english ? "Reported source rate" : "已报告音源采样率"))
+        metric(english ? "Clock" : "时钟", value: clockValue, detail: resamplingLabel(clockResampling))
       }
     }
   }
@@ -2292,10 +2330,15 @@ private struct EchoNativeSignalPathSheet: View {
   private var signalChain: some View {
     VStack(alignment: .leading, spacing: 12) {
       sectionTitle(english ? "Full chain" : "完整链路", icon: "point.3.connected.trianglepath.dotted")
-      signalNode(index: "01", icon: "externaldrive.fill", title: english ? "Source" : "音源", value: model.signalSourceLabel.isEmpty ? (english ? "Unknown source" : "未知音源") : model.signalSourceLabel, detail: sourceDetail, provenance: sourceProvenance, nodeTone: hasTrack ? Color.green : echoInk.opacity(0.4))
-      signalNode(index: "02", icon: "cpu", title: english ? "Decode" : "解码", value: decodeValue, detail: decodeDetail, provenance: usesLocalProcessing ? model.signalTelemetrySource : (model.signalTelemetrySource == "reported" ? "reported" : "unverified"), nodeTone: model.signalFileLoaded || !usesLocalProcessing ? Color.green : echoGold)
-      signalNode(index: "03", icon: processingModules.isEmpty ? "checkmark.shield.fill" : "slider.horizontal.3", title: english ? "Process" : "处理", value: processingDetail, detail: usesLocalProcessing ? (english ? "Local DSP chain" : "本机 DSP 链") : (english ? "External processing" : "外部处理"), provenance: usesLocalProcessing ? model.signalTelemetrySource : "unverified", nodeTone: processingModules.isEmpty ? Color.green : echoGold)
-      signalNode(index: "04", icon: "hifispeaker.fill", title: english ? "Output" : "输出", value: outputTitle, detail: outputDetail, provenance: model.signalTelemetrySource, nodeTone: pathOnline ? Color.green : echoAccent)
+      VStack(spacing: 0) {
+        signalNode(index: "01", icon: "externaldrive.fill", title: english ? "Source" : "音源", value: model.signalSourceLabel.isEmpty ? (english ? "Unknown source" : "未知音源") : model.signalSourceLabel, detail: sourceDetail, provenance: sourceProvenance, nodeTone: hasTrack ? Color.green : echoInk.opacity(0.4))
+        signalConnector(step: 0)
+        signalNode(index: "02", icon: "cpu", title: english ? "Decode" : "解码", value: decodeValue, detail: decodeDetail, provenance: usesLocalProcessing ? model.signalTelemetrySource : (model.signalTelemetrySource == "reported" ? "reported" : "unverified"), nodeTone: model.signalFileLoaded || !usesLocalProcessing ? Color.green : echoGold)
+        signalConnector(step: 1)
+        signalNode(index: "03", icon: processingModules.isEmpty ? "checkmark.shield.fill" : "slider.horizontal.3", title: english ? "Process" : "处理", value: processingDetail, detail: usesLocalProcessing ? (english ? "Local DSP chain" : "本机 DSP 链") : (english ? "External processing" : "外部处理"), provenance: usesLocalProcessing ? model.signalTelemetrySource : "unverified", nodeTone: processingModules.isEmpty ? Color.green : echoGold)
+        signalConnector(step: 2)
+        signalNode(index: "04", icon: "hifispeaker.fill", title: english ? "Output" : "输出", value: outputTitle, detail: outputDetail, provenance: model.signalTelemetrySource, nodeTone: pathOnline ? Color.green : echoAccent)
+      }
     }
   }
 
@@ -2491,6 +2534,35 @@ private struct EchoNativeSignalPathSheet: View {
     .padding(14)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  private func signalConnector(step: Int) -> some View {
+    HStack {
+      ZStack {
+        Capsule()
+          .fill(tone.opacity(0.24))
+          .frame(width: 2, height: 28)
+        Image(systemName: "chevron.down")
+          .font(.system(size: 7, weight: .bold))
+          .foregroundColor(tone.opacity(0.62))
+          .offset(y: 10)
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { context in
+          let cycle = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.4)
+          let progress = (cycle - Double(step) * 0.52) / 0.52
+          let active = progress >= 0 && progress <= 1
+          Circle()
+            .fill(tone)
+            .frame(width: 7, height: 7)
+            .shadow(color: tone.opacity(0.45), radius: 4)
+            .opacity(active && !reduceMotion ? sin(progress * .pi) : 0)
+            .offset(y: CGFloat(min(1, max(0, progress)) * 20 - 10))
+        }
+      }
+      .frame(width: 38, height: 28)
+      Spacer(minLength: 0)
+    }
+    .padding(.leading, 14)
+    .accessibilityHidden(true)
   }
 
   private func disclosureLabel(_ title: String, detail: String, icon: String) -> some View {

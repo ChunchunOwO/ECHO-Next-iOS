@@ -24,6 +24,7 @@ test('the app boots the native core and keeps playback mutations ordered', async
   const playerLayoutStart = player.indexOf('private func playerLayout');
   const lyricsLayoutStart = player.indexOf('private func lyricsLayout');
   const lyricsScrollerStart = player.indexOf('private func lyricsScroller');
+  const lyricsHeader = player.slice(player.indexOf('private func lyricsHeader'), lyricsScrollerStart);
   const lyricAccessibilityStart = player.indexOf('private func lyricAccessibilityLabel');
   const collectionsStart = payload.indexOf('private func collectionsForCurrentView');
   const artistNamesStart = payload.indexOf('private func artistNames');
@@ -95,7 +96,8 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(player, /private var moreControls: some View \{\s+Menu \{/u);
   assert.match(player, /showPlayerOutputInMenu/u);
   assert.match(payload, /toggle\("playerOutputInMenu"/u);
-  assert.match(coreTypes, /var showPlayerOutputInMenu = false/u);
+  assert.match(coreTypes, /var showPlayerOutputInMenu = true/u);
+  assert.match(coreTypes, /showPlayerOutputInMenu = try values\.decodeIfPresent\(Bool\.self, forKey: \.showPlayerOutputInMenu\) \?\? true/u);
   assert.match(player, /Label\(model\.language == "en" \? "Signal path" : "信号路径"/u);
   assert.match(player, /EchoNativeSignalPathSheet\(model: model, onAction: onAction\)[\s\S]*?\.echoMediumSheet\(\)/u);
   assert.match(player, /struct EchoNativeSignalPathSheet/u);
@@ -115,6 +117,10 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(store, /recordDacObservation\(_ status: DspPlaybackStatus\)/u);
   assert.match(store, /case "signalPathVisible"/u);
   assert.match(player, /"action": "signalPathVisible"/u);
+  assert.match(player, /private func signalConnector\(step: Int\)/u);
+  assert.equal((player.match(/signalConnector\(step:/gu) ?? []).length, 4);
+  assert.match(player, /TimelineView\(\.animation\(minimumInterval: 1\.0 \/ 30\.0, paused: reduceMotion\)\)/u);
+  assert.match(player, /Resampling: active/u);
   assert.match(coreTypes, /struct AudioTelemetry: Decodable, Sendable/u);
   assert.match(engine, /let channelCount: Int/u);
   assert.match(engine, /let deviceSampleRate: Double/u);
@@ -127,8 +133,15 @@ test('the app boots the native core and keeps playback mutations ordered', async
   assert.match(player, /@Published var outputMode = "local"/u);
   assert.match(player, /model\.tags\.joined\(separator:/u);
   assert.match(player, /private var outputControl: some View/u);
+  assert.match(player, /GeometryReader \{ geometry in[\s\S]*outputSourcePicker[\s\S]*outputModePicker/u);
+  assert.equal((player.match(/"action": "trackFavoriteCurrent"/gu) ?? []).length, 1);
   assert.doesNotMatch(player, /Label\(model\.language == "en" \? "Playback output" : "播放输出", systemImage: "airplayaudio"\)/u);
   assert.match(player, /Text\(albumLabel\)/u);
+  assert.doesNotMatch(player, /Text\(model\.language == "en" \? "NOW PLAYING" : "正在播放"\)/u);
+  assert.match(lyricsHeader, /let artworkSize: CGFloat = compact \? 76 : 96/u);
+  assert.match(lyricsHeader, /model\.tags\.joined\(separator: "  ·  "\)/u);
+  assert.doesNotMatch(lyricsHeader, /Capsule/u);
+  assert.match(player, /\.blur\(radius: 14, opaque: true\)/u);
   assert.match(player, /No song is playing/u);
   assert.match(player, /hostingController\.overrideUserInterfaceStyle = style/u);
   assert.match(player, /@Published var lyricLines:/u);
